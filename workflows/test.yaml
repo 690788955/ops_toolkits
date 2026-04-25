@@ -1,0 +1,62 @@
+id: test
+name: test
+description: test
+version: 1.0.0
+category: demo
+parameters: []
+nodes:
+  - id: demo_hello_1
+    name: Hello Demo
+    tool: demo.hello
+    depends_on: []
+    params:
+      message: Hello
+      name: World11
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+  - id: demo_hello_2
+    name: Hello Demo
+    tool: demo.hello
+    depends_on: []
+    params:
+      message: Hello
+      name: World22
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+  - id: demo_hello_3
+    name: 问候演示
+    tool: demo.hello
+    depends_on: []
+    params:
+      message: Hello
+      name: World
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+  - id: demo_hello_4
+    name: 问候演示
+    tool: demo.hello
+    depends_on: []
+    params:
+      message: Hello
+      name: World
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+edges:
+  - from: demo_hello_1
+    to: demo_hello_2
+  - from: demo_hello_2
+    to: demo_hello_3
+  - from: demo_hello_2
+    to: demo_hello_4
+steps: []
+confirm:
+  required: false
+  message: ""

@@ -1,0 +1,33 @@
+app:
+  name: Shell 运维框架
+  description: 演示用 YAML 驱动运维自动化框架
+  version: 0.1.0
+
+paths:
+  tools:
+    - tools
+  workflows:
+    - workflows
+  runs: runs
+  logs: runs/logs
+
+server:
+  enabled: true
+  host: 0.0.0.0
+  port: 8080
+
+menu:
+  categories:
+    - id: demo
+      name: 演示
+      description: 演示工具和工作流
+
+registry:
+  include_tools:
+    - demo.*
+  include_workflows:
+    - demo.*
+
+ui:
+  enabled: true
+  title: 运维工作流控制台
