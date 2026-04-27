@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,6 +93,9 @@ func runCommand(opts *options) *cobra.Command {
 		if err != nil {
 			return err
 		}
+		if err := config.PromptConfirmation(tool.Config.Confirm, os.Stdin, cmd.OutOrStdout()); err != nil {
+			return err
+		}
 		record, err := runner.New(reg).RunTool(context.Background(), args[0], params, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		if record != nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "\nrun_id=%s status=%s\n", record.ID, record.Status)
@@ -111,7 +115,14 @@ func runCommand(opts *options) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		record, err := runner.New(reg).RunWorkflow(context.Background(), args[0], params, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		if err := config.PromptConfirmation(wf.Config.Confirm, os.Stdin, cmd.OutOrStdout()); err != nil {
+			return err
+		}
+		confirmed, err := confirmWorkflowTools(reg, wf.Config, os.Stdin, cmd.OutOrStdout())
+		if err != nil {
+			return err
+		}
+		record, err := runner.New(reg).RunWorkflowWithConfirmation(context.Background(), args[0], params, confirmed, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		if record != nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "\nrun_id=%s status=%s\n", record.ID, record.Status)
 		}
@@ -241,6 +252,24 @@ func packageCommand(opts *options) *cobra.Command {
 		return err
 	}})
 	return cmd
+}
+
+func confirmWorkflowTools(reg *registry.Registry, wf *config.WorkflowConfig, in io.Reader, out io.Writer) (bool, error) {
+	confirmed := false
+	for _, node := range wf.Nodes {
+		tool, err := reg.Tool(node.Tool)
+		if err != nil {
+			return false, err
+		}
+		if !tool.Config.Confirm.Required || node.Confirm {
+			continue
+		}
+		if err := config.PromptConfirmation(tool.Config.Confirm, in, out); err != nil {
+			return false, err
+		}
+		confirmed = true
+	}
+	return confirmed, nil
 }
 
 func loadRegistry(opts *options) (*registry.Registry, error) {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -178,18 +179,23 @@ type catalogResponse struct {
 
 type toolCatalogEntry struct {
 	config.ToolEntry
-	Tags       []string           `json:"tags"`
-	Parameters []config.Parameter `json:"parameters"`
+	Tags       []string            `json:"tags"`
+	Parameters []config.Parameter  `json:"parameters"`
+	Confirm    config.Confirmation `json:"confirm"`
+	Source     registry.Source     `json:"source"`
 }
 
 type workflowCatalogEntry struct {
 	config.WorkflowRef
-	Tags       []string           `json:"tags"`
-	Parameters []config.Parameter `json:"parameters"`
+	Tags       []string            `json:"tags"`
+	Parameters []config.Parameter  `json:"parameters"`
+	Confirm    config.Confirmation `json:"confirm"`
+	Source     registry.Source     `json:"source"`
 }
 
 type runRequest struct {
-	Params map[string]string `json:"params"`
+	Params  map[string]string `json:"params"`
+	Confirm bool              `json:"confirm"`
 }
 
 type workflowSaveRequest struct {
@@ -286,6 +292,10 @@ func toolsHandler(reg *registry.Registry, r *runner.Runner) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 			return
 		}
+		if tool.Config.Confirm.Required && !reqBody.Confirm {
+			writeJSON(w, http.StatusBadRequest, response{Error: "该工具需要确认后执行"})
+			return
+		}
 		record, err := r.RunTool(context.Background(), id, params, io.Discard, io.Discard)
 		writeRunResponse(w, record, err)
 	}
@@ -352,8 +362,29 @@ func handleWorkflowRun(w http.ResponseWriter, req *http.Request, reg *registry.R
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 		return
 	}
-	record, err := r.RunWorkflow(context.Background(), id, params, io.Discard, io.Discard)
+	if wf.Config.Confirm.Required && !reqBody.Confirm {
+		writeJSON(w, http.StatusBadRequest, response{Error: "该工作流需要确认后执行"})
+		return
+	}
+	if err := confirmWorkflowTools(reg, wf.Config, reqBody.Confirm); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	record, err := r.RunWorkflowWithConfirmation(context.Background(), id, params, reqBody.Confirm, io.Discard, io.Discard)
 	writeRunResponse(w, record, err)
+}
+
+func confirmWorkflowTools(reg *registry.Registry, wf *config.WorkflowConfig, confirmed bool) error {
+	for _, node := range wf.Nodes {
+		tool, err := reg.Tool(node.Tool)
+		if err != nil {
+			return err
+		}
+		if tool.Config.Confirm.Required && !node.Confirm && !confirmed {
+			return fmt.Errorf("工作流节点 %s 引用的工具 %s 需要确认", node.ID, node.Tool)
+		}
+	}
+	return nil
 }
 
 func handleWorkflowValidate(w http.ResponseWriter, req *http.Request, reg *registry.Registry) {
@@ -519,12 +550,30 @@ func registerWeb(mux *http.ServeMux) {
 func buildCatalog(reg *registry.Registry) catalogResponse {
 	out := catalogResponse{Name: reg.Root.DisplayName(), Description: reg.Root.DisplayDescription(), Categories: reg.Root.DisplayCategories()}
 	for _, tool := range reg.Tools {
-		out.Tools = append(out.Tools, toolCatalogEntry{ToolEntry: tool.Entry, Tags: tool.Config.Tags, Parameters: tool.Config.Parameters})
+		out.Tools = append(out.Tools, toolCatalogEntry{ToolEntry: tool.Entry, Tags: tool.Config.Tags, Parameters: tool.Config.Parameters, Confirm: tool.Config.Confirm, Source: tool.Source})
 	}
 	for _, wf := range reg.Workflows {
-		out.Workflows = append(out.Workflows, workflowCatalogEntry{WorkflowRef: wf.Entry, Tags: wf.Config.Tags, Parameters: wf.Config.Parameters})
+		out.Workflows = append(out.Workflows, workflowCatalogEntry{WorkflowRef: wf.Entry, Tags: wf.Config.Tags, Parameters: wf.Config.Parameters, Confirm: effectiveWorkflowConfirm(reg, wf.Config), Source: wf.Source})
 	}
 	return out
+}
+
+func effectiveWorkflowConfirm(reg *registry.Registry, wf *config.WorkflowConfig) config.Confirmation {
+	if wf.Confirm.Required {
+		return wf.Confirm
+	}
+	for _, node := range wf.Nodes {
+		tool, err := reg.Tool(node.Tool)
+		if err != nil || !tool.Config.Confirm.Required || node.Confirm {
+			continue
+		}
+		message := tool.Config.Confirm.Message
+		if message == "" {
+			message = "工作流包含需要确认的工具"
+		}
+		return config.Confirmation{Required: true, Message: message}
+	}
+	return wf.Confirm
 }
 
 func decodeWorkflow(req *http.Request) (*config.WorkflowConfig, error) {

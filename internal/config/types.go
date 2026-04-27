@@ -11,6 +11,7 @@ type RootConfig struct {
 	Server      ServerConfig   `yaml:"server" json:"server"`
 	Menu        MenuConfig     `yaml:"menu" json:"menu"`
 	Registry    RegistryConfig `yaml:"registry" json:"registry"`
+	Plugins     PluginsConfig  `yaml:"plugins" json:"plugins"`
 	UI          UIConfig       `yaml:"ui" json:"ui"`
 	Name        string         `yaml:"name" json:"-"`
 	Description string         `yaml:"description" json:"-"`
@@ -46,6 +47,12 @@ type MenuConfig struct {
 type RegistryConfig struct {
 	IncludeTools     []string `yaml:"include_tools" json:"include_tools"`
 	IncludeWorkflows []string `yaml:"include_workflows" json:"include_workflows"`
+}
+
+type PluginsConfig struct {
+	Paths    []string `yaml:"paths" json:"paths"`
+	Strict   bool     `yaml:"strict" json:"strict"`
+	Disabled []string `yaml:"disabled" json:"disabled"`
 }
 
 type UIConfig struct {

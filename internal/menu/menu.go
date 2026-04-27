@@ -142,13 +142,49 @@ func runSelected(ctx context.Context, reg *registry.Registry, selected item, in 
 	}
 	r := runner.New(reg)
 	if selected.kind == "tool" {
+		tool, err := reg.Tool(selected.id)
+		if err != nil {
+			return err
+		}
+		if err := config.PromptConfirmation(tool.Config.Confirm, in, out); err != nil {
+			return err
+		}
 		record, err := r.RunTool(ctx, selected.id, params, out, errOut)
 		printRecord(out, record)
 		return err
 	}
-	record, err := r.RunWorkflow(ctx, selected.id, params, out, errOut)
+	wf, err := reg.Workflow(selected.id)
+	if err != nil {
+		return err
+	}
+	if err := config.PromptConfirmation(wf.Config.Confirm, in, out); err != nil {
+		return err
+	}
+	confirmed, err := confirmWorkflowTools(reg, wf.Config, in, out)
+	if err != nil {
+		return err
+	}
+	record, err := r.RunWorkflowWithConfirmation(ctx, selected.id, params, confirmed, out, errOut)
 	printRecord(out, record)
 	return err
+}
+
+func confirmWorkflowTools(reg *registry.Registry, wf *config.WorkflowConfig, in io.Reader, out io.Writer) (bool, error) {
+	confirmed := false
+	for _, node := range wf.Nodes {
+		tool, err := reg.Tool(node.Tool)
+		if err != nil {
+			return false, err
+		}
+		if !tool.Config.Confirm.Required || node.Confirm {
+			continue
+		}
+		if err := config.PromptConfirmation(tool.Config.Confirm, in, out); err != nil {
+			return false, err
+		}
+		confirmed = true
+	}
+	return confirmed, nil
 }
 
 func definitionsFor(reg *registry.Registry, selected item) ([]config.Parameter, error) {

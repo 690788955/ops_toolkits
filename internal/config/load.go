@@ -9,11 +9,7 @@ import (
 )
 
 func RootPath(baseDir string) string {
-	newPath := filepath.Join(baseDir, "configs", "ops.yaml")
-	if _, err := os.Stat(newPath); err == nil {
-		return newPath
-	}
-	return filepath.Join(baseDir, "ops.yaml")
+	return filepath.Join(baseDir, "configs", "ops.yaml")
 }
 
 func LoadRoot(path string) (*RootConfig, error) {
@@ -76,11 +72,8 @@ func normalizeRoot(cfg *RootConfig) {
 	if len(cfg.Menu.Categories) == 0 {
 		cfg.Menu.Categories = cfg.Categories
 	}
-	if len(cfg.Paths.Tools) == 0 {
-		cfg.Paths.Tools = []string{"tools"}
-	}
-	if len(cfg.Paths.Workflows) == 0 {
-		cfg.Paths.Workflows = []string{"workflows"}
+	if len(cfg.Plugins.Paths) == 0 {
+		cfg.Plugins.Paths = []string{"plugins"}
 	}
 	if cfg.Paths.Runs == "" {
 		cfg.Paths.Runs = "runs"

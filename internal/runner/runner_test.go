@@ -11,6 +11,35 @@ import (
 	"shell_ops/internal/registry"
 )
 
+func TestRunWorkflowRejectsUnconfirmedToolNode(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := writeTool(t, dir, "danger", `#!/usr/bin/env bash
+set -euo pipefail
+echo danger
+`)
+	cfg := toolConfig("demo.danger")
+	cfg.Confirm = config.Confirmation{Required: true, Message: "确认危险操作？"}
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.danger": {Entry: config.ToolEntry{ID: "demo.danger", Category: "demo"}, Config: cfg, Dir: toolDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{ID: "demo.flow", Nodes: []config.WorkflowNode{{ID: "danger", Tool: "demo.danger"}}}
+	reg.Workflows["demo.flow"] = &registry.Workflow{Entry: config.WorkflowRef{ID: "demo.flow"}, Config: wf}
+
+	_, err := New(reg).RunWorkflow(context.Background(), "demo.flow", nil, nilWriter{}, nilWriter{})
+	if err == nil || !strings.Contains(err.Error(), "需要确认") {
+		t.Fatalf("RunWorkflow error = %v, want 需要确认", err)
+	}
+	_, err = New(reg).RunWorkflowWithConfirmation(context.Background(), "demo.flow", nil, true, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflowWithConfirmation error = %v", err)
+	}
+}
+
 func TestRunWorkflowPassesUpstreamParamsAndOutput(t *testing.T) {
 	dir := t.TempDir()
 	producerDir := writeTool(t, dir, "producer", `#!/usr/bin/env bash

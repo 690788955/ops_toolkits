@@ -49,6 +49,20 @@ func TestValidateRequired(t *testing.T) {
 	}
 }
 
+func TestPromptConfirmation(t *testing.T) {
+	err := PromptConfirmation(Confirmation{Required: true, Message: "确认？"}, bytes.NewBufferString("确认\n"), &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("PromptConfirmation 返回错误: %v", err)
+	}
+}
+
+func TestPromptConfirmationRejectsMissingApproval(t *testing.T) {
+	err := PromptConfirmation(Confirmation{Required: true, Message: "确认？"}, bytes.NewBufferString("no\n"), &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("PromptConfirmation 返回 nil，期望错误")
+	}
+}
+
 func TestLoadRootNewSchema(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ops.yaml")
@@ -78,6 +92,27 @@ server:
 	}
 	if len(cfg.DisplayCategories()) != 1 || cfg.DisplayCategories()[0].ID != "demo" {
 		t.Fatalf("分类不符合预期: %#v", cfg.DisplayCategories())
+	}
+	if len(cfg.Plugins.Paths) != 1 || cfg.Plugins.Paths[0] != "plugins" {
+		t.Fatalf("插件路径默认值不符合预期: %#v", cfg.Plugins)
+	}
+}
+
+func TestLoadRootDoesNotDefaultLegacyPaths(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ops.yaml")
+	content := `plugins:
+  paths: [plugins]
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadRoot(path)
+	if err != nil {
+		t.Fatalf("LoadRoot 返回错误: %v", err)
+	}
+	if len(cfg.Paths.Tools) != 0 || len(cfg.Paths.Workflows) != 0 {
+		t.Fatalf("legacy paths 不应被默认值覆盖: %#v", cfg.Paths)
 	}
 }
 

@@ -1,61 +1,57 @@
 # Shell 运维框架
 
-YAML 驱动的运维自动化框架，用于把 Shell 工具、参数定义、工作流 DAG 和 Web UI 统一组织起来。项目提供 `opsctl` CLI，可发现工具、校验配置、执行工具/工作流、启动交互菜单和 HTTP 控制台，并生成离线交付包。
+YAML 驱动的运维自动化框架，用于把外部工具插件、参数定义、工作流 DAG 和 Web UI 统一组织起来。项目提供 `opsctl` CLI，可发现插件工具、校验配置、执行工具/工作流、启动交互菜单和 HTTP 控制台，并生成离线交付包。
 
 ## 功能特性
 
-- 通过 `ops.yaml` 统一配置工具目录、工作流目录、运行记录和 Web 服务。
-- 通过 `tools/<分类>/<工具>/tool.yaml` 描述工具元数据、参数、执行入口和确认策略。
+- 通过 `configs/ops.yaml` 统一配置运行记录、Web 服务和插件扫描目录。
+- 通过 `plugins/<插件ID>/plugin.yaml` 接入外部工具插件。
+- 支持插件贡献菜单分类、工具和工作流。
 - 支持工具参数从 `--set`、YAML 参数文件和交互提示中合并。
 - 支持工作流 DAG，按节点依赖串联多个工具。
 - 支持 CLI、交互菜单、HTTP API 和 Web UI 多种入口。
-- 支持生成工具模板、工作流模板和可分发交付包。
+- 支持生成包含 `configs/`、`plugins/` 和当前可执行文件的离线交付包。
 
 ## 快速开始
 
 ### 1. 构建 CLI
 
 ```bash
-go build -o opsctl ./cmd/opsctl
-```
-
-Windows 环境也可以构建为：
-
-```bash
-go build -o opsctl.exe ./cmd/opsctl
+GOTOOLCHAIN=local go build -o bin/opsctl.exe ./cmd/opsctl
 ```
 
 ### 2. 校验配置
 
 ```bash
-./opsctl validate
+./bin/opsctl.exe validate
 ```
 
-### 3. 查看工具和工作流
+### 3. 查看插件工具
 
 ```bash
-./opsctl list
-./opsctl help-auto
-./opsctl help-auto tool demo.hello
-./opsctl help-auto workflow demo.hello
+./bin/opsctl.exe list
+./bin/opsctl.exe help-auto
+./bin/opsctl.exe help-auto tool plugin.demo.greet
 ```
 
-### 4. 运行示例工具
+### 4. 运行示例插件工具
 
 ```bash
-./opsctl run tool demo.hello --set name=Tester --set message=Hello --no-prompt
+./bin/opsctl.exe run tool plugin.demo.greet --set name=Tester --set message=Hello --no-prompt
 ```
 
-### 5. 运行示例工作流
+### 5. 运行确认流程示例
 
 ```bash
-./opsctl run workflow demo.hello --set name=Workflow --no-prompt
+./bin/opsctl.exe run tool plugin.demo.confirmed --set target=demo --no-prompt
 ```
+
+执行时输入 `yes`、`确认`、`是` 或 `继续` 完成确认。
 
 ### 6. 启动 Web UI
 
 ```bash
-./opsctl serve --port 8080
+./bin/opsctl.exe serve --port 8080
 ```
 
 启动后访问控制台输出中的 Web UI 地址。
@@ -64,8 +60,8 @@ go build -o opsctl.exe ./cmd/opsctl
 
 | 命令 | 说明 |
 | --- | --- |
-| `opsctl list` | 列出已发现的工具和工作流 |
-| `opsctl validate` | 校验 `ops.yaml`、工具和工作流配置 |
+| `opsctl list` | 列出已发现的插件工具和工作流 |
+| `opsctl validate` | 校验 `configs/ops.yaml` 和插件配置 |
 | `opsctl help-auto` | 根据 YAML 元数据生成目录帮助 |
 | `opsctl help-auto tool <id>` | 查看指定工具帮助 |
 | `opsctl help-auto workflow <id>` | 查看指定工作流帮助 |
@@ -73,8 +69,6 @@ go build -o opsctl.exe ./cmd/opsctl
 | `opsctl run workflow <id>` | 执行指定工作流 |
 | `opsctl start` / `opsctl menu` | 启动交互式菜单 |
 | `opsctl serve` | 启动 HTTP API 和 Web UI |
-| `opsctl new tool <分类>/<工具>` | 创建工具模板 |
-| `opsctl new workflow <workflow-id>` | 创建工作流模板 |
 | `opsctl package build` | 生成交付包和 zip 文件 |
 
 通用参数：
@@ -87,27 +81,27 @@ go build -o opsctl.exe ./cmd/opsctl
 ## 目录结构
 
 ```text
+bin/                        本地构建产物目录（不提交）
 cmd/opsctl/                 CLI 入口
+configs/ops.yaml            框架主配置
 internal/app/               Cobra 命令定义
 internal/config/            YAML 配置和参数处理
-internal/registry/          工具、工作流注册与校验
+internal/plugin/            插件清单解析与校验
+internal/registry/          插件工具、工作流注册与校验
 internal/runner/            工具和工作流执行器
 internal/server/            HTTP API 与内嵌 Web 静态资源
-internal/scaffold/          工具和工作流模板生成
 internal/packagebuild/      交付包构建
-ops.yaml                    框架主配置
-tools/                      工具目录
-workflows/                  工作流目录
+plugins/<插件ID>/           插件包目录
 web/                        Web UI 前端项目
-dist/                       打包输出目录
-runs/                       运行记录和日志目录
+runs/                       运行记录和日志目录（不提交）
+dist/                       打包输出目录（不提交）
 ```
 
 ## 配置说明
 
-### 主配置 `ops.yaml`
+### 主配置 `configs/ops.yaml`
 
-`ops.yaml` 定义应用信息、工具目录、工作流目录、运行记录目录、服务监听地址、菜单分类、注册过滤规则和 UI 配置。
+`configs/ops.yaml` 定义应用信息、运行记录目录、服务监听地址、菜单分类、插件扫描目录和 UI 配置。
 
 ```yaml
 app:
@@ -116,59 +110,90 @@ app:
   version: 0.1.0
 
 paths:
-  tools:
-    - tools
-  workflows:
-    - workflows
+  tools: []
+  workflows: []
   runs: runs
   logs: runs/logs
+
+plugins:
+  paths:
+    - plugins
+  strict: false
+  disabled: []
 ```
 
-### 工具配置 `tool.yaml`
+`paths.tools` 和 `paths.workflows` 显式为空，表示不再使用旧的独立 `tools/`、`workflows/` 目录。工具和工作流通过插件贡献。
 
-工具放在 `tools/<分类>/<工具>/` 下，至少包含：
+## 插件接入
 
-- `tool.yaml`：工具元数据、参数、执行入口。
-- `bin/run.sh`：实际执行脚本。
-- `README.md`：工具维护说明、输入输出和回滚方式。
+外部工具按插件包方式接入。插件目录放在 `plugins/<插件ID>/`，至少包含：
 
-参数会按配置传递给脚本：
+- `plugin.yaml`：插件元数据、菜单分类、工具/工作流贡献。
+- 实际执行脚本：例如 `scripts/run.sh`。
+- `README.md`：插件维护说明。
 
-- 环境变量：`OPS_PARAM_<参数名大写>`。
-- 参数文件：`OPS_PARAM_FILE` 指向生成的 YAML 参数文件。
-- 命令参数：开启 `pass_mode.args` 后附加 `key=value` 参数。
+示例：
 
-## 新增工具
-
-```bash
-./opsctl new tool demo/example
-./opsctl validate
+```text
+plugins/plugin.demo/
+  plugin.yaml
+  scripts/
+    greet.sh
+    confirmed.sh
+  README.md
 ```
 
-生成后补齐：
+### 插件清单示例
 
-1. `tools/demo/example/tool.yaml` 中的工具说明、参数和执行入口。
-2. `tools/demo/example/bin/run.sh` 中的实际运维逻辑。
-3. `tools/demo/example/README.md` 中的维护说明和回滚方案。
+```yaml
+id: vendor.backup
+name: 备份工具集
+version: 1.0.0
+description: 第三方备份恢复工具
+author: vendor-a
 
-## 新增工作流
-
-```bash
-./opsctl new workflow demo-example
-./opsctl validate
+contributes:
+  categories:
+    - id: backup
+      name: 备份恢复
+      description: 第三方备份恢复工具
+  tools:
+    - id: vendor.backup.full
+      name: 全量备份
+      category: backup
+      description: 执行一次全量备份
+      command: scripts/backup.sh
+      args:
+        - --target
+        - '{{ .target }}'
+      workdir: .
+      timeout: 30m
+      parameters:
+        - name: target
+          type: string
+          description: 备份目标
+          required: true
+      confirm:
+        required: true
+        message: 确认执行全量备份？
 ```
 
-工作流通过 `nodes` 定义节点，通过 `edges` 定义依赖关系。节点的 `tool` 字段引用工具 ID，例如 `demo.hello`。
+### 插件规则
+
+- 插件工具 ID 必须以插件 ID 加点号开头，例如 `vendor.backup.full`。
+- `command` 和 `workdir` 必须位于插件目录内，避免路径逃逸。
+- `strict: false` 时坏插件会被跳过并输出告警；`strict: true` 时任意插件加载失败都会阻断校验/启动。
+- `disabled` 可以按插件 ID 或插件目录名禁用插件。
+- `confirm.required: true` 的工具在 CLI、菜单和 Web 执行前都需要确认。
 
 ## Web 前端
 
 前端项目位于 `web/`，用于开发 Web UI。
 
 ```bash
-cd web
-npm install
-npm run dev
-npm run build
+npm install --prefix web
+npm run dev --prefix web
+npm run build --prefix web
 ```
 
 后端运行时会从内嵌静态资源提供 Web UI。
@@ -176,21 +201,20 @@ npm run build
 ## 打包交付
 
 ```bash
-./opsctl package build
+./bin/opsctl.exe package build
 ```
 
 该命令会在 `dist/` 下生成目录和 zip 文件，包含：
 
-- `ops.yaml`
-- `tools/`
-- `workflows/`
-- `configs/`（如果存在）
+- `configs/`
+- `plugins/`
 - 当前 `opsctl` 可执行文件
 
 ## 开发验证
 
 ```bash
-go test ./...
-go build -o opsctl ./cmd/opsctl
-./opsctl validate
+GOTOOLCHAIN=local go test ./...
+npm run build --prefix web
+GOTOOLCHAIN=local go build -o bin/opsctl.exe ./cmd/opsctl
+./bin/opsctl.exe validate
 ```

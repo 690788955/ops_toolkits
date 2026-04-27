@@ -91,9 +91,11 @@ function App() {
     const path = selected.kind === 'tool'
       ? `/api/tools/${selected.id}/run`
       : `/api/workflows/${selected.id}/run`
+    const needsConfirm = selected.confirm?.required
+    if (needsConfirm && !window.confirm(selected.confirm.message || '该操作需要确认，是否继续？')) return
     setResult({message: '执行中...'})
     try {
-      const body = await postJSON(path, {params})
+      const body = await postJSON(path, {params, confirm: Boolean(needsConfirm)})
       if (body.id) {
         setResult({run: body, detail: await fetchRunDetail(body.id)})
         return
@@ -261,6 +263,8 @@ function RunPanel({activeTab, entries, totalEntries, selected, params, setParams
             <div className="selectedTitle">
               <h3>{selected.name || selected.id}</h3>
               <p>{selected.description}</p>
+              {selected.source?.type === 'plugin' && <small>来源插件：{selected.source.plugin_name || selected.source.plugin_id}@{selected.source.plugin_version || '-'}</small>}
+              {selected.confirm?.required && <small>执行前需要确认：{selected.confirm.message || '该操作需要确认'}</small>}
               <TagList tags={selected.tags || []} />
             </div>
             <div className="form">

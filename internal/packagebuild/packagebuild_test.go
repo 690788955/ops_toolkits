@@ -9,24 +9,19 @@ import (
 
 func TestBuildCopiesPackageContents(t *testing.T) {
 	baseDir := t.TempDir()
-	writeFile(t, filepath.Join(baseDir, "ops.yaml"), "app:\n  name: 测试运维\n")
 	writeFile(t, filepath.Join(baseDir, "configs", "ops.yaml"), "app:\n  name: 测试运维\n")
-	writeFile(t, filepath.Join(baseDir, "tools", "demo", "hello", "tool.yaml"), "id: demo.hello\n")
-	writeFile(t, filepath.Join(baseDir, "tools", "demo", "hello", "bin", "run.sh"), "#!/usr/bin/env bash\n")
-	writeFile(t, filepath.Join(baseDir, "workflows", "demo-hello.yaml"), "id: demo.hello\n")
+	writeFile(t, filepath.Join(baseDir, "plugins", "vendor.demo", "plugin.yaml"), "id: vendor.demo\n")
 
 	outDir, err := Build(baseDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	exePath := filepath.Join("bin", filepath.Base(os.Args[0]))
 	for _, path := range []string{
-		"ops.yaml",
 		filepath.Join("configs", "ops.yaml"),
-		filepath.Join("tools", "demo", "hello", "tool.yaml"),
-		filepath.Join("tools", "demo", "hello", "bin", "run.sh"),
-		filepath.Join("workflows", "demo-hello.yaml"),
-		"opsctl",
+		filepath.Join("plugins", "vendor.demo", "plugin.yaml"),
+		exePath,
 	} {
 		if _, err := os.Stat(filepath.Join(outDir, path)); err != nil {
 			t.Fatalf("交付包文件 %s 缺失: %v", path, err)
@@ -38,12 +33,9 @@ func TestBuildCopiesPackageContents(t *testing.T) {
 		t.Fatalf("交付包 zip 缺失: %v", err)
 	}
 	assertZipEntries(t, zipPath, []string{
-		"ops.yaml",
 		"configs/ops.yaml",
-		"tools/demo/hello/tool.yaml",
-		"tools/demo/hello/bin/run.sh",
-		"workflows/demo-hello.yaml",
-		"opsctl",
+		"plugins/vendor.demo/plugin.yaml",
+		filepath.ToSlash(exePath),
 	})
 }
 

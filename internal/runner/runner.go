@@ -72,6 +72,10 @@ func (r *Runner) RunTool(ctx context.Context, id string, params map[string]strin
 }
 
 func (r *Runner) RunWorkflow(ctx context.Context, id string, params map[string]string, out, errOut io.Writer) (*RunRecord, error) {
+	return r.RunWorkflowWithConfirmation(ctx, id, params, false, out, errOut)
+}
+
+func (r *Runner) RunWorkflowWithConfirmation(ctx context.Context, id string, params map[string]string, confirmed bool, out, errOut io.Writer) (*RunRecord, error) {
 	wf, err := r.Registry.Workflow(id)
 	if err != nil {
 		return nil, err
@@ -87,6 +91,11 @@ func (r *Runner) RunWorkflow(ctx context.Context, id string, params map[string]s
 	}
 	ordered, err := registry.OrderWorkflow(wf.Config)
 	if err != nil {
+		finishRecord(record, err)
+		_ = r.saveRecord(runDir, record)
+		return record, err
+	}
+	if err := r.validateWorkflowConfirmations(ordered, confirmed); err != nil {
 		finishRecord(record, err)
 		_ = r.saveRecord(runDir, record)
 		return record, err
@@ -117,6 +126,19 @@ func (r *Runner) RunWorkflow(ctx context.Context, id string, params map[string]s
 		err = saveErr
 	}
 	return record, err
+}
+
+func (r *Runner) validateWorkflowConfirmations(nodes []config.WorkflowNode, confirmed bool) error {
+	for _, node := range nodes {
+		tool, err := r.Registry.Tool(node.Tool)
+		if err != nil {
+			return err
+		}
+		if tool.Config.Confirm.Required && !node.Confirm && !confirmed {
+			return fmt.Errorf("工作流节点 %s 引用的工具 %s 需要确认", node.ID, node.Tool)
+		}
+	}
+	return nil
 }
 
 func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, params map[string]string, runDir string, out, errOut io.Writer) error {

@@ -1,0 +1,60 @@
+id: plugin.demo
+name: 插件接入演示
+version: 1.0.0
+description: 演示外部工具如何通过 plugin.yaml 快速接入菜单、Web UI 和工作流
+author: opsctl-team
+
+contributes:
+  categories:
+    - id: plugin-demo
+      name: 插件演示
+      description: 通过插件机制接入的示例工具
+
+  tools:
+    - id: plugin.demo.greet
+      name: 插件问候演示
+      category: plugin-demo
+      description: 使用外部插件脚本输出问候信息
+      tags: [plugin, demo, shell]
+      command: scripts/greet.sh
+      args:
+        - --name
+        - "{{ .name }}"
+        - --message
+        - "{{ .message }}"
+      workdir: .
+      timeout: 1m
+      parameters:
+        - name: name
+          type: string
+          description: 要问候的名称
+          required: true
+          default: World
+        - name: message
+          type: string
+          description: 问候消息
+          required: false
+          default: Hello from plugin
+      confirm:
+        required: false
+
+    - id: plugin.demo.confirmed
+      name: 插件确认演示
+      category: plugin-demo
+      description: 演示高风险插件工具执行前确认
+      tags: [plugin, demo, confirm]
+      command: scripts/confirmed.sh
+      args:
+        - --target
+        - "{{ .target }}"
+      workdir: .
+      timeout: 1m
+      parameters:
+        - name: target
+          type: string
+          description: 模拟操作目标
+          required: true
+          default: demo-target
+      confirm:
+        required: true
+        message: 这是一个确认流程演示工具，是否继续？

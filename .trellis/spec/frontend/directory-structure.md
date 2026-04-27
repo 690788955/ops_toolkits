@@ -49,7 +49,7 @@ Go embeds that directory in `internal/server/server.go`, so always rebuild the f
 
 The console should keep the following information hierarchy:
 
-1. Left sidebar: categories from `ops.yaml`.
+1. Left sidebar: categories from `configs/ops.yaml` and plugin contributions.
 2. Main tabs: Tools and Workflows.
 3. Entry cards: filtered by active category and active tab.
 4. Execution panel: generated from `parameters` returned by `/api/catalog`.
@@ -72,7 +72,8 @@ Run request payload:
 {
   "params": {
     "name": "Tester"
-  }
+  },
+  "confirm": false
 }
 ```
 
@@ -81,6 +82,6 @@ Run request payload:
 ## Required Patterns
 
 - Use React state for selected category, active tab, selected entry, params, and result output.
-- Keep UI generated from backend YAML metadata; do not hard-code tools/workflows in React.
+- Keep UI generated from backend YAML/plugin metadata; do not hard-code tools/workflows in React.
 - Use `useEffect` cleanup when fetching catalog data to avoid stale updates.
 - Keep build output embedded; do not add a production frontend runtime dependency.

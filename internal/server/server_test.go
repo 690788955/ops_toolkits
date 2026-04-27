@@ -157,6 +157,56 @@ func TestToolDevKitDownloadAPI(t *testing.T) {
 	}
 }
 
+func TestToolRunAPIRequiresConfirm(t *testing.T) {
+	reg := testRegistry(t)
+	reg.Tools["demo.hello"].Config.Confirm = config.Confirmation{Required: true, Message: "确认执行？"}
+	req := httptest.NewRequest(http.MethodPost, "/api/tools/demo.hello/run", strings.NewReader(`{"params":{}}`))
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want bad request; body = %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "需要确认") {
+		t.Fatalf("响应缺少确认提示: %s", res.Body.String())
+	}
+}
+
+func TestCatalogAPIIncludesSourceAndConfirm(t *testing.T) {
+	reg := testRegistry(t)
+	reg.Tools["demo.hello"].Source = registry.Source{Type: "plugin", PluginID: "vendor.demo", PluginName: "Demo", PluginVersion: "1.0.0"}
+	reg.Tools["demo.hello"].Config.Confirm = config.Confirmation{Required: true, Message: "确认执行？"}
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, "vendor.demo") || !strings.Contains(body, "确认执行") {
+		t.Fatalf("catalog 缺少插件来源或确认信息: %s", body)
+	}
+}
+
+func TestWorkflowRunAPIRequiresToolConfirm(t *testing.T) {
+	reg := testRegistry(t)
+	reg.Tools["demo.hello"].Config.Confirm = config.Confirmation{Required: true, Message: "确认工具？"}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.flow/run", strings.NewReader(`{"params":{}}`))
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want bad request; body = %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "需要确认") {
+		t.Fatalf("响应缺少工具确认提示: %s", res.Body.String())
+	}
+}
+
 func TestRunDetailAPIIncludesLogs(t *testing.T) {
 	reg := testRegistry(t)
 	runDir := filepath.Join(reg.BaseDir, "runs", "logs", "run-1")

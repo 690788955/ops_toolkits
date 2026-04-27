@@ -4,10 +4,8 @@ app:
   version: 0.1.0
 
 paths:
-  tools:
-    - tools
-  workflows:
-    - workflows
+  tools: []
+  workflows: []
   runs: runs
   logs: runs/logs
 
@@ -17,16 +15,13 @@ server:
   port: 8080
 
 menu:
-  categories:
-    - id: demo
-      name: 演示
-      description: 演示工具和工作流
+  categories: []
 
-registry:
-  include_tools:
-    - demo.*
-  include_workflows:
-    - demo.*
+plugins:
+  paths:
+    - plugins
+  strict: false
+  disabled: []
 
 ui:
   enabled: true

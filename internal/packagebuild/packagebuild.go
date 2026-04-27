@@ -15,7 +15,7 @@ func Build(baseDir string) (string, error) {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return "", err
 	}
-	for _, item := range []string{"ops.yaml", "tools", "workflows", "configs"} {
+	for _, item := range []string{"configs", "plugins"} {
 		src := filepath.Join(baseDir, item)
 		if _, err := os.Stat(src); err == nil {
 			if err := copyPath(src, filepath.Join(outDir, item)); err != nil {
@@ -24,7 +24,7 @@ func Build(baseDir string) (string, error) {
 		}
 	}
 	if exe, err := os.Executable(); err == nil {
-		_ = copyFile(exe, filepath.Join(outDir, "opsctl"))
+		_ = copyFile(exe, filepath.Join(outDir, "bin", filepath.Base(exe)))
 	}
 	if err := zipDir(outDir, outDir+".zip"); err != nil {
 		return "", err

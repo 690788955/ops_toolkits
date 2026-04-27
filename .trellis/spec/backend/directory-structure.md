@@ -6,131 +6,133 @@
 
 ## Overview
 
-This project is a Go-based ops automation framework. The compiled binary is `opsctl`; concrete operations are developed as Shell tool packages and wired through YAML configuration.
+This project is a Go-based ops automation framework. The compiled binary is `opsctl`; concrete operations are developed as plugin packages and wired through `plugins/<plugin-id>/plugin.yaml`.
 
 ---
 
 ## Directory Layout
 
 ```text
+bin/
+  opsctl.exe                      # local build output, ignored by git
 cmd/opsctl/
   main.go                         # binary entrypoint
+configs/
+  ops.yaml                        # main runtime config
 internal/
   app/                            # cobra commands and CLI option handling
-  config/                         # ops.yaml, tool.yaml, workflow YAML schemas and parameter merge logic
-  registry/                       # loads tools/workflows into executable registries
+  config/                         # configs/ops.yaml, normalized tool/workflow schemas, parameter merge logic
+  plugin/                         # plugin.yaml parsing, validation, safe path checks
+  registry/                       # loads plugin-contributed tools/workflows into executable registries
   runner/                         # Shell execution, parameter file generation, run records
   menu/                           # numbered interactive console
   server/                         # HTTP API and embedded Web UI
-  scaffold/                       # opsctl new tool/workflow templates
+  scaffold/                       # template generation helpers
   packagebuild/                   # opsctl package build
-tools/<category>/<tool>/
-  tool.yaml                       # tool metadata, parameters, entrypoint, pass mode
-  bin/run.sh                      # executable Shell entrypoint
-  lib/                            # optional helper scripts
-  conf/                           # optional default configs
-  examples/                       # optional sample parameter files
-workflows/
-  <workflow-id>.yaml              # ordered workflow steps
+plugins/<plugin-id>/
+  plugin.yaml                     # plugin metadata and contributions
+  scripts/                        # plugin-owned executable scripts
+  README.md                       # plugin maintenance notes
 web/
   src/                            # React source, built by Vite
 internal/server/web/
   index.html, assets/             # Vite build output embedded into Go binary
 runs/logs/<run_id>/
-  params.yaml                     # final merged parameters when pass_mode.param_file is enabled
+  params.yaml                     # final merged parameters when param file mode is enabled
   stdout.log
   stderr.log
   result.json
 ```
 
+Legacy root `ops.yaml`, `tools/`, `workflows/`, and root `opsctl.exe` are intentionally not part of the latest runtime layout.
+
 ---
 
 ## Configuration Contracts
 
-### Root `ops.yaml`
+### Main `configs/ops.yaml`
 
-Defines display and entry wiring only: categories, tool references, workflow references, and HTTP defaults.
-
-Required fields for tool references:
+Defines display, runtime paths, server defaults, and plugin loading.
 
 ```yaml
-tools:
-  - id: demo-hello
-    category: demo
-    path: tools/demo/hello
-    name: Hello Demo
-    description: Print a greeting
+app:
+  name: Shell 运维框架
+  version: 0.1.0
+paths:
+  tools: []
+  workflows: []
+  runs: runs
+  logs: runs/logs
+plugins:
+  paths:
+    - plugins
+  strict: false
+  disabled: []
 ```
 
-Required fields for workflow references:
+`paths.tools` and `paths.workflows` stay empty in the latest structure. Tools and workflows are contributed by plugins.
+
+### Plugin package `plugin.yaml`
+
+Defines one plugin package and its contributions.
 
 ```yaml
-workflows:
-  - id: demo-hello
-    category: demo
-    path: workflows/demo-hello.yaml
+id: vendor.backup
+name: 备份工具集
+version: 1.0.0
+contributes:
+  categories:
+    - id: backup
+      name: 备份恢复
+  tools:
+    - id: vendor.backup.full
+      name: 全量备份
+      category: backup
+      command: scripts/backup.sh
+      args:
+        - --target
+        - '{{ .target }}'
+      workdir: .
+      timeout: 30m
+      parameters:
+        - name: target
+          required: true
+      confirm:
+        required: true
+        message: 确认执行全量备份？
 ```
 
-### Tool package `tool.yaml`
+Plugin rules:
 
-Defines how one Shell tool runs.
+- Tool IDs must start with `<plugin-id>.`.
+- `command` and `workdir` must stay inside the plugin directory.
+- `strict: false` skips bad plugins with warnings; `strict: true` fails validation/startup.
+- `disabled` accepts plugin IDs or plugin directory names.
+
+### Workflow contributions
+
+A plugin may contribute workflow YAML files via:
 
 ```yaml
-id: demo-hello
-name: Hello Demo
-entry: bin/run.sh
-parameters:
-  - name: name
-    description: Name to greet
-    required: true
-    default: World
-pass_mode:
-  env: true
-  args: true
-  param_file: true
-  file_name: params.yaml
-timeout: 1m
-confirmation:
-  required: false
+contributes:
+  workflows:
+    - path: workflows/full-backup.yaml
 ```
 
-Parameter delivery contract:
-
-- `env: true` sets `OPS_PARAM_<UPPER_NAME>` environment variables.
-- `args: true` appends `--key value` arguments.
-- `param_file: true` writes the merged parameter YAML into the run directory and exposes it as `OPS_PARAM_FILE` plus `--params-file <path>` when args are enabled.
-
-### Workflow `workflows/*.yaml`
-
-Defines ordered steps. MVP executes steps sequentially and stops on the first failure.
-
-```yaml
-id: demo-hello
-parameters:
-  - name: name
-    required: true
-steps:
-  - id: hello
-    tool: demo-hello
-    params:
-      name: ${name}
-```
+The workflow file is still normalized into `WorkflowConfig`; nodes reference registered tool IDs.
 
 ---
 
 ## Command Entry Points
 
 ```bash
-opsctl list
-opsctl start
-opsctl menu
-opsctl serve --port 8080
-opsctl serve --addr 0.0.0.0:8080
-opsctl run tool <tool-id> --set key=value --no-prompt
-opsctl run workflow <workflow-id> --params params.yaml
-opsctl new tool <category>/<tool>
-opsctl new workflow <workflow-id>
-opsctl package build
+./bin/opsctl.exe list
+./bin/opsctl.exe start
+./bin/opsctl.exe menu
+./bin/opsctl.exe serve --port 8080
+./bin/opsctl.exe run tool <tool-id> --set key=value --no-prompt
+./bin/opsctl.exe run workflow <workflow-id> --params params.yaml
+./bin/opsctl.exe package build
 ```
 
 ---
@@ -139,6 +141,8 @@ opsctl package build
 
 - Keep command parsing in `internal/app`.
 - Keep YAML structures and parameter merge/validation in `internal/config`.
+- Keep plugin parsing and plugin-local path validation in `internal/plugin`.
+- Keep registration and normalization in `internal/registry`.
 - Keep execution logic in `internal/runner`; CLI, menu, HTTP, and Web must reuse it.
 - Keep HTTP transport and embedded UI serving in `internal/server`.
 - Do not duplicate parameter parsing in UI-specific or command-specific code.
@@ -147,7 +151,7 @@ opsctl package build
 
 ## Naming Conventions
 
-- Tool IDs use kebab case and should remain stable because CLI/API/workflows reference them.
-- Tool package paths use `tools/<category>/<tool>/`.
-- Workflow files use `workflows/<workflow-id>.yaml`.
+- Plugin IDs use dot notation and should be globally stable, e.g. `vendor.backup`.
+- Plugin tool IDs must be prefixed by plugin ID, e.g. `vendor.backup.full`.
+- Plugin package paths use `plugins/<plugin-id>/`.
 - Run directories are generated under `runs/logs/<run_id>/`.
