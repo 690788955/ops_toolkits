@@ -76,6 +76,21 @@ button { cursor: pointer; }
 .brand p { margin: 6px 0 0; color: #60646c; font-size: 13px; line-height: 1.4; }
 .sectionTitle { color: #60646c; font-size: 12px; font-weight: 700; margin-bottom: 12px; }
 .categoryList { display: grid; gap: 10px; }
+.pluginAction {
+  display: grid;
+  width: 100%;
+  height: 48px;
+  margin-top: 12px;
+  place-items: center;
+  border: 1px dashed #8b8d98;
+  border-radius: 24px;
+  color: #1c2024;
+  background: #ffffff;
+  font-size: 24px;
+  font-weight: 900;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.pluginAction:hover { transform: translateY(-1px); border-color: #000000; box-shadow: rgba(0,0,0,.08) 0 3px 6px; }
 .category {
   width: 100%;
   border: 1px solid #e0e1e6;
@@ -111,7 +126,7 @@ button { cursor: pointer; }
   letter-spacing: -2.4px;
 }
 .topbar p { margin: 12px 0 0; color: #60646c; font-size: 18px; line-height: 1.4; }
-.hint, .downloadKit {
+.hint {
   padding: 10px 16px;
   border: 1px solid #d9d9e0;
   border-radius: 9999px;
@@ -121,16 +136,7 @@ button { cursor: pointer; }
   font-weight: 700;
   text-decoration: none;
   box-shadow: rgba(0,0,0,.08) 0 3px 6px;
-}
-.hint { flex: 0 0 auto; }
-.downloadKit { color: #ffffff; background: #000000; border-color: #000000; }
-.downloadKit:hover { transform: translateY(-1px); box-shadow: rgba(0,0,0,.08) 0 3px 6px; }
-.floatingDownload {
-  position: fixed;
-  right: 24px;
-  bottom: 24px;
-  z-index: 20;
-  max-width: calc(100vw - 48px);
+  flex: 0 0 auto;
 }
 
 .tabs { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 24px; }
@@ -298,31 +304,89 @@ pre {
   line-height: 1.5;
 }
 
+.modalBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0,0,0,.35);
+}
+.modal {
+  width: min(620px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  border: 1px solid #e0e1e6;
+  border-radius: 28px;
+  padding: 24px;
+  background: #ffffff;
+  box-shadow: rgba(0,0,0,.18) 0 16px 48px;
+}
+.modalHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-start;
+  margin-bottom: 20px;
+}
+.modalHeader h3 { margin: 0; color: #000000; font-size: 24px; font-weight: 900; }
+.modalHeader p { margin: 8px 0 0; color: #60646c; line-height: 1.4; }
+.modalClose {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid #d9d9e0;
+  border-radius: 9999px;
+  color: #1c2024;
+  background: #ffffff;
+  font-size: 24px;
+  font-weight: 900;
+}
+.pluginModalActions { display: grid; gap: 16px; }
+.pluginModalActions label span { display: block; margin-bottom: 8px; color: #1c2024; font-size: 14px; font-weight: 800; }
+.downloadTemplate { display: inline-block; text-align: center; text-decoration: none; }
+.modalResult { min-height: 110px; margin-top: 16px; }
+
 .editorLayout {
   display: grid;
-  grid-template-columns: minmax(320px, 380px) minmax(560px, 1fr);
+  grid-template-columns: minmax(220px, 300px) minmax(760px, 1fr) minmax(320px, 380px);
   grid-template-areas:
-    "toolbar canvas"
-    "inspector canvas";
-  align-items: start;
+    "palette palette palette"
+    "toolbar canvas inspector";
+  align-items: stretch;
+  align-content: start;
   gap: 18px;
-  min-height: 650px;
+  min-height: 760px;
 }
 .editorToolbar { grid-area: toolbar; }
+.editorPalette { grid-area: palette; }
 .nodeInspector { grid-area: inspector; }
-.editorToolbar, .nodeInspector {
+.editorToolbar, .editorPalette, .nodeInspector {
   max-height: none;
-  align-self: start;
+  align-self: stretch;
 }
+.editorPaletteFilters { margin-bottom: 12px; }
+.validationSummary {
+  margin-bottom: 14px;
+  border: 1px solid #f4c7c3;
+  border-radius: 18px;
+  padding: 12px 14px;
+  color: #7a271a;
+  background: #fff4f2;
+  line-height: 1.4;
+}
+.validationSummary strong { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 900; }
+.validationSummary ul { margin: 0; padding-left: 20px; }
 .toolPalette {
   display: grid;
-  max-height: 280px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  max-height: 240px;
   overflow: auto;
   gap: 10px;
-  margin-top: 18px;
   padding-right: 4px;
 }
-.toolPalette strong { color: #1c2024; font-size: 14px; font-weight: 800; }
 .paletteItem {
   border: 1px solid #e0e1e6;
   border-radius: 20px;
@@ -339,11 +403,11 @@ pre {
 .paletteItem:active { cursor: grabbing; }
 .canvasCard {
   grid-area: canvas;
-  min-height: 720px;
+  min-height: 760px;
   padding: 0;
   overflow: hidden;
 }
-.canvasCard .react-flow { min-height: 720px; background: #ffffff; }
+.canvasCard .react-flow { min-height: 760px; background: #ffffff; }
 .react-flow__node {
   color: #000000;
   background: transparent;
@@ -390,10 +454,11 @@ pre {
 .react-flow__edge-path { stroke: #60646c; stroke-width: 2; }
 .react-flow__controls, .react-flow__minimap { border: 1px solid #e0e1e6; border-radius: 16px; overflow: hidden; box-shadow: rgba(0,0,0,.08) 0 3px 6px; }
 
-@media (max-width: 1400px) {
+@media (max-width: 1500px) {
   .editorLayout {
     grid-template-columns: 1fr;
     grid-template-areas:
+      "palette"
       "toolbar"
       "canvas"
       "inspector";

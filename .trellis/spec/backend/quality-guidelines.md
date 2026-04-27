@@ -25,6 +25,10 @@ If the Web UI changes, `npm run build --prefix web` must be run so `internal/ser
 - Parameter precedence is defaults < parameter file < CLI/API/Web overrides.
 - Required parameter validation belongs in `internal/config` and must be reused across entrypoints.
 - Runtime tools must be plugin-oriented: `plugins/<plugin-id>/plugin.yaml` plus plugin-owned implementation files.
+- Plugin upload ZIPs must contain exactly one plugin package, discovered by scanning for `plugin.yaml`; reject archives with zero or multiple plugin manifests.
+- Plugin ZIP extraction must accept normal directory entries such as `vendor.backup/` while still rejecting traversal, absolute paths, symlinks, and special files.
+- Plugin template/dev-kit documentation must focus on plugin authoring only: plugin structure, manifest fields, script parameters, workflows, confirmation, validation, packaging, upload, and troubleshooting.
+- Plugin template demo content must be a copyable standard plugin sample, not a toy hello-world: include complete manifest metadata, normal and high-risk tool examples, workflow contribution, robust script patterns, confirm metadata, README handoff notes, and examples.
 - Plugin `command` and `workdir` paths must be validated to stay inside the plugin directory.
 - High-risk tools must use `confirm.required`; runner must reject unconfirmed workflow tool nodes as a safety backstop.
 - Workflows stop on first failed step in MVP.
@@ -38,6 +42,8 @@ If the Web UI changes, `npm run build --prefix web` must be run so `internal/ser
 - Do not add new runtime tools under legacy root `tools/` or workflows under root `workflows/`.
 - Do not restore root `ops.yaml` or root `opsctl.exe`; use `configs/ops.yaml` and `bin/opsctl.exe`.
 - Do not document or verify commands against legacy runtime paths such as `tools/demo/hello`, `tools/demo/sample-tool`, or `workflows/demo-hello`.
+- Do not include generic Go/React/framework-source coding standards in plugin template/dev-kit documentation; those packages are for plugin authors, not platform contributors.
+- Do not expose host product internals in plugin template/dev-kit content: avoid Web UI/page/catalog/API/backend/frontend/source-code wording in ZIP documentation intended for plugin developers.
 - Do not hard-code tool IDs or workflow IDs in Go code except demo/sample data.
 - Do not require a database for MVP run history.
 - Do not require a separate frontend server in production; Web assets must be embedded into the Go binary.
@@ -86,6 +92,8 @@ For more detail, read `../guides/cross-platform-runtime-thinking-guide.md`.
 
 - Pure config/parameter functions need unit tests in `internal/config`.
 - Plugin parsing and path-safety logic need unit tests in `internal/plugin`.
+- Plugin template/dev-kit tests must assert both positive standard-sample content (complete manifest, confirm example, workflow, robust script snippets, README/examples) and negative host-internal wording (Web UI/page/catalog/API/backend/frontend/source-code/product terms).
+- Plugin upload tests must cover at least: new plugin install, duplicate prompt, higher-version replace, same/lower-version rejection, traversal rejection, explicit directory entries, invalid ZIP, unsafe plugin ID, and multi-plugin ZIP rejection.
 - Registry plugin normalization needs tests in `internal/registry`.
 - Any change to parameter merge or validation should include regression tests.
 - Any change to API routes should be manually verified with `opsctl serve --port <port>` and `/api/catalog`.

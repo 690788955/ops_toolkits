@@ -54,6 +54,10 @@ func Load(baseDir string, cfg config.PluginsConfig) (LoadResult, error) {
 	return result, nil
 }
 
+func LoadPackage(dir string) (Package, error) {
+	return loadPackage(dir)
+}
+
 func loadPackage(dir string) (Package, error) {
 	manifestPath := filepath.Join(dir, "plugin.yaml")
 	data, err := os.ReadFile(manifestPath)
@@ -68,8 +72,8 @@ func loadPackage(dir string) (Package, error) {
 }
 
 func ValidatePackage(pkg Package) error {
-	if strings.TrimSpace(pkg.Manifest.ID) == "" {
-		return fmt.Errorf("插件 ID 必填: %s", pkg.Path)
+	if err := validatePluginID(pkg.Manifest.ID, pkg.Path); err != nil {
+		return err
 	}
 	if strings.TrimSpace(pkg.Manifest.Name) == "" {
 		return fmt.Errorf("插件 %s 名称必填", pkg.Manifest.ID)
@@ -88,6 +92,17 @@ func ValidatePackage(pkg Package) error {
 		if err := validateWorkflow(pkg, workflow, seenWorkflows); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func validatePluginID(id, path string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("插件 ID 必填: %s", path)
+	}
+	if id == "." || id == ".." || strings.ContainsAny(id, `/\\`) {
+		return fmt.Errorf("插件 ID %s 包含不安全路径字符", id)
 	}
 	return nil
 }

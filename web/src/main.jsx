@@ -37,6 +37,8 @@ function App() {
   const [searchText, setSearchText] = useState('')
   const [activeTag, setActiveTag] = useState('')
   const [result, setResult] = useState({message: '等待执行...'})
+  const [pluginModalOpen, setPluginModalOpen] = useState(false)
+  const [pluginUploadState, setPluginUploadState] = useState({message: '请选择插件 ZIP 包。'})
 
   async function refreshCatalog(options = {}) {
     const body = await fetchJSON('/api/catalog')
@@ -100,9 +102,9 @@ function App() {
         setResult({run: body, detail: await fetchRunDetail(body.id)})
         return
       }
-      setResult({message: JSON.stringify(body, null, 2)})
+      setResult({message: summarizeAPIResponse(body, '执行请求已提交。'), response: body})
     } catch (err) {
-      setResult({message: String(err)})
+      setResult({message: readableAPIError(err, '执行失败。'), response: err.body})
     }
   }
 
@@ -133,10 +135,10 @@ function App() {
             </button>
           ))}
         </div>
+        <button className="pluginAction" onClick={() => setPluginModalOpen(true)} title="插件管理">+</button>
       </aside>
 
       <main className="content">
-        <a className="downloadKit floatingDownload" href="/api/dev/toolkit.zip">下载工具开发包</a>
         <header className="topbar">
           <div>
             <h2>{category?.name || '未选择分类'}</h2>
@@ -164,6 +166,71 @@ function App() {
           <ResultView result={result} />
         </section>
       </main>
+      {pluginModalOpen && (
+        <PluginManagerModal
+          state={pluginUploadState}
+          setState={setPluginUploadState}
+          onClose={() => setPluginModalOpen(false)}
+          onUploaded={async body => {
+            await refreshCatalog({keepCategory: true})
+            setResult({message: JSON.stringify(body, null, 2)})
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+function PluginManagerModal({state, setState, onClose, onUploaded}) {
+  const [file, setFile] = useState(null)
+  const [uploading, setUploading] = useState(false)
+
+  async function uploadPlugin(replace = false) {
+    if (!file) {
+      setState({message: '请先选择插件 ZIP 包。'})
+      return
+    }
+    setUploading(true)
+    setState({message: replace ? '正在更新插件...' : '正在上传插件...'})
+    try {
+      const body = await postPluginZip(file, replace)
+      setState({message: `插件${body.status === 'updated' ? '更新' : '上传'}成功。`, response: body})
+      await onUploaded(body)
+    } catch (err) {
+      const detail = err.body?.data
+      if (err.status === 409 && detail?.existing) {
+        setState({message: `插件已存在，是否更新？当前版本：${detail.existing_version || '-'}，上传版本：${detail.version || '-'}`, duplicate: true, response: err.body})
+      } else {
+        setState({message: String(err), response: err.body})
+      }
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  return (
+    <div className="modalBackdrop" onClick={onClose}>
+      <div className="modal" onClick={event => event.stopPropagation()}>
+        <div className="modalHeader">
+          <div>
+            <h3>插件管理</h3>
+            <p>下载插件模板，或上传一个插件 ZIP 包。</p>
+          </div>
+          <button className="modalClose" onClick={onClose}>×</button>
+        </div>
+        <div className="pluginModalActions">
+          <a className="primary downloadTemplate" href="/api/dev/toolkit.zip">下载插件模板</a>
+          <label>
+            <span>上传插件 ZIP</span>
+            <input type="file" accept=".zip,application/zip" onChange={event => { setFile(event.target.files?.[0] || null); setState({message: '已选择插件 ZIP，点击上传开始安装。'}) }} />
+          </label>
+          <div className="buttonRow">
+            <button className="primary" disabled={!file || uploading} onClick={() => uploadPlugin(false)}>上传插件 ZIP</button>
+            {state.duplicate && <button className="secondary" disabled={uploading} onClick={() => uploadPlugin(true)}>确认更新</button>}
+          </div>
+        </div>
+        <pre className="modalResult">{state.response ? JSON.stringify(state.response, null, 2) : state.message}</pre>
+      </div>
     </div>
   )
 }
@@ -175,12 +242,28 @@ function ResultView({result}) {
   if (result?.detail?.data) {
     return <RunDetail detail={result.detail.data} run={result.run} />
   }
+  if (result?.response) {
+    return <MessageWithDetails message={result.message} details={result.response} />
+  }
   return <pre>{result?.message || '暂无结果'}</pre>
+}
+
+function MessageWithDetails({message, details}) {
+  return (
+    <div className="runDetail">
+      <pre>{message || '暂无结果'}</pre>
+      <details>
+        <summary>查看完整响应</summary>
+        <pre>{JSON.stringify(details, null, 2)}</pre>
+      </details>
+    </div>
+  )
 }
 
 function RunDetail({detail, run}) {
   const record = detail.record || {}
   const logs = detail.logs || {}
+  const combinedStepLogs = combineWorkflowStepLogs(logs.steps)
   return (
     <div className="runDetail">
       <div className="runSummary">
@@ -188,15 +271,14 @@ function RunDetail({detail, run}) {
         <span>状态：{record.status || run?.status}</span>
         <span>目标：{record.target || '-'}</span>
       </div>
-      <LogBlock title="标准输出" value={logs.stdout} />
-      <LogBlock title="错误输出" value={logs.stderr} />
-      {logs.steps && Object.entries(logs.steps).map(([id, stepLogs]) => (
-        <div key={id} className="stepLogs">
-          <h4>节点日志：{id}</h4>
-          <LogBlock title="标准输出" value={stepLogs.stdout} />
-          <LogBlock title="错误输出" value={stepLogs.stderr} />
-        </div>
-      ))}
+      {combinedStepLogs ? (
+        <LogBlock title="工作流日志" value={combinedStepLogs} />
+      ) : (
+        <>
+          <LogBlock title="标准输出" value={logs.stdout} />
+          <LogBlock title="错误输出" value={logs.stderr} />
+        </>
+      )}
       <details>
         <summary>查看完整运行记录</summary>
         <pre>{JSON.stringify(detail, null, 2)}</pre>
@@ -297,6 +379,9 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   const [workflowParamsText, setWorkflowParamsText] = useState('[]')
   const [runParamsText, setRunParamsText] = useState('{}')
   const [nodeParamsText, setNodeParamsText] = useState('{}')
+  const [editorSearchText, setEditorSearchText] = useState('')
+  const [editorActiveTag, setEditorActiveTag] = useState('')
+  const [editorValidation, setEditorValidation] = useState(null)
   const [flowInstance, setFlowInstance] = useState(null)
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
@@ -309,6 +394,8 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   const selectedNode = useMemo(() => nodes.find(node => node.id === selectedNodeID), [nodes, selectedNodeID])
   const selectedEdge = useMemo(() => edges.find(edge => edge.id === selectedEdgeID), [edges, selectedEdgeID])
   const selectedTool = useMemo(() => (catalog.tools || []).find(tool => tool.id === selectedNode?.data.tool), [catalog.tools, selectedNode])
+  const editorAvailableTags = useMemo(() => tagsForEntries(toolOptions), [toolOptions])
+  const editorToolOptions = useMemo(() => filterEntries(toolOptions, editorSearchText, editorActiveTag), [toolOptions, editorSearchText, editorActiveTag])
   const workflowParameters = useMemo(() => parseJSONList(workflowParamsText), [workflowParamsText])
   const mappingSources = useMemo(() => buildMappingSources(workflowParameters, selectedNodeID, nodes, edges), [workflowParameters, selectedNodeID, nodes, edges])
 
@@ -372,6 +459,7 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     setNodes(current => [...current, nextNode])
     setSelectedNodeID(nodeID)
     setSelectedEdgeID('')
+    setEditorValidation(null)
   }
 
   function handleToolDragStart(event, tool) {
@@ -387,7 +475,7 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   function handleCanvasDrop(event) {
     event.preventDefault()
     const toolID = event.dataTransfer.getData('application/ops-tool')
-    const tool = toolOptions.find(item => item.id === toolID)
+    const tool = (catalog.tools || []).find(item => item.id === toolID)
     if (!tool || !flowInstance) return
     addToolNode(tool, flowInstance.screenToFlowPosition({x: event.clientX, y: event.clientY}))
   }
@@ -429,52 +517,93 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     updateSelectedNodeParams(nextParams)
   }
 
-  function currentDraft() {
-    const workflowParameters = JSON.parse(workflowParamsText || '[]')
-    if (!Array.isArray(workflowParameters)) {
-      throw new Error('工作流参数必须是 JSON 数组')
+  function showEditorValidation(status) {
+    setEditorValidation(status)
+    setResult({message: formatPreflightMessage(status)})
+  }
+
+  function preflightWorkflowDraft(mode) {
+    const errors = []
+    let workflowParameters = []
+    try {
+      workflowParameters = JSON.parse(workflowParamsText || '[]')
+      if (!Array.isArray(workflowParameters)) {
+        errors.push('工作流参数必须是 JSON 数组。')
+        workflowParameters = []
+      }
+    } catch (err) {
+      errors.push(`工作流参数 JSON 无效：${err.message}`)
     }
-    return buildWorkflowDraft(workflow, nodes, edges, activeCategory, workflowParameters)
+    const draft = buildWorkflowDraft(workflow, nodes, edges, activeCategory, workflowParameters)
+    if (!String(draft.id || '').trim()) errors.push('请先填写工作流 ID。')
+    if (!String(draft.name || '').trim()) errors.push('请先填写工作流名称。')
+    if (nodes.length === 0) errors.push('请至少添加一个工作流节点。')
+    findMissingRequiredNodeParams(nodes, catalog.tools || []).forEach(item => {
+      errors.push(`节点 ${item.nodeID}（${item.toolName}）缺少必填参数：${item.paramName}`)
+    })
+    const title = mode === 'save' ? '保存前检查未通过' : mode === 'run' ? '执行前检查未通过' : '校验前检查未通过'
+    return {draft, errors, warnings: [], title}
   }
 
   async function validateDraft() {
+    const check = preflightWorkflowDraft('validate')
+    if (check.errors.length > 0) {
+      showEditorValidation(check)
+      return
+    }
     try {
-      const draft = currentDraft()
-      setWorkflow(draft)
-      const body = await postJSON(`/api/workflows/${draft.id || 'draft'}/validate`, {workflow: draft})
-      setResult({message: JSON.stringify(body, null, 2)})
+      setEditorValidation(null)
+      setWorkflow(check.draft)
+      const body = await postJSON(`/api/workflows/${check.draft.id || 'draft'}/validate`, {workflow: check.draft})
+      setResult({message: summarizeAPIResponse(body, '工作流校验通过。'), response: body})
     } catch (err) {
-      setResult({message: String(err)})
+      setResult({message: readableAPIError(err, '工作流校验失败。'), response: err.body})
     }
   }
 
   async function saveDraft() {
+    const check = preflightWorkflowDraft('save')
+    if (check.errors.length > 0) {
+      showEditorValidation(check)
+      return
+    }
     try {
-      const draft = currentDraft()
-      setWorkflow(draft)
-      const body = await postJSON(`/api/workflows/${draft.id}/save`, {workflow: draft})
-      setSelectedWorkflowID(draft.id)
+      setEditorValidation(null)
+      setWorkflow(check.draft)
+      const body = await postJSON(`/api/workflows/${check.draft.id}/save`, {workflow: check.draft})
+      setSelectedWorkflowID(check.draft.id)
       await refreshCatalog({keepCategory: true})
-      setResult({message: JSON.stringify(body, null, 2)})
+      setResult({message: summarizeAPIResponse(body, '工作流保存成功。'), response: body})
     } catch (err) {
-      setResult({message: String(err)})
+      setResult({message: readableAPIError(err, '工作流保存失败。'), response: err.body})
     }
   }
 
   async function runDraft() {
+    const check = preflightWorkflowDraft('run')
+    if (check.errors.length > 0) {
+      showEditorValidation(check)
+      return
+    }
     try {
-      const draft = currentDraft()
-      const runParams = JSON.parse(runParamsText || '{}')
-      if (!draft.id) throw new Error('请先填写工作流 ID')
+      setEditorValidation(null)
+      let runParams = {}
+      try {
+        runParams = JSON.parse(runParamsText || '{}')
+      } catch (err) {
+        const status = {title: '执行前检查未通过', errors: [`执行参数 JSON 无效：${err.message}`], warnings: []}
+        showEditorValidation(status)
+        return
+      }
       setResult({message: '执行工作流...'})
-      const body = await postJSON(`/api/workflows/${draft.id}/run`, {params: runParams})
+      const body = await postJSON(`/api/workflows/${check.draft.id}/run`, {params: runParams})
       if (body.id) {
         setResult({run: body, detail: await fetchRunDetail(body.id)})
         return
       }
-      setResult({message: JSON.stringify(body, null, 2)})
+      setResult({message: summarizeAPIResponse(body, '工作流已提交执行。'), response: body})
     } catch (err) {
-      setResult({message: String(err)})
+      setResult({message: readableAPIError(err, '工作流执行失败。'), response: err.body})
     }
   }
 
@@ -525,15 +654,32 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
             <textarea className="smallTextarea" value={runParamsText} onChange={event => setRunParamsText(event.target.value)} />
           </label>
         </div>
+      </section>
+
+      <section className="card editorPalette">
+        <div className="cardHeader">
+          <h3>工具节点</h3>
+          <span>{editorToolOptions.length} / {toolOptions.length} 项</span>
+        </div>
+        <div className="filters editorPaletteFilters">
+          <input value={editorSearchText} placeholder="搜索工具名称、描述、ID 或标签" onChange={event => setEditorSearchText(event.target.value)} />
+          <div className="tagFilters">
+            <button className={editorActiveTag === '' ? 'tagChip active' : 'tagChip'} onClick={() => setEditorActiveTag('')}>全部</button>
+            {editorAvailableTags.map(tag => (
+              <button key={tag} className={editorActiveTag === tag ? 'tagChip active' : 'tagChip'} onClick={() => setEditorActiveTag(tag)}>{tag}</button>
+            ))}
+          </div>
+        </div>
         <div className="toolPalette">
-          <strong>工具节点</strong>
-          {toolOptions.map(tool => (
+          {editorToolOptions.map(tool => (
             <button key={tool.id} className="paletteItem" draggable onDragStart={event => handleToolDragStart(event, tool)} onClick={() => addToolNode(tool)}>
               <span>{tool.name || tool.id}</span>
               <em>{tool.id}</em>
               <small>拖到画布，或点击添加</small>
+              <TagList tags={tool.tags || []} />
             </button>
           ))}
+          {editorToolOptions.length === 0 && <div className="empty small">没有匹配的工具节点。</div>}
         </div>
       </section>
 
@@ -563,7 +709,8 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
           {selectedNode && <span>{selectedNode.id}</span>}
           {selectedEdge && <span>{selectedEdge.source} → {selectedEdge.target}</span>}
         </div>
-        {selectedEdge && <div className="empty small">已选择依赖线，可在左侧点击“删除依赖”。</div>}
+        {editorValidation?.errors?.length > 0 && <ValidationSummary status={editorValidation} />}
+        {selectedEdge && <div className="empty small">已选择依赖线，可在上方点击“删除依赖”。</div>}
         {!selectedNode ? (!selectedEdge && <div className="empty small">点击画布节点后编辑参数，点击连线后可删除依赖。</div>) : (
           <div className="form compact">
             <label>
@@ -587,6 +734,17 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
           </div>
         )}
       </section>
+    </div>
+  )
+}
+
+function ValidationSummary({status}) {
+  return (
+    <div className="validationSummary">
+      <strong>{status.title || '检查未通过'}</strong>
+      <ul>
+        {(status.errors || []).map(error => <li key={error}>{error}</li>)}
+      </ul>
     </div>
   )
 }
@@ -692,6 +850,65 @@ function parseJSONList(value) {
   }
 }
 
+function findMissingRequiredNodeParams(nodes, tools) {
+  const toolMap = new Map((tools || []).map(tool => [tool.id, tool]))
+  const missing = []
+  nodes.forEach(node => {
+    const tool = toolMap.get(node.data.tool)
+    ;(tool?.parameters || []).forEach(param => {
+      if (!param.required) return
+      const value = node.data.params?.[param.name]
+      if (value === undefined || value === null || String(value).trim() === '') {
+        missing.push({nodeID: node.id, toolName: tool.name || tool.id, paramName: param.name})
+      }
+    })
+  })
+  return missing
+}
+
+function formatPreflightMessage(status) {
+  const errors = status.errors || []
+  if (errors.length === 0) return status.title || '检查通过。'
+  return `${status.title || '检查未通过'}\n${errors.map(error => `- ${error}`).join('\n')}`
+}
+
+function summarizeAPIResponse(body, fallback) {
+  if (body?.data?.valid === false) return readableValidationMessages(body.data).join('\n')
+  if (body?.message) return body.message
+  if (body?.error) return body.error
+  return fallback
+}
+
+function readableAPIError(err, fallback) {
+  const body = err.body
+  if (body?.data) {
+    const messages = readableValidationMessages(body.data)
+    if (messages.length > 0) return `${fallback}\n${messages.join('\n')}`
+  }
+  return `${fallback}\n${err.message || String(err)}`
+}
+
+function readableValidationMessages(data) {
+  const messages = []
+  if (typeof data === 'string') messages.push(data)
+  ;(data?.errors || data?.warnings || []).forEach(item => messages.push(typeof item === 'string' ? item : JSON.stringify(item)))
+  if (data?.message) messages.push(data.message)
+  if (data?.error) messages.push(data.error)
+  if (data?.valid === false && messages.length === 0) messages.push('后端校验未通过，请检查工作流配置。')
+  return messages.map(message => `- ${message}`)
+}
+
+function combineWorkflowStepLogs(steps) {
+  if (!steps || Object.keys(steps).length === 0) return ''
+  return Object.entries(steps).map(([id, stepLogs]) => {
+    const parts = [`[${id}]`]
+    if (stepLogs.stdout) parts.push(`stdout:\n${stepLogs.stdout}`)
+    if (stepLogs.stderr) parts.push(`stderr:\n${stepLogs.stderr}`)
+    if (parts.length === 1) parts.push('无日志内容')
+    return parts.join('\n')
+  }).join('\n\n')
+}
+
 function buildMappingSources(workflowParameters, selectedNodeID, nodes, edges) {
   const sources = []
   ;(workflowParameters || []).forEach(param => {
@@ -748,7 +965,12 @@ function uniqueNodeID(toolID, nodes) {
 async function fetchJSON(path) {
   const res = await fetch(path)
   const body = await res.json()
-  if (!res.ok) throw new Error(body.error || res.statusText)
+  if (!res.ok) {
+    const err = new Error(body.error || res.statusText)
+    err.status = res.status
+    err.body = body
+    throw err
+  }
   return body
 }
 
@@ -763,7 +985,29 @@ async function postJSON(path, payload) {
     body: JSON.stringify(payload)
   })
   const body = await res.json()
-  if (!res.ok) throw new Error(body.error || res.statusText)
+  if (!res.ok) {
+    const err = new Error(body.error || res.statusText)
+    err.status = res.status
+    err.body = body
+    throw err
+  }
+  return body
+}
+
+async function postPluginZip(file, replace) {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(`/api/plugins/upload${replace ? '?replace=true' : ''}`, {
+    method: 'POST',
+    body: form
+  })
+  const body = await res.json()
+  if (!res.ok) {
+    const err = new Error(body.error || res.statusText)
+    err.status = res.status
+    err.body = body
+    throw err
+  }
   return body
 }
 
