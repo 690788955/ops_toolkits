@@ -23,6 +23,7 @@ These guides help you **ask the right questions before coding**.
 |-------|---------|-------------|
 | [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md) | Identify patterns and reduce duplication | When you notice repeated patterns |
 | [Cross-Layer Thinking Guide](./cross-layer-thinking-guide.md) | Think through data flow across layers | Features spanning multiple layers |
+| [Cross-Platform Runtime Thinking Guide](./cross-platform-runtime-thinking-guide.md) | Diagnose Windows/Git Bash/WSL shell and stale runtime path issues | Runtime commands, `.sh` execution on Windows, or plugin layout migration issues |
 
 ---
 
@@ -46,6 +47,16 @@ These guides help you **ask the right questions before coding**.
 - [ ] **You're creating a new utility/helper function** ← Search first!
 
 → Read [Code Reuse Thinking Guide](./code-reuse-thinking-guide.md)
+
+### When to Think About Cross-Platform Runtime Issues
+
+- [ ] A `.sh` command fails on Windows
+- [ ] Error output mentions WSL, `getpwnam`, `/bin/bash`, or malformed `C:Users...` paths
+- [ ] A command, doc, test, or scaffold mentions legacy root runtime paths such as `tools/demo/hello`, `tools/demo/sample-tool`, or `workflows/demo-hello`
+- [ ] Manual verification uses root `opsctl.exe` or root `ops.yaml` instead of `./bin/opsctl.exe` and `configs/ops.yaml`
+- [ ] You are updating plugin/runtime docs, dev-kit examples, scaffolds, or shell execution behavior
+
+→ Read [Cross-Platform Runtime Thinking Guide](./cross-platform-runtime-thinking-guide.md)
 
 ---
 
