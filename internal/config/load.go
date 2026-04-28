@@ -127,6 +127,13 @@ func NormalizeWorkflow(cfg *WorkflowConfig) {
 		cfg.Edges = edgesFromDependsOn(cfg.Nodes)
 	}
 	for i := range cfg.Nodes {
+		if cfg.Nodes[i].Type == "" {
+			if cfg.Nodes[i].Tool != "" {
+				cfg.Nodes[i].Type = WorkflowNodeTypeTool
+			} else if cfg.Nodes[i].Condition.Input != "" || len(cfg.Nodes[i].Condition.Cases) > 0 {
+				cfg.Nodes[i].Type = WorkflowNodeTypeCondition
+			}
+		}
 		if cfg.Nodes[i].OnFailure == "" {
 			cfg.Nodes[i].OnFailure = "stop"
 		}

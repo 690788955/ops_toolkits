@@ -769,6 +769,13 @@ func handleWorkflowRun(w http.ResponseWriter, req *http.Request, reg *registry.R
 
 func confirmWorkflowTools(reg *registry.Registry, wf *config.WorkflowConfig, confirmed bool) error {
 	for _, node := range wf.Nodes {
+		nodeType := node.Type
+		if nodeType == "" && node.Tool != "" {
+			nodeType = config.WorkflowNodeTypeTool
+		}
+		if nodeType != config.WorkflowNodeTypeTool {
+			continue
+		}
 		tool, err := reg.Tool(node.Tool)
 		if err != nil {
 			return err
@@ -939,6 +946,7 @@ func registerWeb(mux *http.ServeMux) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(data)
 	})
 }
@@ -959,6 +967,13 @@ func effectiveWorkflowConfirm(reg *registry.Registry, wf *config.WorkflowConfig)
 		return wf.Confirm
 	}
 	for _, node := range wf.Nodes {
+		nodeType := node.Type
+		if nodeType == "" && node.Tool != "" {
+			nodeType = config.WorkflowNodeTypeTool
+		}
+		if nodeType != config.WorkflowNodeTypeTool {
+			continue
+		}
 		tool, err := reg.Tool(node.Tool)
 		if err != nil || !tool.Config.Confirm.Required || node.Confirm {
 			continue

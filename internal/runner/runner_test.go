@@ -98,6 +98,159 @@ echo "source=${OPS_PARAM_SOURCE}"
 	}
 }
 
+func TestRunWorkflowRoutesConditionBranchAndSkipsInactive(t *testing.T) {
+	dir := t.TempDir()
+	inspectDir := writeTool(t, dir, "inspect", `#!/usr/bin/env bash
+set -euo pipefail
+echo "STATUS=OK"
+`)
+	okDir := writeTool(t, dir, "ok", `#!/usr/bin/env bash
+set -euo pipefail
+echo ok-branch
+`)
+	warnDir := writeTool(t, dir, "warn", `#!/usr/bin/env bash
+set -euo pipefail
+echo warn-branch
+`)
+	sharedDir := writeTool(t, dir, "shared", `#!/usr/bin/env bash
+set -euo pipefail
+echo shared
+`)
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.inspect": {Entry: config.ToolEntry{ID: "demo.inspect", Category: "demo"}, Config: toolConfig("demo.inspect"), Dir: inspectDir},
+			"demo.ok":      {Entry: config.ToolEntry{ID: "demo.ok", Category: "demo"}, Config: toolConfig("demo.ok"), Dir: okDir},
+			"demo.warn":    {Entry: config.ToolEntry{ID: "demo.warn", Category: "demo"}, Config: toolConfig("demo.warn"), Dir: warnDir},
+			"demo.shared":  {Entry: config.ToolEntry{ID: "demo.shared", Category: "demo"}, Config: toolConfig("demo.shared"), Dir: sharedDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID: "demo.flow",
+		Nodes: []config.WorkflowNode{
+			{ID: "inspect", Tool: "demo.inspect"},
+			{ID: "route", Type: config.WorkflowNodeTypeCondition, Condition: config.WorkflowCondition{Input: "{{ .steps.inspect.stdout }}", Cases: []config.ConditionCase{{ID: "ok", Name: "正常", Operator: "contains", Values: []string{"OK"}}, {ID: "warn", Name: "告警", Operator: "contains", Values: []string{"WARN"}}}, DefaultCase: "default"}},
+			{ID: "ok", Tool: "demo.ok"},
+			{ID: "warn", Tool: "demo.warn"},
+			{ID: "shared", Tool: "demo.shared"},
+		},
+		Edges: []config.WorkflowEdge{{From: "inspect", To: "route"}, {From: "route", To: "ok", Case: "ok"}, {From: "route", To: "warn", Case: "warn"}, {From: "ok", To: "shared"}, {From: "warn", To: "shared"}, {From: "inspect", To: "shared"}},
+	}
+	reg.Workflows["demo.flow"] = &registry.Workflow{Entry: config.WorkflowRef{ID: "demo.flow", Category: "demo"}, Config: wf, Path: filepath.Join(dir, "workflows", "demo.flow.yaml")}
+
+	r := New(reg)
+	record, err := r.RunWorkflow(context.Background(), "demo.flow", nil, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflow error: %v", err)
+	}
+	if record.Status != "succeeded" {
+		t.Fatalf("status = %s", record.Status)
+	}
+	steps := map[string]StepRecord{}
+	for _, step := range record.Steps {
+		steps[step.ID] = step
+	}
+	if steps["route"].MatchedCase != "ok" || steps["route"].ConditionInput != "STATUS=OK" {
+		t.Fatalf("condition step = %#v, want matched ok with input", steps["route"])
+	}
+	if steps["ok"].Status != "succeeded" || steps["warn"].Status != "skipped" || steps["shared"].Status != "succeeded" {
+		t.Fatalf("steps = %#v, want ok succeeded, warn skipped, shared succeeded", steps)
+	}
+	if _, err := os.Stat(filepath.Join(r.RunsDir, record.ID, "warn", "stdout.log")); !os.IsNotExist(err) {
+		t.Fatalf("inactive branch should not run, stat err = %v", err)
+	}
+}
+
+func TestRunWorkflowUsesDefaultConditionBranch(t *testing.T) {
+	dir := t.TempDir()
+	inspectDir := writeTool(t, dir, "inspect", `#!/usr/bin/env bash
+set -euo pipefail
+echo "STATUS=UNKNOWN"
+`)
+	defaultDir := writeTool(t, dir, "default", `#!/usr/bin/env bash
+set -euo pipefail
+echo default-branch
+`)
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.inspect": {Entry: config.ToolEntry{ID: "demo.inspect", Category: "demo"}, Config: toolConfig("demo.inspect"), Dir: inspectDir},
+			"demo.default": {Entry: config.ToolEntry{ID: "demo.default", Category: "demo"}, Config: toolConfig("demo.default"), Dir: defaultDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID: "demo.flow",
+		Nodes: []config.WorkflowNode{
+			{ID: "inspect", Tool: "demo.inspect"},
+			{ID: "route", Type: config.WorkflowNodeTypeCondition, Condition: config.WorkflowCondition{Input: "{{ .steps.inspect.stdout }}", Cases: []config.ConditionCase{{ID: "ok", Name: "正常", Operator: "contains", Values: []string{"OK"}}}, DefaultCase: "default"}},
+			{ID: "fallback", Tool: "demo.default"},
+		},
+		Edges: []config.WorkflowEdge{{From: "inspect", To: "route"}, {From: "route", To: "fallback", Case: "default"}},
+	}
+	reg.Workflows["demo.flow"] = &registry.Workflow{Entry: config.WorkflowRef{ID: "demo.flow", Category: "demo"}, Config: wf}
+
+	r := New(reg)
+	record, err := r.RunWorkflow(context.Background(), "demo.flow", nil, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflow error: %v", err)
+	}
+	steps := map[string]StepRecord{}
+	for _, step := range record.Steps {
+		steps[step.ID] = step
+	}
+	if steps["route"].MatchedCase != "default" || steps["fallback"].Status != "succeeded" {
+		t.Fatalf("steps = %#v, want default branch succeeded", steps)
+	}
+}
+
+func TestRunWorkflowConditionWithoutDefaultSkipsAllBranches(t *testing.T) {
+	dir := t.TempDir()
+	inspectDir := writeTool(t, dir, "inspect-none", `#!/usr/bin/env bash
+set -euo pipefail
+echo "STATUS=UNKNOWN"
+`)
+	okDir := writeTool(t, dir, "ok-none", `#!/usr/bin/env bash
+set -euo pipefail
+echo should-not-run
+`)
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.inspect": {Entry: config.ToolEntry{ID: "demo.inspect", Category: "demo"}, Config: toolConfig("demo.inspect"), Dir: inspectDir},
+			"demo.ok":      {Entry: config.ToolEntry{ID: "demo.ok", Category: "demo"}, Config: toolConfig("demo.ok"), Dir: okDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID: "demo.flow",
+		Nodes: []config.WorkflowNode{
+			{ID: "inspect", Tool: "demo.inspect"},
+			{ID: "route", Type: config.WorkflowNodeTypeCondition, Condition: config.WorkflowCondition{Input: "{{ .steps.inspect.stdout }}", Cases: []config.ConditionCase{{ID: "ok", Name: "正常", Operator: "contains", Values: []string{"OK"}}}}},
+			{ID: "ok", Tool: "demo.ok"},
+		},
+		Edges: []config.WorkflowEdge{{From: "inspect", To: "route"}, {From: "route", To: "ok", Case: "ok"}},
+	}
+	reg.Workflows["demo.flow"] = &registry.Workflow{Entry: config.WorkflowRef{ID: "demo.flow", Category: "demo"}, Config: wf}
+
+	r := New(reg)
+	record, err := r.RunWorkflow(context.Background(), "demo.flow", nil, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflow error: %v", err)
+	}
+	steps := map[string]StepRecord{}
+	for _, step := range record.Steps {
+		steps[step.ID] = step
+	}
+	if steps["route"].MatchedCase != "" || steps["ok"].Status != "skipped" {
+		t.Fatalf("steps = %#v, want no matched case and skipped ok branch", steps)
+	}
+}
+
 func writeTool(t *testing.T, baseDir, name, script string) string {
 	t.Helper()
 	dir := filepath.Join(baseDir, "tools", "demo", name)

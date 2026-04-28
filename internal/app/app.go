@@ -123,9 +123,7 @@ func runCommand(opts *options) *cobra.Command {
 			return err
 		}
 		record, err := runner.New(reg).RunWorkflowWithConfirmation(context.Background(), args[0], params, confirmed, cmd.OutOrStdout(), cmd.ErrOrStderr())
-		if record != nil {
-			fmt.Fprintf(cmd.OutOrStdout(), "\nrun_id=%s status=%s\n", record.ID, record.Status)
-		}
+		printRunSummary(cmd.OutOrStdout(), record)
 		return err
 	}})
 	return cmd
@@ -257,6 +255,9 @@ func packageCommand(opts *options) *cobra.Command {
 func confirmWorkflowTools(reg *registry.Registry, wf *config.WorkflowConfig, in io.Reader, out io.Writer) (bool, error) {
 	confirmed := false
 	for _, node := range wf.Nodes {
+		if workflowNodeType(node) != config.WorkflowNodeTypeTool {
+			continue
+		}
 		tool, err := reg.Tool(node.Tool)
 		if err != nil {
 			return false, err
@@ -270,6 +271,53 @@ func confirmWorkflowTools(reg *registry.Registry, wf *config.WorkflowConfig, in 
 		confirmed = true
 	}
 	return confirmed, nil
+}
+
+func printRunSummary(out io.Writer, record *runner.RunRecord) {
+	if record == nil {
+		return
+	}
+	fmt.Fprintf(out, "\nrun_id=%s status=%s\n", record.ID, record.Status)
+	if len(record.Steps) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "步骤:")
+	for _, step := range record.Steps {
+		fmt.Fprintf(out, "  %s [%s] %s", step.ID, displayStepType(step), step.Status)
+		if step.Tool != "" {
+			fmt.Fprintf(out, " tool=%s", step.Tool)
+		}
+		if step.ConditionInput != "" {
+			fmt.Fprintf(out, " input=%q", step.ConditionInput)
+		}
+		if step.MatchedCase != "" {
+			fmt.Fprintf(out, " matched_case=%s", step.MatchedCase)
+		}
+		if step.SkippedReason != "" {
+			fmt.Fprintf(out, " skipped_reason=%s", step.SkippedReason)
+		}
+		if step.Error != "" {
+			fmt.Fprintf(out, " error=%s", step.Error)
+		}
+		fmt.Fprintln(out)
+	}
+}
+
+func displayStepType(step runner.StepRecord) string {
+	if step.Type == config.WorkflowNodeTypeCondition {
+		return "编排节点/条件分支"
+	}
+	return "工具节点"
+}
+
+func workflowNodeType(node config.WorkflowNode) string {
+	if node.Type != "" {
+		return node.Type
+	}
+	if node.Tool != "" {
+		return config.WorkflowNodeTypeTool
+	}
+	return ""
 }
 
 func loadRegistry(opts *options) (*registry.Registry, error) {

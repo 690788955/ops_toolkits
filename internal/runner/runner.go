@@ -37,12 +37,16 @@ type RunRecord struct {
 }
 
 type StepRecord struct {
-	ID        string    `json:"id"`
-	Tool      string    `json:"tool"`
-	Status    string    `json:"status"`
-	StartedAt time.Time `json:"started_at"`
-	EndedAt   time.Time `json:"ended_at"`
-	Error     string    `json:"error,omitempty"`
+	ID             string    `json:"id"`
+	Type           string    `json:"type"`
+	Tool           string    `json:"tool,omitempty"`
+	Status         string    `json:"status"`
+	StartedAt      time.Time `json:"started_at"`
+	EndedAt        time.Time `json:"ended_at"`
+	Error          string    `json:"error,omitempty"`
+	ConditionInput string    `json:"condition_input,omitempty"`
+	MatchedCase    string    `json:"matched_case,omitempty"`
+	SkippedReason  string    `json:"skipped_reason,omitempty"`
 }
 
 func New(reg *registry.Registry) *Runner {
@@ -101,10 +105,47 @@ func (r *Runner) RunWorkflowWithConfirmation(ctx context.Context, id string, par
 		return record, err
 	}
 	workflowContext := copyParams(finalParams)
+	edgesByFrom, incomingByTo := workflowEdges(wf.Config.Edges)
+	incomingCaseByTo := map[string]map[string]bool{}
+	for _, edges := range edgesByFrom {
+		for _, edge := range edges {
+			if edge.Case == "" {
+				continue
+			}
+			if incomingCaseByTo[edge.To] == nil {
+				incomingCaseByTo[edge.To] = map[string]bool{}
+			}
+			incomingCaseByTo[edge.To][edge.Case] = true
+		}
+	}
+	active := map[string]bool{}
+	for _, node := range wf.Config.Nodes {
+		active[node.ID] = len(incomingByTo[node.ID]) == 0
+	}
 	for _, node := range ordered {
+		nodeType := workflowNodeType(node)
+		if !active[node.ID] {
+			reason := "条件分支未激活"
+			record.Steps = append(record.Steps, skippedStepRecord(node, nodeType, reason))
+			continue
+		}
+		if nodeType == config.WorkflowNodeTypeCondition {
+			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "running", StartedAt: time.Now()}
+			inputValue := renderTemplate(node.Condition.Input, workflowContext)
+			matchedCase := matchConditionCase(inputValue, node.Condition)
+			stepRecord.ConditionInput = inputValue
+			stepRecord.MatchedCase = matchedCase
+			stepRecord.EndedAt = time.Now()
+			stepRecord.Status = "succeeded"
+			record.Steps = append(record.Steps, stepRecord)
+			activateConditionBranches(node.ID, matchedCase, edgesByFrom, active)
+			workflowContext["steps."+node.ID+".condition.input"] = inputValue
+			workflowContext["steps."+node.ID+".condition.case"] = matchedCase
+			continue
+		}
 		stepParams := resolveStepParams(finalParams, workflowContext, node.Params)
 		tool, toolErr := r.Registry.Tool(node.Tool)
-		stepRecord := StepRecord{ID: node.ID, Tool: node.Tool, Status: "running", StartedAt: time.Now()}
+		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Tool: node.Tool, Status: "running", StartedAt: time.Now()}
 		stepRunDir := filepath.Join(runDir, node.ID)
 		if toolErr == nil {
 			toolErr = r.executeTool(ctx, tool, stepParams, stepRunDir, out, errOut)
@@ -120,6 +161,7 @@ func (r *Runner) RunWorkflowWithConfirmation(ctx context.Context, id string, par
 		addStepContext(workflowContext, node.ID, stepParams, stepRunDir)
 		stepRecord.Status = "succeeded"
 		record.Steps = append(record.Steps, stepRecord)
+		activatePlainBranches(node.ID, edgesByFrom, active)
 	}
 	finishRecord(record, err)
 	if saveErr := r.saveRecord(runDir, record); saveErr != nil && err == nil {
@@ -130,6 +172,9 @@ func (r *Runner) RunWorkflowWithConfirmation(ctx context.Context, id string, par
 
 func (r *Runner) validateWorkflowConfirmations(nodes []config.WorkflowNode, confirmed bool) error {
 	for _, node := range nodes {
+		if workflowNodeType(node) != config.WorkflowNodeTypeTool {
+			continue
+		}
 		tool, err := r.Registry.Tool(node.Tool)
 		if err != nil {
 			return err
@@ -141,6 +186,90 @@ func (r *Runner) validateWorkflowConfirmations(nodes []config.WorkflowNode, conf
 	return nil
 }
 
+type workflowEdgeBuckets map[string][]config.WorkflowEdge
+
+func workflowEdges(edges []config.WorkflowEdge) (workflowEdgeBuckets, map[string][]config.WorkflowEdge) {
+	byFrom := workflowEdgeBuckets{}
+	byTo := map[string][]config.WorkflowEdge{}
+	for _, edge := range edges {
+		byFrom[edge.From] = append(byFrom[edge.From], edge)
+		byTo[edge.To] = append(byTo[edge.To], edge)
+	}
+	return byFrom, byTo
+}
+
+func workflowNodeType(node config.WorkflowNode) string {
+	if node.Type != "" {
+		return node.Type
+	}
+	if node.Tool != "" {
+		return config.WorkflowNodeTypeTool
+	}
+	return config.WorkflowNodeTypeCondition
+}
+
+func skippedStepRecord(node config.WorkflowNode, nodeType, reason string) StepRecord {
+	now := time.Now()
+	return StepRecord{ID: node.ID, Type: nodeType, Tool: node.Tool, Status: "skipped", StartedAt: now, EndedAt: now, SkippedReason: reason}
+}
+
+func activatePlainBranches(nodeID string, edges workflowEdgeBuckets, active map[string]bool) {
+	for _, edge := range edges[nodeID] {
+		active[edge.To] = true
+	}
+}
+
+func activateConditionBranches(nodeID, matchedCase string, edges workflowEdgeBuckets, active map[string]bool) {
+	for _, edge := range edges[nodeID] {
+		if edge.Case == matchedCase {
+			active[edge.To] = true
+		}
+	}
+}
+
+func matchConditionCase(input string, condition config.WorkflowCondition) string {
+	for _, item := range condition.Cases {
+		if evaluateConditionCase(input, item) {
+			return item.ID
+		}
+	}
+	if condition.DefaultCase != "" {
+		return condition.DefaultCase
+	}
+	return ""
+}
+
+func evaluateConditionCase(input string, item config.ConditionCase) bool {
+	switch item.Operator {
+	case "eq":
+		return len(item.Values) > 0 && input == item.Values[0]
+	case "neq":
+		return len(item.Values) == 0 || input != item.Values[0]
+	case "contains":
+		return anyValue(item.Values, func(value string) bool { return strings.Contains(input, value) })
+	case "not_contains":
+		return !anyValue(item.Values, func(value string) bool { return strings.Contains(input, value) })
+	case "in":
+		return anyValue(item.Values, func(value string) bool { return input == value })
+	case "not_in":
+		return !anyValue(item.Values, func(value string) bool { return input == value })
+	case "exists":
+		return input != ""
+	case "empty":
+		return input == ""
+	default:
+		return false
+	}
+}
+
+func anyValue(values []string, match func(string) bool) bool {
+	for _, value := range values {
+		if match(value) {
+			return true
+		}
+	}
+	return false
+}
 func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, params map[string]string, runDir string, out, errOut io.Writer) error {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return err

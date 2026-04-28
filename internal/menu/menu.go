@@ -132,6 +132,11 @@ func itemsForCategory(reg *registry.Registry, categoryID string) []item {
 }
 
 func runSelected(ctx context.Context, reg *registry.Registry, selected item, in io.Reader, out, errOut io.Writer) error {
+	if selected.kind == "workflow" {
+		if err := printWorkflowDetails(reg, selected.id, out); err != nil {
+			return err
+		}
+	}
 	defs, err := definitionsFor(reg, selected)
 	if err != nil {
 		return err
@@ -172,6 +177,9 @@ func runSelected(ctx context.Context, reg *registry.Registry, selected item, in 
 func confirmWorkflowTools(reg *registry.Registry, wf *config.WorkflowConfig, in io.Reader, out io.Writer) (bool, error) {
 	confirmed := false
 	for _, node := range wf.Nodes {
+		if workflowNodeType(node) != config.WorkflowNodeTypeTool {
+			continue
+		}
 		tool, err := reg.Tool(node.Tool)
 		if err != nil {
 			return false, err
@@ -202,10 +210,84 @@ func definitionsFor(reg *registry.Registry, selected item) ([]config.Parameter, 
 	return wf.Config.Parameters, nil
 }
 
-func printRecord(out io.Writer, record *runner.RunRecord) {
-	if record != nil {
-		fmt.Fprintf(out, "\nrun_id=%s status=%s\n", record.ID, record.Status)
+func printWorkflowDetails(reg *registry.Registry, id string, out io.Writer) error {
+	wf, err := reg.Workflow(id)
+	if err != nil {
+		return err
 	}
+	fmt.Fprintf(out, "\n工作流详情: %s\n", title(wf.Config.Name, wf.Config.ID))
+	for _, node := range wf.Config.Nodes {
+		if workflowNodeType(node) == config.WorkflowNodeTypeCondition {
+			fmt.Fprintf(out, "  %s [编排节点/条件分支] 输入=%s 默认=%s\n", node.ID, title(node.Condition.Input, "未配置"), title(node.Condition.DefaultCase, "未启用"))
+			for _, item := range node.Condition.Cases {
+				fmt.Fprintf(out, "    case %s (%s): %s", item.ID, title(item.Name, item.ID), item.Operator)
+				if len(item.Values) > 0 {
+					fmt.Fprintf(out, " %s", strings.Join(item.Values, ", "))
+				}
+				fmt.Fprintln(out)
+			}
+			continue
+		}
+		fmt.Fprintf(out, "  %s [工具节点] 工具=%s\n", node.ID, node.Tool)
+	}
+	if len(wf.Config.Edges) > 0 {
+		fmt.Fprintln(out, "  分支/依赖:")
+		for _, edge := range wf.Config.Edges {
+			fmt.Fprintf(out, "    %s -> %s", edge.From, edge.To)
+			if edge.Case != "" {
+				fmt.Fprintf(out, " case=%s", edge.Case)
+			}
+			fmt.Fprintln(out)
+		}
+	}
+	return nil
+}
+
+func workflowNodeType(node config.WorkflowNode) string {
+	if node.Type != "" {
+		return node.Type
+	}
+	if node.Tool != "" {
+		return config.WorkflowNodeTypeTool
+	}
+	return ""
+}
+
+func printRecord(out io.Writer, record *runner.RunRecord) {
+	if record == nil {
+		return
+	}
+	fmt.Fprintf(out, "\nrun_id=%s status=%s\n", record.ID, record.Status)
+	if len(record.Steps) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "步骤:")
+	for _, step := range record.Steps {
+		fmt.Fprintf(out, "  %s [%s] %s", step.ID, displayStepType(step), step.Status)
+		if step.Tool != "" {
+			fmt.Fprintf(out, " tool=%s", step.Tool)
+		}
+		if step.ConditionInput != "" {
+			fmt.Fprintf(out, " input=%q", step.ConditionInput)
+		}
+		if step.MatchedCase != "" {
+			fmt.Fprintf(out, " matched_case=%s", step.MatchedCase)
+		}
+		if step.SkippedReason != "" {
+			fmt.Fprintf(out, " skipped_reason=%s", step.SkippedReason)
+		}
+		if step.Error != "" {
+			fmt.Fprintf(out, " error=%s", step.Error)
+		}
+		fmt.Fprintln(out)
+	}
+}
+
+func displayStepType(step runner.StepRecord) string {
+	if step.Type == config.WorkflowNodeTypeCondition {
+		return "编排节点/条件分支"
+	}
+	return "工具节点"
 }
 
 func title(value, fallback string) string {

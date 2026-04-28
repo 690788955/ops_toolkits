@@ -1,0 +1,8 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend spec index; includes active workflow conditional node contract."}
+{"file": ".trellis/spec/backend/workflow-conditional-nodes.md", "reason": "Backend contract for condition nodes, case edges, validation, runner skip semantics, and run records."}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Backend quality checks and forbidden patterns for validation before handoff."}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend spec index; includes active workflow editor condition control contract."}
+{"file": ".trellis/spec/frontend/workflow-editor-condition-controls.md", "reason": "Frontend contract for condition node palette, inspector controls, edge labels, validation, and round-trip behavior."}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "Frontend quality checks for editor implementation."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer workflow changes require backend, runner, API, menu, and Web editor consistency."}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse and simplification guide for avoiding duplicated workflow condition logic."}

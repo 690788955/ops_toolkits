@@ -154,8 +154,10 @@ type WorkflowConfig struct {
 
 type WorkflowNode struct {
 	ID        string                 `yaml:"id" json:"id"`
+	Type      string                 `yaml:"type" json:"type"`
 	Name      string                 `yaml:"name" json:"name"`
 	Tool      string                 `yaml:"tool" json:"tool"`
+	Condition WorkflowCondition      `yaml:"condition" json:"condition"`
 	DependsOn []string               `yaml:"depends_on" json:"depends_on"`
 	Params    map[string]interface{} `yaml:"params" json:"params"`
 	Optional  bool                   `yaml:"optional" json:"optional"`
@@ -164,10 +166,29 @@ type WorkflowNode struct {
 	OnFailure string                 `yaml:"on_failure" json:"on_failure"`
 }
 
+type WorkflowCondition struct {
+	Input       string          `yaml:"input" json:"input"`
+	Cases       []ConditionCase `yaml:"cases" json:"cases"`
+	DefaultCase string          `yaml:"default_case" json:"default_case"`
+}
+
+type ConditionCase struct {
+	ID       string   `yaml:"id" json:"id"`
+	Name     string   `yaml:"name" json:"name"`
+	Operator string   `yaml:"operator" json:"operator"`
+	Values   []string `yaml:"values" json:"values"`
+}
+
 type WorkflowEdge struct {
 	From string `yaml:"from" json:"from"`
 	To   string `yaml:"to" json:"to"`
+	Case string `yaml:"case" json:"case"`
 }
+
+const (
+	WorkflowNodeTypeTool      = "tool"
+	WorkflowNodeTypeCondition = "condition"
+)
 
 func (c RootConfig) DisplayName() string {
 	if c.App.Name != "" {

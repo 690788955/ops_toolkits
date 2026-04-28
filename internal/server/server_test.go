@@ -16,6 +16,24 @@ import (
 	"shell_ops/internal/registry"
 )
 
+func TestWebIndexDisablesBrowserCache(t *testing.T) {
+	reg := testRegistry(t)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if contentType := res.Header().Get("Content-Type"); !strings.Contains(contentType, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", contentType)
+	}
+}
+
 func TestToolDetailAPI(t *testing.T) {
 	reg := testRegistry(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/tools/demo.hello", nil)
@@ -429,6 +447,23 @@ func TestRunDetailAPIIncludesLogs(t *testing.T) {
 	}
 	if !strings.Contains(res.Body.String(), "标准输出") || !strings.Contains(res.Body.String(), "错误输出") {
 		t.Fatalf("响应缺少日志内容: %s", res.Body.String())
+	}
+}
+
+func TestWorkflowSaveAPIPreservesConditionRoundTrip(t *testing.T) {
+	reg := testRegistry(t)
+	payload := `{"workflow":{"id":"demo.condition","name":"条件流程","category":"demo","nodes":[{"id":"inspect","tool":"demo.hello"},{"id":"route","type":"condition","condition":{"input":"{{ .steps.inspect.stdout }}","cases":[{"id":"ok","name":"正常","operator":"contains","values":["OK"]}],"default_case":"default"}},{"id":"notify","tool":"demo.hello"}],"edges":[{"from":"inspect","to":"route"},{"from":"route","to":"notify","case":"ok"}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.condition/save", strings.NewReader(payload))
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	saved := reg.Workflows["demo.condition"].Config
+	if saved.Nodes[1].Type != config.WorkflowNodeTypeCondition || saved.Nodes[1].Condition.Cases[0].ID != "ok" || saved.Edges[1].Case != "ok" {
+		t.Fatalf("condition round-trip lost fields: %#v", saved)
 	}
 }
 

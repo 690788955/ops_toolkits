@@ -82,7 +82,12 @@ func printWorkflowHelp(out io.Writer, wf *registry.Workflow) {
 	printParameters(out, cfg.Parameters)
 	fmt.Fprintln(out, "\nDAG 节点:")
 	for _, node := range cfg.Nodes {
-		fmt.Fprintf(out, "  %s\t工具=%s", node.ID, node.Tool)
+		nodeType := workflowNodeType(node)
+		if nodeType == config.WorkflowNodeTypeCondition {
+			printConditionNodeHelp(out, node, cfg.Edges)
+			continue
+		}
+		fmt.Fprintf(out, "  %s\t工具节点\t工具=%s", node.ID, node.Tool)
 		if node.Name != "" {
 			fmt.Fprintf(out, "\t%s", node.Name)
 		}
@@ -93,11 +98,49 @@ func printWorkflowHelp(out io.Writer, wf *registry.Workflow) {
 		fmt.Fprintln(out, "  无")
 	} else {
 		for _, edge := range cfg.Edges {
-			fmt.Fprintf(out, "  %s -> %s\n", edge.From, edge.To)
+			fmt.Fprintf(out, "  %s -> %s", edge.From, edge.To)
+			if edge.Case != "" {
+				fmt.Fprintf(out, "\tcase=%s", edge.Case)
+			}
+			fmt.Fprintln(out)
 		}
 	}
 	if cfg.Confirm.Required {
 		fmt.Fprintf(out, "\n确认: %s\n", fallbackText(cfg.Confirm.Message, "必填"))
+	}
+}
+
+func printConditionNodeHelp(out io.Writer, node config.WorkflowNode, edges []config.WorkflowEdge) {
+	fmt.Fprintf(out, "  %s\t编排节点/条件分支", node.ID)
+	if node.Name != "" {
+		fmt.Fprintf(out, "\t%s", node.Name)
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "    输入: %s\n", fallbackText(node.Condition.Input, "未配置"))
+	fmt.Fprintln(out, "    Cases:")
+	if len(node.Condition.Cases) == 0 {
+		fmt.Fprintln(out, "      无")
+	} else {
+		for _, item := range node.Condition.Cases {
+			fmt.Fprintf(out, "      %s (%s): %s", item.ID, fallbackText(item.Name, item.ID), item.Operator)
+			if len(item.Values) > 0 {
+				fmt.Fprintf(out, " %s", strings.Join(item.Values, ", "))
+			}
+			fmt.Fprintln(out)
+		}
+	}
+	fmt.Fprintf(out, "    默认分支: %s\n", fallbackText(node.Condition.DefaultCase, "未启用"))
+	fmt.Fprintln(out, "    出边:")
+	count := 0
+	for _, edge := range edges {
+		if edge.From != node.ID {
+			continue
+		}
+		fmt.Fprintf(out, "      case=%s -> %s\n", fallbackText(edge.Case, "未配置"), edge.To)
+		count++
+	}
+	if count == 0 {
+		fmt.Fprintln(out, "      无")
 	}
 }
 
