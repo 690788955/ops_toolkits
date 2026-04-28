@@ -84,13 +84,21 @@ function ToolNode({id, data, selected}) {
 
 
 function ConditionNode({id, data, selected}) {
+  const status = conditionNodeStatus(data.condition)
   return (
     <div className={selected ? 'conditionNode selected' : 'conditionNode'}>
       <Handle type="target" position={Position.Left} />
+      <div className="conditionDiamond" aria-hidden="true"><span>分</span></div>
       <button className="nodeDelete nodrag nopan" onMouseDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); data.onRemove(id) }} title="删除节点">×</button>
-      <strong>{data.name || id}</strong>
-      <span>{conditionSummary(data.condition)}</span>
-      <small>{(data.condition?.cases || []).map(item => item.name || item.id).join(' / ') || '未配置分支'}</small>
+      <div className="conditionInfoCard">
+        <div className="conditionNodeHeader">
+          <span>条件分支</span>
+          <strong>{data.name || id}</strong>
+        </div>
+        <div className="conditionInputSummary">{conditionSummary(data.condition)}</div>
+        <small>{conditionCaseSummary(data.condition)}</small>
+        <div className={status.ready ? 'conditionStatus ready' : 'conditionStatus warning'}>{status.label}</div>
+      </div>
       <Handle type="source" position={Position.Right} />
     </div>
   )
@@ -1167,10 +1175,40 @@ function conditionCaseLabel(condition, caseID) {
 }
 
 function conditionSummary(condition) {
-  if (!condition?.input) return '未配置输入'
+  if (!condition?.input) return '未选择判断输入'
+  const input = compactTemplatePath(condition.input)
   const first = (condition.cases || [])[0]
-  if (!first) return condition.input
-  return `${condition.input} ${first.operator || ''} ${(first.values || []).join('/')}`
+  if (!first) return input
+  const values = (first.values || []).filter(Boolean).join('/')
+  return [input, first.operator, values].filter(Boolean).join(' ')
+}
+
+function conditionCaseSummary(condition) {
+  const cases = condition?.cases || []
+  const suffix = condition?.default_case === 'default' ? ' + default' : ''
+  if (cases.length === 0) return `未配置分支${suffix}`
+  return `${cases.length} 个分支${suffix}：${cases.map(item => item.name || item.id).join(' / ')}`
+}
+
+function conditionNodeStatus(condition) {
+  const hasInput = Boolean(String(condition?.input || '').trim())
+  const cases = condition?.cases || []
+  const seen = new Set()
+  const casesValid = cases.length > 0 && cases.every(item => {
+    const id = String(item.id || '').trim()
+    const valid = Boolean(id) && id !== 'default' && !seen.has(id) && conditionOperators.some(operator => operator.value === item.operator)
+    seen.add(id)
+    return valid
+  })
+  return hasInput && casesValid
+    ? {ready: true, label: '可运行'}
+    : {ready: false, label: '配置不完整'}
+}
+
+function compactTemplatePath(value) {
+  return String(value || '')
+    .replace(/^\s*{{\s*\./, '')
+    .replace(/\s*}}\s*$/, '')
 }
 
 function validateConditionDraft(nodes, edges) {

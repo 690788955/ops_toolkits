@@ -516,25 +516,121 @@ pre {
 }
 .conditionNode {
   position: relative;
-  min-width: 220px;
-  border: 2px solid #8a3ffc;
-  border-radius: 20px;
-  padding: 14px 34px 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 260px;
+  border: 2px solid #7c3aed;
+  border-radius: 18px;
+  padding: 13px 34px 13px 15px;
   color: #1c2024;
-  background: #f7f1ff;
-  box-shadow: rgba(0,0,0,.08) 0 3px 6px, rgba(0,0,0,.07) 0 2px 4px;
+  background:
+    linear-gradient(135deg, rgba(124,58,237,.13) 0 48%, transparent 48% 52%, rgba(124,58,237,.13) 52% 100%),
+    #ffffff;
+  box-shadow: rgba(124,58,237,.14) 0 8px 18px, rgba(0,0,0,.07) 0 2px 4px;
   transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.conditionNode::before {
+  content: "";
+  position: absolute;
+  inset: 9px 14px;
+  border: 1px solid rgba(124,58,237,.22);
+  border-radius: 12px;
+  transform: skewX(-10deg);
+  pointer-events: none;
+}
+.conditionDiamond {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border: 2px solid #7c3aed;
+  border-radius: 8px;
+  color: #ffffff;
+  background: linear-gradient(135deg, #8a3ffc, #5f2eea);
+  box-shadow: rgba(124,58,237,.25) 0 6px 14px;
+  transform: rotate(45deg);
+}
+.conditionDiamond span {
+  margin: 0;
+  color: #ffffff;
+  font-family: Inter, "Microsoft YaHei", -apple-system, system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 900;
+  transform: rotate(-45deg);
+}
+.conditionInfoCard {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  padding: 9px 10px;
+  border: 1px solid rgba(124,58,237,.2);
+  border-radius: 14px;
+  background: rgba(255,255,255,.9);
+}
+.conditionNodeHeader {
+  display: grid;
+  gap: 2px;
+}
+.conditionNodeHeader > span {
+  margin: 0;
+  color: #5f2eea;
+  font-family: Inter, "Microsoft YaHei", -apple-system, system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: .8px;
+}
+.conditionNodeHeader strong {
+  color: #000000;
+  font-size: 14px;
+  letter-spacing: -.2px;
+}
+.conditionInputSummary {
+  overflow: hidden;
+  max-width: 178px;
+  color: #0d74ce;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .conditionNode small {
   display: block;
-  margin-top: 7px;
+  overflow: hidden;
+  max-width: 178px;
   color: #6b4ca0;
   font-size: 12px;
   font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.toolNode strong, .toolNode span, .conditionNode strong, .conditionNode span { display: block; }
-.toolNode strong, .conditionNode strong { font-size: 14px; letter-spacing: -.2px; }
-.toolNode span, .conditionNode span { margin-top: 5px; color: #0d74ce; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; }
+.conditionStatus {
+  justify-self: start;
+  border: 1px solid #d9d9e0;
+  border-radius: 9999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 900;
+}
+.conditionStatus.ready {
+  border-color: #b9e6c9;
+  color: #216e3a;
+  background: #f0fbf3;
+}
+.conditionStatus.warning {
+  border-color: #ffd6a6;
+  color: #9a5b00;
+  background: #fff8ed;
+}
+.toolNode strong, .toolNode span { display: block; }
+.toolNode strong { font-size: 14px; letter-spacing: -.2px; }
+.toolNode span { margin-top: 5px; color: #0d74ce; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; }
 .nodeDelete {
   position: absolute;
   top: -9px;
