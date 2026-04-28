@@ -1,7 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
-  addEdge,
   Background,
   Controls,
   Handle,
@@ -84,7 +83,9 @@ function ToolNode({id, data, selected}) {
 
 
 function ConditionNode({id, data, selected}) {
-  const status = conditionNodeStatus(data.condition)
+  const condition = data.condition || defaultCondition()
+  const status = conditionNodeStatus(condition)
+  const branches = conditionBranchRows(condition)
   return (
     <div className={selected ? 'conditionNode selected' : 'conditionNode'}>
       <Handle type="target" position={Position.Left} />
@@ -95,11 +96,32 @@ function ConditionNode({id, data, selected}) {
           <span>条件分支</span>
           <strong>{data.name || id}</strong>
         </div>
-        <div className="conditionInputSummary">{conditionSummary(data.condition)}</div>
-        <small>{conditionCaseSummary(data.condition)}</small>
+        <div className="conditionInputSummary">{conditionSummary(condition)}</div>
+        <small>{conditionCaseSummary(condition)}</small>
         <div className={status.ready ? 'conditionStatus ready' : 'conditionStatus warning'}>{status.label}</div>
       </div>
-      <Handle type="source" position={Position.Right} />
+      <div className="conditionBranchList" aria-label="条件分支出口">
+        {branches.map(branch => (
+          <div key={branch.key} className={`conditionBranchRow ${branch.kind}${branch.disabled ? ' disabled' : ''}`}>
+            <div className="conditionBranchText">
+              <strong>{branch.label}</strong>
+              <span>{branch.meta}</span>
+            </div>
+            {branch.handleID ? (
+              <Handle
+                id={branch.handleID}
+                type="source"
+                position={Position.Right}
+                className="conditionBranchHandle"
+                isConnectable={!branch.disabled}
+                title={`连接 ${branch.label}`}
+              />
+            ) : (
+              <span className="conditionBranchHandlePreview" aria-hidden="true" />
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -459,6 +481,9 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   const [editorValidation, setEditorValidation] = useState(null)
   const [paletteTab, setPaletteTab] = useState('tools')
   const [flowInstance, setFlowInstance] = useState(null)
+  const canvasCardRef = useRef(null)
+  const [nodePicker, setNodePicker] = useState({open: false, position: null})
+  const [nodePickerSearchText, setNodePickerSearchText] = useState('')
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
 
@@ -472,6 +497,7 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   const selectedTool = useMemo(() => (catalog.tools || []).find(tool => tool.id === selectedNode?.data.tool), [catalog.tools, selectedNode])
   const editorAvailableTags = useMemo(() => tagsForEntries(toolOptions), [toolOptions])
   const editorToolOptions = useMemo(() => filterEntries(toolOptions, editorSearchText, editorActiveTag), [toolOptions, editorSearchText, editorActiveTag])
+  const nodePickerToolOptions = useMemo(() => filterEntries(toolOptions, nodePickerSearchText, ''), [toolOptions, nodePickerSearchText])
   const workflowParameters = useMemo(() => parseJSONList(workflowParamsText), [workflowParamsText])
   const mappingSources = useMemo(() => buildMappingSources(workflowParameters, selectedNodeID, nodes, edges), [workflowParameters, selectedNodeID, nodes, edges])
 
@@ -484,8 +510,30 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   }, [selectedNode])
 
   const onConnect = useCallback(
-    params => setEdges(current => addEdge({...params, id: `${params.source}-${params.target}-${Date.now()}`, type: 'smoothstep', animated: true}, current)),
-    [setEdges]
+    params => setEdges(current => {
+      const isDuplicate = current.some(edge => (
+        edge.source === params.source &&
+        edge.target === params.target &&
+        (edge.sourceHandle || null) === (params.sourceHandle || null) &&
+        (edge.targetHandle || null) === (params.targetHandle || null)
+      ))
+      if (isDuplicate) return current
+      const sourceNode = nodes.find(node => node.id === params.source)
+      const edgeCase = edgeCaseFromHandle(sourceNode, params.sourceHandle)
+      const label = edgeCase ? conditionCaseLabel(sourceNode?.data.condition, edgeCase) : ''
+      return [
+        ...current,
+        {
+          ...params,
+          id: `${params.source}-${params.target}-${params.sourceHandle || 'source'}-${params.targetHandle || 'target'}-${Date.now()}`,
+          type: 'smoothstep',
+          animated: true,
+          label,
+          data: edgeCase ? {case: edgeCase} : {}
+        }
+      ]
+    }),
+    [nodes, setEdges]
   )
 
   async function loadWorkflow(id) {
@@ -497,11 +545,13 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
       setWorkflow(config)
       setWorkflowParamsText(JSON.stringify(config.parameters || [], null, 2))
       setRunParamsText(JSON.stringify(defaultParams(config.parameters || []), null, 2))
-      setNodes((config.nodes || []).map((node, index) => workflowNodeToFlowNode(node, index, removeNode)))
-      setEdges((config.edges || []).map((edge, index) => flowEdgeFromWorkflowEdge(edge, index)))
+      const flowNodes = (config.nodes || []).map((node, index) => workflowNodeToFlowNode(node, index, removeNode))
+      setNodes(flowNodes)
+      setEdges((config.edges || []).map((edge, index) => flowEdgeFromWorkflowEdge(edge, index, flowNodes)))
       setSelectedWorkflowID(id)
       setSelectedNodeID('')
       setSelectedEdgeID('')
+      closeNodePicker()
       setResult({message: `已加载工作流 ${id}`})
     } catch (err) {
       setResult({message: String(err)})
@@ -518,6 +568,7 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     setSelectedWorkflowID('')
     setSelectedNodeID('')
     setSelectedEdgeID('')
+    closeNodePicker()
     setResult({message: '已创建空白工作流草稿'})
   }
 
@@ -536,6 +587,7 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     setSelectedNodeID(nodeID)
     setSelectedEdgeID('')
     setEditorValidation(null)
+    closeNodePicker()
   }
 
   function addConditionNode(position) {
@@ -545,6 +597,47 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     setSelectedNodeID(nodeID)
     setSelectedEdgeID('')
     setEditorValidation(null)
+    closeNodePicker()
+  }
+
+  function defaultCanvasInsertPosition() {
+    if (flowInstance) {
+      const bounds = canvasCardRef.current?.getBoundingClientRect()
+      if (bounds) {
+        return flowInstance.screenToFlowPosition({x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2})
+      }
+    }
+    return {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}
+  }
+
+  function openNodePicker(position) {
+    setNodePicker({open: true, position: position || defaultCanvasInsertPosition()})
+    setNodePickerSearchText('')
+  }
+
+  function openNodePickerFromEvent(event) {
+    event.stopPropagation()
+    const position = flowInstance
+      ? flowInstance.screenToFlowPosition({x: event.clientX, y: event.clientY})
+      : defaultCanvasInsertPosition()
+    openNodePicker(position)
+  }
+
+  function closeNodePicker() {
+    setNodePicker({open: false, position: null})
+  }
+
+  function zoomCanvas(direction) {
+    if (!flowInstance) return
+    if (direction === 'in') {
+      flowInstance.zoomIn()
+      return
+    }
+    flowInstance.zoomOut()
+  }
+
+  function fitCanvasView() {
+    flowInstance?.fitView({padding: 0.2, duration: 240})
   }
 
   function updateSelectedNodeName(nextName) {
@@ -559,17 +652,41 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   function syncConditionEdgeLabels(nodeID, condition) {
     setEdges(current => current.map(edge => {
       if (edge.source !== nodeID) return edge
-      const label = conditionCaseLabel(condition, edge.data?.case)
-      return {...edge, label: label || edge.data?.case || ''}
+      const edgeCase = edge.data?.case || edge.sourceHandle || ''
+      const label = conditionCaseLabel(condition, edgeCase)
+      return {
+        ...edge,
+        sourceHandle: edgeCase || edge.sourceHandle,
+        label: label || edgeCase || '',
+        data: edgeCase ? {...(edge.data || {}), case: edgeCase} : (edge.data || {})
+      }
     }))
   }
 
   function updateSelectedEdgeCase(value) {
+    const edgeToUpdate = selectedEdge
+    const sourceNode = nodes.find(node => node.id === edgeToUpdate?.source)
+    const edgeCase = sourceNode?.type === 'conditionNode' ? value : ''
+    const duplicate = edgeToUpdate && edges.some(edge => (
+      edge.id !== edgeToUpdate.id &&
+      edge.source === edgeToUpdate.source &&
+      edge.target === edgeToUpdate.target &&
+      (edge.sourceHandle || edge.data?.case || null) === (edgeCase || null) &&
+      (edge.targetHandle || null) === (edgeToUpdate.targetHandle || null)
+    ))
+    if (duplicate) {
+      setResult({message: '已存在相同起点、分支、终点的条件连线。'})
+      return
+    }
     setEdges(current => current.map(edge => {
       if (edge.id !== selectedEdgeID) return edge
-      const sourceNode = nodes.find(node => node.id === edge.source)
-      const label = conditionCaseLabel(sourceNode?.data.condition, value)
-      return {...edge, label: label || value || '', data: {...(edge.data || {}), case: value}}
+      const label = conditionCaseLabel(sourceNode?.data.condition, edgeCase)
+      return {
+        ...edge,
+        sourceHandle: edgeCase || undefined,
+        label: label || edgeCase || '',
+        data: edgeCase ? {...(edge.data || {}), case: edgeCase} : {}
+      }
     }))
   }
 
@@ -868,7 +985,7 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
         )}
       </section>
 
-      <section className="card canvasCard" onDragOver={handleCanvasDragOver} onDrop={handleCanvasDrop}>
+      <section className="card canvasCard" ref={canvasCardRef} onDragOver={handleCanvasDragOver} onDrop={handleCanvasDrop}>
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -876,15 +993,41 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
-          onNodeClick={(_, node) => { setSelectedNodeID(node.id); setSelectedEdgeID('') }}
-          onEdgeClick={(_, edge) => { setSelectedEdgeID(edge.id); setSelectedNodeID('') }}
-          onPaneClick={clearSelection}
+          onNodeClick={(_, node) => { setSelectedNodeID(node.id); setSelectedEdgeID(''); closeNodePicker() }}
+          onEdgeClick={(_, edge) => { setSelectedEdgeID(edge.id); setSelectedNodeID(''); closeNodePicker() }}
+          onPaneClick={() => { clearSelection(); closeNodePicker() }}
           onInit={setFlowInstance}
           fitView
         >
           <MiniMap />
           <Controls />
           <Background />
+          {nodes.length === 0 && !nodePicker.open && (
+            <div className="canvasEmptyCallout nodrag nopan" onMouseDown={event => event.stopPropagation()}>
+              <strong>从添加节点开始编排</strong>
+              <span>搜索插件工具或添加条件分支，仍可从节点面板拖拽到画布。</span>
+              <button type="button" className="secondary" onClick={openNodePickerFromEvent}>添加节点</button>
+            </div>
+          )}
+          {nodePicker.open && (
+            <NodePickerPanel
+              searchText={nodePickerSearchText}
+              setSearchText={setNodePickerSearchText}
+              tools={nodePickerToolOptions}
+              totalTools={toolOptions.length}
+              position={nodePicker.position}
+              onAddTool={tool => addToolNode(tool, nodePicker.position)}
+              onAddCondition={() => addConditionNode(nodePicker.position)}
+              onClose={closeNodePicker}
+            />
+          )}
+          <CanvasDock
+            onZoomIn={() => zoomCanvas('in')}
+            onZoomOut={() => zoomCanvas('out')}
+            onFitView={fitCanvasView}
+            onAddNode={() => openNodePicker()}
+            onRunWorkflow={runDraft}
+          />
         </ReactFlow>
       </section>
 
@@ -929,18 +1072,75 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   )
 }
 
+function NodePickerPanel({searchText, setSearchText, tools, totalTools, onAddTool, onAddCondition, onClose}) {
+  const enabledControl = controlNodeCatalog.find(control => control.type === 'condition')
+  const keyword = searchText.trim().toLowerCase()
+  const showCondition = !keyword || [enabledControl?.title, enabledControl?.secondary, enabledControl?.description, enabledControl?.help]
+    .filter(Boolean)
+    .some(value => String(value).toLowerCase().includes(keyword))
+  return (
+    <div className="nodePickerLayer nodrag nopan" onMouseDown={event => event.stopPropagation()}>
+      <div className="nodePickerPanel">
+        <div className="nodePickerHeader">
+          <div>
+            <strong>添加节点</strong>
+            <span>选择工具或编排节点</span>
+          </div>
+          <button type="button" className="modalClose" onClick={onClose}>×</button>
+        </div>
+        <input value={searchText} placeholder="搜索工具名称、描述或 ID" onChange={event => setSearchText(event.target.value)} autoFocus />
+        {showCondition && (
+          <div className="nodePickerSection">
+            <span>编排节点</span>
+            <button type="button" className="nodePickerItem control" onClick={onAddCondition}>
+              <b>{enabledControl?.title || '条件分支'}</b>
+              <small>{enabledControl?.secondary || 'Switch / Case'} · 根据结果选择后续分支</small>
+            </button>
+          </div>
+        )}
+        <div className="nodePickerSection">
+          <span>插件工具 · {tools.length} / {totalTools}</span>
+          <div className="nodePickerList">
+            {tools.map(tool => (
+              <button key={tool.id} type="button" className="nodePickerItem" onClick={() => onAddTool(tool)}>
+                <b>{tool.name || tool.id}</b>
+                <small>{tool.id}</small>
+              </button>
+            ))}
+            {tools.length === 0 && <div className="empty small">没有匹配的插件工具。</div>}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CanvasDock({onZoomIn, onZoomOut, onFitView, onAddNode, onRunWorkflow}) {
+  return (
+    <div className="canvasDock nodrag nopan" onMouseDown={event => event.stopPropagation()}>
+      <button type="button" onClick={onZoomOut} title="缩小">−</button>
+      <button type="button" onClick={onZoomIn} title="放大">+</button>
+      <button type="button" onClick={onFitView}>适配视图</button>
+      <button type="button" onClick={onAddNode}>添加节点</button>
+      <button type="button" className="canvasDockPrimary" onClick={onRunWorkflow}>运行工作流</button>
+    </div>
+  )
+}
+
 function EdgeInspector({edge, sourceNode, onCaseChange}) {
   if (sourceNode?.type !== 'conditionNode') {
     return <div className="empty small">已选择依赖线，可在上方点击“删除依赖”。</div>
   }
   const condition = sourceNode.data.condition || defaultCondition()
+  const currentCase = edge.data?.case || edge.sourceHandle || ''
+  const showDefaultOption = condition.default_case === 'default' || currentCase === 'default'
   return (
     <div className="edgeInspector">
       <strong>条件分支连线</strong>
-      <select value={edge.data?.case || ''} onChange={event => onCaseChange(event.target.value)}>
+      <select value={currentCase} onChange={event => onCaseChange(event.target.value)}>
         <option value="">请选择 case...</option>
         {(condition.cases || []).map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
-        <option value="default">默认分支 default</option>
+        {showDefaultOption && <option value="default">默认分支 default</option>}
       </select>
       <div className="empty small">从条件节点发出的连线必须选择 case，标签会显示在连线上。</div>
     </div>
@@ -1061,7 +1261,7 @@ function newToolFlowNode(tool, id, position, onRemove) {
     data: {
       tool: tool.id,
       name: tool.name || tool.id,
-      params: defaultParams(tool.parameters || {}),
+      params: defaultParams(tool.parameters || []),
       onRemove
     },
     position
@@ -1083,6 +1283,46 @@ function newConditionFlowNode(id, position, onRemove) {
 
 function updateCaseValuesText(value) {
   return value.split(/[\n,]/).map(item => item.trim()).filter(Boolean)
+}
+
+function conditionBranchRows(condition) {
+  const cases = condition?.cases || []
+  const rows = cases.map((item, index) => {
+    const id = String(item.id || '').trim()
+    return {
+      key: `${id || 'case'}-${index}`,
+      handleID: id,
+      label: item.name || id || `未命名分支 ${index + 1}`,
+      meta: id ? `case: ${id}` : '请先填写 case ID',
+      kind: 'case',
+      disabled: !id
+    }
+  })
+  if (condition?.default_case === 'default') {
+    rows.push({
+      key: 'default',
+      handleID: 'default',
+      label: '默认分支',
+      meta: 'default',
+      kind: 'default',
+      disabled: false
+    })
+  } else {
+    rows.push({
+      key: 'default-disabled',
+      handleID: '',
+      label: '默认分支',
+      meta: '未启用',
+      kind: 'default',
+      disabled: true
+    })
+  }
+  return rows
+}
+
+function edgeCaseFromHandle(sourceNode, sourceHandle) {
+  if (sourceNode?.type !== 'conditionNode') return ''
+  return sourceHandle || ''
 }
 
 function workflowNodeToFlowNode(node, index, onRemove) {
@@ -1137,8 +1377,10 @@ function buildWorkflowDraft(workflow, nodes, edges, category, parameters) {
       }
     }),
     edges: edges.map(edge => {
+      const sourceNode = nodes.find(node => node.id === edge.source)
       const out = {from: edge.source, to: edge.target}
-      if (edge.data?.case) out.case = edge.data.case
+      const edgeCase = sourceNode?.type === 'conditionNode' ? (edge.data?.case || edge.sourceHandle || '') : ''
+      if (edgeCase) out.case = edgeCase
       return out
     })
   }
@@ -1155,15 +1397,19 @@ function defaultCondition() {
   }
 }
 
-function flowEdgeFromWorkflowEdge(edge, index) {
+function flowEdgeFromWorkflowEdge(edge, index, nodes = []) {
+  const sourceNode = nodes.find(node => node.id === edge.from)
+  const edgeCase = edge.case || ''
+  const isConditionEdge = sourceNode?.type === 'conditionNode' || Boolean(edgeCase)
   return {
-    id: `${edge.from}-${edge.to}-${edge.case || index}`,
+    id: `${edge.from}-${edge.to}-${edgeCase || index}`,
     source: edge.from,
     target: edge.to,
+    sourceHandle: isConditionEdge && edgeCase ? edgeCase : undefined,
     type: 'smoothstep',
     animated: true,
-    label: edge.case || '',
-    data: edge.case ? {case: edge.case} : {}
+    label: edgeCase ? conditionCaseLabel(sourceNode?.data.condition, edgeCase) : '',
+    data: edgeCase ? {case: edgeCase} : {}
   }
 }
 
@@ -1227,7 +1473,7 @@ function validateConditionDraft(nodes, edges) {
       if (!conditionOperators.some(operator => operator.value === item.operator)) errors.push(`条件节点 ${node.id} 的 case ${item.id || '-'} 操作符非法。`)
     })
     edges.filter(edge => edge.source === node.id).forEach(edge => {
-      const edgeCase = edge.data?.case || ''
+      const edgeCase = edge.data?.case || edge.sourceHandle || ''
       if (!edgeCase) errors.push(`条件节点 ${node.id} 到 ${edge.target} 的连线缺少 case。`)
       if (edgeCase === 'default' && condition.default_case !== 'default') errors.push(`条件节点 ${node.id} 未启用 default 分支，但到 ${edge.target} 的连线选择了 default。`)
       if (edgeCase && edgeCase !== 'default' && !(condition.cases || []).some(item => item.id === edgeCase)) errors.push(`条件节点 ${node.id} 到 ${edge.target} 的连线引用不存在的 case：${edgeCase}`)
