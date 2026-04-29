@@ -58,6 +58,7 @@ func pluginUploadHandler(state *serverState) http.HandlerFunc {
 }
 
 var errPluginDuplicate = errors.New("插件已存在")
+var errPluginNotFound = errors.New("插件不存在")
 
 func readPluginUpload(req *http.Request) ([]byte, error) {
 	req.Body = http.MaxBytesReader(nil, req.Body, maxPluginUploadSize)
@@ -378,6 +379,167 @@ func copyDir(src, dst string) error {
 		}
 		return closeErr
 	})
+}
+
+func buildPluginExportZip(reg *registry.Registry, pluginID string) ([]byte, error) {
+	if !isSafePluginExportID(pluginID) {
+		return nil, fmt.Errorf("插件 ID 包含不安全路径字符")
+	}
+	pkg, ok := installedPlugin(reg, pluginID)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", errPluginNotFound, pluginID)
+	}
+	if !registryKnowsPlugin(reg, pkg) {
+		return nil, fmt.Errorf("%w: %s", errPluginNotFound, pluginID)
+	}
+	if err := ensurePluginDirInConfiguredRoot(reg, pkg.Dir); err != nil {
+		return nil, err
+	}
+	return zipPluginDir(pkg.Dir)
+}
+
+func isSafePluginExportID(pluginID string) bool {
+	if strings.TrimSpace(pluginID) == "" || pluginID != strings.TrimSpace(pluginID) || pluginID == "." || pluginID == ".." || strings.ContainsAny(pluginID, `/\\`) {
+		return false
+	}
+	if strings.Contains(pluginID, "%") || filepath.Clean(pluginID) != pluginID {
+		return false
+	}
+	for _, ch := range pluginID {
+		if ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '.' || ch == '_' || ch == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func installedPluginPackages(reg *registry.Registry) []plugin.Package {
+	result, err := plugin.Load(reg.BaseDir, reg.Root.Plugins)
+	if err != nil {
+		return nil
+	}
+	return result.Packages
+}
+
+func installedPlugin(reg *registry.Registry, id string) (plugin.Package, bool) {
+	for _, pkg := range installedPluginPackages(reg) {
+		if pkg.Manifest.ID == id {
+			return pkg, true
+		}
+	}
+	return plugin.Package{}, false
+}
+
+func registryKnowsPlugin(reg *registry.Registry, pkg plugin.Package) bool {
+	for _, tool := range reg.Tools {
+		if tool.Source.Type == "plugin" && tool.Source.PluginID == pkg.Manifest.ID {
+			return true
+		}
+	}
+	for _, workflow := range reg.Workflows {
+		if workflow.Source.Type == "plugin" && workflow.Source.PluginID == pkg.Manifest.ID {
+			return true
+		}
+	}
+	return false
+}
+
+func ensurePluginDirInConfiguredRoot(reg *registry.Registry, pluginDir string) error {
+	pluginReal, err := filepath.EvalSymlinks(pluginDir)
+	if err != nil {
+		return err
+	}
+	pluginAbs, err := filepath.Abs(pluginReal)
+	if err != nil {
+		return err
+	}
+	for _, root := range configuredPluginRoots(reg) {
+		rootPath := filepath.Join(reg.BaseDir, filepath.FromSlash(root))
+		rootReal, err := filepath.EvalSymlinks(rootPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		rootAbs, err := filepath.Abs(rootReal)
+		if err != nil {
+			return err
+		}
+		if pluginAbs != rootAbs && strings.HasPrefix(pluginAbs, rootAbs+string(os.PathSeparator)) {
+			return nil
+		}
+	}
+	return fmt.Errorf("插件目录不在配置的 plugins root 内")
+}
+
+func configuredPluginRoots(reg *registry.Registry) []string {
+	if len(reg.Root.Plugins.Paths) > 0 {
+		return reg.Root.Plugins.Paths
+	}
+	return []string{"plugins"}
+}
+
+func zipPluginDir(pluginDir string) ([]byte, error) {
+	rootName := filepath.Base(pluginDir)
+	if !isSafePluginExportID(rootName) {
+		return nil, fmt.Errorf("插件目录名不安全")
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	err := filepath.WalkDir(pluginDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(pluginDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		entryName := filepath.ToSlash(filepath.Join(rootName, rel))
+		checkName := strings.TrimSuffix(entryName, "/")
+		if checkName == "" || strings.HasPrefix(entryName, "/") || filepath.IsAbs(entryName) || hasUnsafeZipPathSegment(checkName) {
+			return fmt.Errorf("插件包含不安全路径: %s", rel)
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() && !info.IsDir() {
+			return fmt.Errorf("插件包含不支持的特殊文件: %s", rel)
+		}
+		if info.IsDir() {
+			return nil
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = entryName
+		header.Method = zip.Deflate
+		writer, err := zw.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(writer, file)
+		return err
+	})
+	if err != nil {
+		_ = zw.Close()
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func compareVersions(left, right string) int {

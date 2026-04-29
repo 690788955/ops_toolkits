@@ -1,0 +1,46 @@
+id: plugin.inspect
+name: 巡检插件演示
+version: 1.0.0
+description: 演示独立巡检插件如何提供分类、标签和可编排工具
+author: opsctl-team
+
+contributes:
+  categories:
+    - id: plugin-inspect
+      name: 巡检演示
+      description: 通过插件机制接入的巡检示例工具
+
+  tools:
+    - id: plugin.inspect.check
+      name: 插件巡检演示
+      category: plugin-inspect
+      description: 模拟输出目标、CPU、磁盘和服务状态巡检结果
+      tags: [plugin, demo, inspect, check]
+      command: scripts/check.sh
+      args:
+        - --target
+        - "{{ .target }}"
+        - --service
+        - "{{ .service }}"
+        - --status
+        - "{{ .status }}"
+      workdir: .
+      timeout: 1m
+      parameters:
+        - name: target
+          type: string
+          description: 巡检目标
+          required: true
+          default: demo
+        - name: service
+          type: string
+          description: 模拟巡检服务名称
+          required: false
+          default: nginx
+        - name: status
+          type: string
+          description: 模拟服务状态
+          required: false
+          default: OK
+      confirm:
+        required: false

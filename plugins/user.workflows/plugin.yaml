@@ -1,0 +1,15 @@
+id: user.workflows
+name: 用户工作流
+version: 1.0.0
+description: Web 页面创建和维护的用户工作流集合
+author: ""
+compatibility:
+  opsctl: ""
+contributes:
+  categories: []
+  tools: []
+  workflows:
+    - path: workflows/demo-mytest.yaml
+    - path: workflows/demo.app.yaml
+    - path: workflows/demo.flow.yaml
+    - path: workflows/demo.new_flwow.yaml

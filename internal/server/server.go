@@ -6,20 +6,29 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
 
 	"shell_ops/internal/config"
+	"shell_ops/internal/plugin"
 	"shell_ops/internal/registry"
 	"shell_ops/internal/runner"
+)
+
+const (
+	userWorkflowPluginID      = "user.workflows"
+	userWorkflowPluginName    = "用户工作流"
+	userWorkflowPluginVersion = "1.0.0"
 )
 
 //go:embed web/*
@@ -542,6 +551,7 @@ type catalogResponse struct {
 	Categories  []config.Category      `json:"categories"`
 	Tools       []toolCatalogEntry     `json:"tools"`
 	Workflows   []workflowCatalogEntry `json:"workflows"`
+	Plugins     []pluginCatalogEntry   `json:"plugins"`
 }
 
 type toolCatalogEntry struct {
@@ -558,6 +568,13 @@ type workflowCatalogEntry struct {
 	Parameters []config.Parameter  `json:"parameters"`
 	Confirm    config.Confirmation `json:"confirm"`
 	Source     registry.Source     `json:"source"`
+}
+
+type pluginCatalogEntry struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Description string `json:"description,omitempty"`
 }
 
 type runRequest struct {
@@ -623,7 +640,9 @@ func NewHandler(reg *registry.Registry) http.Handler {
 	registerWeb(mux)
 	mux.HandleFunc("/api/catalog", catalogHandler(state))
 	mux.HandleFunc("/api/dev/toolkit.zip", toolDevKitHandler())
+	mux.HandleFunc("/api/plugins/user-workflows.zip", userWorkflowPluginExportHandler(state))
 	mux.HandleFunc("/api/plugins/upload", pluginUploadHandler(state))
+	mux.HandleFunc("/api/plugins/", pluginDownloadHandler(state))
 	mux.HandleFunc("/api/tools/", toolsHandler(state))
 	mux.HandleFunc("/api/workflows/", workflowsHandler(state))
 	mux.HandleFunc("/api/runs/", runsHandler(state))
@@ -811,12 +830,12 @@ func handleWorkflowSave(w http.ResponseWriter, req *http.Request, reg *registry.
 		writeJSON(w, http.StatusBadRequest, response{Data: result, Error: result.Error})
 		return
 	}
-	path := workflowPath(reg, wf.ID)
-	if err := saveWorkflow(path, wf); err != nil {
+	path, source, err := saveWorkflowAsset(reg, wf)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
 		return
 	}
-	reg.Workflows[wf.ID] = &registry.Workflow{Entry: config.WorkflowRef{ID: wf.ID, Category: wf.Category, Path: relativePath(reg.BaseDir, path), Name: wf.Name, Description: wf.Description}, Config: wf, Path: path}
+	reg.Workflows[wf.ID] = &registry.Workflow{Entry: workflowEntryForSavedWorkflow(reg, path, wf), Config: wf, Path: path, Source: source}
 	writeJSON(w, http.StatusOK, response{Status: "saved", Data: reg.Workflows[wf.ID]})
 }
 
@@ -850,6 +869,52 @@ func toolDevKitHandler() http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", `attachment; filename="ops-plugin-template.zip"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	}
+}
+
+func userWorkflowPluginExportHandler(state *serverState) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		data, err := buildUserWorkflowPluginZip(state.registry())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", `attachment; filename="user.workflows.zip"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	}
+}
+
+func pluginDownloadHandler(state *serverState) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		name := strings.TrimPrefix(req.URL.Path, "/api/plugins/")
+		pluginID, ok := strings.CutSuffix(name, ".zip")
+		if !ok || strings.TrimSpace(pluginID) == "" {
+			writeJSON(w, http.StatusNotFound, response{Error: "not found"})
+			return
+		}
+		data, err := buildPluginExportZip(state.registry(), pluginID)
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, errPluginNotFound) {
+				status = http.StatusNotFound
+			}
+			writeJSON(w, status, response{Error: err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.zip"`, pluginID))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
 	}
@@ -953,6 +1018,12 @@ func registerWeb(mux *http.ServeMux) {
 
 func buildCatalog(reg *registry.Registry) catalogResponse {
 	out := catalogResponse{Name: reg.Root.DisplayName(), Description: reg.Root.DisplayDescription(), Categories: reg.Root.DisplayCategories()}
+	for _, pkg := range installedPluginPackages(reg) {
+		if !registryKnowsPlugin(reg, pkg) {
+			continue
+		}
+		out.Plugins = append(out.Plugins, pluginCatalogEntry{ID: pkg.Manifest.ID, Name: pkg.Manifest.Name, Version: pkg.Manifest.Version, Description: pkg.Manifest.Description})
+	}
 	for _, tool := range reg.Tools {
 		out.Tools = append(out.Tools, toolCatalogEntry{ToolEntry: tool.Entry, Tags: tool.Config.Tags, Parameters: tool.Config.Parameters, Confirm: tool.Config.Confirm, Source: tool.Source})
 	}
@@ -1021,15 +1092,199 @@ func saveWorkflow(path string, wf *config.WorkflowConfig) error {
 	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
+func saveWorkflowAsset(reg *registry.Registry, wf *config.WorkflowConfig) (string, registry.Source, error) {
+	path := workflowPath(reg, wf.ID)
+	if err := saveWorkflow(path, wf); err != nil {
+		return "", registry.Source{}, err
+	}
+	if isUserWorkflowPluginPath(reg, path) || reg.Workflows[wf.ID] == nil {
+		if err := maintainUserWorkflowPluginManifest(reg); err != nil {
+			return "", registry.Source{}, err
+		}
+	}
+	return path, workflowSource(reg, path), nil
+}
+
 func workflowPath(reg *registry.Registry, id string) string {
 	if wf, ok := reg.Workflows[id]; ok && wf.Path != "" {
 		return wf.Path
 	}
-	root := "workflows"
-	if len(reg.Root.Paths.Workflows) > 0 {
-		root = reg.Root.Paths.Workflows[0]
+	filename := workflowFilename(id)
+	return filepath.Join(userWorkflowPluginDir(reg), "workflows", filename)
+}
+
+func workflowFilename(id string) string {
+	clean := strings.TrimSpace(id)
+	replacer := strings.NewReplacer("\\", "_", "/", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
+	clean = replacer.Replace(clean)
+	clean = strings.Trim(clean, ". ")
+	if clean == "" {
+		clean = "workflow"
 	}
-	return filepath.Join(reg.BaseDir, filepath.FromSlash(root), id+".yaml")
+	return clean + ".yaml"
+}
+
+func userWorkflowPluginDir(reg *registry.Registry) string {
+	return filepath.Join(reg.BaseDir, filepath.FromSlash(firstPluginRoot(reg)), userWorkflowPluginID)
+}
+
+func isUserWorkflowPluginPath(reg *registry.Registry, path string) bool {
+	pluginDir, err := filepath.Abs(userWorkflowPluginDir(reg))
+	if err != nil {
+		return false
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	return absPath == pluginDir || strings.HasPrefix(absPath, pluginDir+string(os.PathSeparator))
+}
+
+func workflowEntryForSavedWorkflow(reg *registry.Registry, path string, wf *config.WorkflowConfig) config.WorkflowRef {
+	return config.WorkflowRef{ID: wf.ID, Category: wf.Category, Path: relativePath(reg.BaseDir, path), Name: wf.Name, Description: wf.Description, Tags: wf.Tags}
+}
+
+func workflowSource(reg *registry.Registry, path string) registry.Source {
+	for _, existing := range reg.Workflows {
+		if existing.Path == path && existing.Source.Type != "" {
+			return existing.Source
+		}
+	}
+	if isUserWorkflowPluginPath(reg, path) {
+		return registry.Source{Type: "plugin", PluginID: userWorkflowPluginID, PluginName: userWorkflowPluginName, PluginVersion: userWorkflowPluginVersion}
+	}
+	return registry.Source{Type: "builtin"}
+}
+
+func maintainUserWorkflowPluginManifest(reg *registry.Registry) error {
+	pluginDir := userWorkflowPluginDir(reg)
+	workflowsDir := filepath.Join(pluginDir, "workflows")
+	if err := os.MkdirAll(workflowsDir, 0o755); err != nil {
+		return err
+	}
+	manifest, err := loadOrDefaultUserWorkflowManifest(filepath.Join(pluginDir, "plugin.yaml"))
+	if err != nil {
+		return err
+	}
+	manifest.ID = userWorkflowPluginID
+	manifest.Name = userWorkflowPluginName
+	if strings.TrimSpace(manifest.Version) == "" {
+		manifest.Version = userWorkflowPluginVersion
+	}
+	if strings.TrimSpace(manifest.Description) == "" {
+		manifest.Description = "Web 页面创建和维护的用户工作流集合"
+	}
+	manifest.Contributes.Tools = nil
+	paths := map[string]bool{}
+	if err := filepath.WalkDir(workflowsDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || filepath.Ext(path) != ".yaml" {
+			return nil
+		}
+		rel, err := filepath.Rel(pluginDir, path)
+		if err != nil {
+			return err
+		}
+		paths[filepath.ToSlash(rel)] = true
+		return nil
+	}); err != nil {
+		return err
+	}
+	workflowPaths := make([]string, 0, len(paths))
+	for path := range paths {
+		workflowPaths = append(workflowPaths, path)
+	}
+	sort.Strings(workflowPaths)
+	manifest.Contributes.Workflows = manifest.Contributes.Workflows[:0]
+	for _, path := range workflowPaths {
+		manifest.Contributes.Workflows = append(manifest.Contributes.Workflows, plugin.Workflow{Path: path})
+	}
+	return savePluginManifest(filepath.Join(pluginDir, "plugin.yaml"), manifest)
+}
+
+func loadOrDefaultUserWorkflowManifest(path string) (plugin.Manifest, error) {
+	manifest := plugin.Manifest{
+		ID:          userWorkflowPluginID,
+		Name:        userWorkflowPluginName,
+		Version:     userWorkflowPluginVersion,
+		Description: "Web 页面创建和维护的用户工作流集合",
+	}
+	data, err := os.ReadFile(path)
+	if err == nil {
+		if err := yaml.Unmarshal(data, &manifest); err != nil {
+			return plugin.Manifest{}, fmt.Errorf("解析用户工作流插件清单失败: %w", err)
+		}
+		return manifest, nil
+	}
+	if os.IsNotExist(err) {
+		return manifest, nil
+	}
+	return plugin.Manifest{}, err
+}
+
+func savePluginManifest(path string, manifest plugin.Manifest) error {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(manifest); err != nil {
+		_ = enc.Close()
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return os.WriteFile(path, buf.Bytes(), 0o644)
+}
+
+func buildUserWorkflowPluginZip(reg *registry.Registry) ([]byte, error) {
+	pluginDir := userWorkflowPluginDir(reg)
+	if err := maintainUserWorkflowPluginManifest(reg); err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(filepath.Join(pluginDir, "plugin.yaml")); err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	if err := filepath.WalkDir(pluginDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("不支持导出特殊文件: %s", path)
+		}
+		rel, err := filepath.Rel(pluginDir, path)
+		if err != nil {
+			return err
+		}
+		name := userWorkflowPluginID + "/" + filepath.ToSlash(rel)
+		entry, err := zw.Create(name)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		_, err = entry.Write(data)
+		return err
+	}); err != nil {
+		_ = zw.Close()
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func relativePath(baseDir, path string) string {

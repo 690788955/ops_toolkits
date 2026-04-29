@@ -114,7 +114,7 @@ func TestWorkflowValidateAPIRejectsMissingTool(t *testing.T) {
 
 func TestWorkflowSaveAPI(t *testing.T) {
 	reg := testRegistry(t)
-	body := `{"workflow":{"id":"demo.saved","name":"已保存","category":"demo","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`
+	body := `{"workflow":{"id":"demo.saved","name":"已保存","category":"demo","tags":["自定义","迁移"],"nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.saved/save", strings.NewReader(body))
 	res := httptest.NewRecorder()
 
@@ -123,12 +123,115 @@ func TestWorkflowSaveAPI(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
 	}
-	path := filepath.Join(reg.BaseDir, "workflows", "demo.saved.yaml")
+	path := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "workflows", "demo.saved.yaml")
 	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("未找到已保存的工作流: %v", err)
+		t.Fatalf("未找到已保存的插件内工作流: %v", err)
 	}
-	if _, ok := reg.Workflows["demo.saved"]; !ok {
-		t.Fatalf("已保存工作流未加入注册表")
+	manifestPath := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "plugin.yaml")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("未找到用户工作流插件清单: %v", err)
+	}
+	manifestText := string(manifest)
+	if !strings.Contains(manifestText, "id: user.workflows") || !strings.Contains(manifestText, "path: workflows/demo.saved.yaml") {
+		t.Fatalf("用户工作流插件清单未维护 workflow 贡献: %s", manifestText)
+	}
+	if got := reg.Workflows["demo.saved"]; got == nil || got.Source.PluginID != "user.workflows" || len(got.Entry.Tags) != 2 {
+		t.Fatalf("已保存工作流未以用户插件来源加入注册表: %#v", got)
+	}
+
+	installDemoToolPlugin(t, reg.BaseDir)
+	reloaded, err := registry.Load(reg.BaseDir)
+	if err != nil {
+		t.Fatalf("重新加载注册表失败: %v", err)
+	}
+	got := reloaded.Workflows["demo.saved"]
+	if got == nil || got.Source.PluginID != "user.workflows" || got.Entry.Category != "demo" || len(got.Config.Tags) != 2 {
+		t.Fatalf("已保存工作流重启后未通过用户插件加载: %#v", got)
+	}
+}
+
+func TestUserWorkflowPluginManifestRemovesDeletedWorkflowEntries(t *testing.T) {
+	reg := testRegistry(t)
+	workflowDir := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "workflows")
+	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "plugin.yaml")
+	staleManifest := `id: user.workflows
+name: 用户工作流
+version: 1.0.0
+contributes:
+  workflows:
+    - path: workflows/deleted.yaml
+`
+	if err := os.WriteFile(manifestPath, []byte(staleManifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"workflow":{"id":"demo.kept","name":"保留流程","category":"demo","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.kept/save", strings.NewReader(body))
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestText := string(manifest)
+	if strings.Contains(manifestText, "workflows/deleted.yaml") || !strings.Contains(manifestText, "path: workflows/demo.kept.yaml") {
+		t.Fatalf("用户工作流插件清单未按实际文件刷新: %s", manifestText)
+	}
+}
+
+func TestUserWorkflowPluginExportAPI(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	saveReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.exported/save", strings.NewReader(`{"workflow":{"id":"demo.exported","name":"导出流程","category":"demo","tags":["导出"],"nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`))
+	saveRes := httptest.NewRecorder()
+	handler.ServeHTTP(saveRes, saveReq)
+	if saveRes.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", saveRes.Code, saveRes.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/plugins/user-workflows.zip", nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if contentType := res.Header().Get("Content-Type"); contentType != "application/zip" {
+		t.Fatalf("Content-Type = %q", contentType)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(res.Body.Bytes()), int64(res.Body.Len()))
+	if err != nil {
+		t.Fatalf("无法读取 zip: %v", err)
+	}
+	entries := map[string]string{}
+	for _, file := range reader.File {
+		handle, err := file.Open()
+		if err != nil {
+			t.Fatalf("无法打开 zip entry %s: %v", file.Name, err)
+		}
+		var content bytes.Buffer
+		if _, err := content.ReadFrom(handle); err != nil {
+			_ = handle.Close()
+			t.Fatalf("无法读取 zip entry %s: %v", file.Name, err)
+		}
+		_ = handle.Close()
+		entries[file.Name] = content.String()
+	}
+	for _, name := range []string{"user.workflows/plugin.yaml", "user.workflows/workflows/demo.exported.yaml"} {
+		if _, ok := entries[name]; !ok {
+			t.Fatalf("导出 ZIP 缺少文件 %s，entries=%v", name, entries)
+		}
+	}
+	if !strings.Contains(entries["user.workflows/plugin.yaml"], "path: workflows/demo.exported.yaml") || !strings.Contains(entries["user.workflows/workflows/demo.exported.yaml"], "导出流程") {
+		t.Fatalf("导出 ZIP 未保留插件清单或工作流内容: %#v", entries)
 	}
 }
 
@@ -214,6 +317,27 @@ func TestToolDevKitDownloadAPI(t *testing.T) {
 	}
 }
 
+func TestCatalogAPIIncludesExportablePlugins(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPluginWithWorkflow(t, baseReg.BaseDir, "vendor.catalog", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, `"plugins"`) || !strings.Contains(body, "vendor.catalog") {
+		t.Fatalf("catalog 缺少可导出插件列表: %s", body)
+	}
+}
+
 func TestPluginUploadInstallsNewPluginAndRefreshesCatalog(t *testing.T) {
 	reg := testRegistry(t)
 	req := pluginUploadRequest(t, pluginZip(t, "vendor.upload", "1.0.0", false), false)
@@ -249,6 +373,118 @@ func TestPluginUploadAcceptsSinglePluginDirectoryEntry(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(reg.BaseDir, "plugins", "vendor.dir", "plugin.yaml")); err != nil {
 		t.Fatalf("插件目录项 ZIP 未安装: %v", err)
+	}
+}
+
+func TestPluginExportDownloadsInstalledPluginWithWorkflow(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPluginWithWorkflow(t, baseReg.BaseDir, "vendor.export", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.export.zip", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if contentType := res.Header().Get("Content-Type"); contentType != "application/zip" {
+		t.Fatalf("Content-Type = %q", contentType)
+	}
+	if disposition := res.Header().Get("Content-Disposition"); !strings.Contains(disposition, "vendor.export.zip") {
+		t.Fatalf("Content-Disposition 缺少插件文件名: %s", disposition)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(res.Body.Bytes()), int64(res.Body.Len()))
+	if err != nil {
+		t.Fatalf("无法读取导出 zip: %v", err)
+	}
+	entries := map[string]bool{}
+	for _, file := range reader.File {
+		entries[file.Name] = true
+	}
+	for _, name := range []string{"vendor.export/plugin.yaml", "vendor.export/scripts/run.sh", "vendor.export/workflows/flow.yaml", "vendor.export/README.md"} {
+		if !entries[name] {
+			t.Fatalf("导出 ZIP 缺少文件 %s，entries=%v", name, entries)
+		}
+	}
+}
+
+func TestPluginExportZipCanBeDiscoveredByUploadRoot(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPluginWithWorkflow(t, baseReg.BaseDir, "vendor.roundtrip", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	data, err := buildPluginExportZip(reg, "vendor.roundtrip")
+	if err != nil {
+		t.Fatalf("导出插件失败: %v", err)
+	}
+	staging := t.TempDir()
+	if err := extractPluginZip(data, staging); err != nil {
+		t.Fatalf("导出的 ZIP 不能被现有上传逻辑解压: %v", err)
+	}
+	root, err := findUploadedPluginRoot(staging)
+	if err != nil {
+		t.Fatalf("导出的 ZIP 不能被现有上传 root 发现: %v", err)
+	}
+	if filepath.Base(root) != "vendor.roundtrip" {
+		t.Fatalf("root = %s, want vendor.roundtrip", root)
+	}
+}
+
+func TestPluginExportRejectsUnknownPlugin(t *testing.T) {
+	reg := testRegistry(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.missing.zip", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want not found; body = %s", res.Code, res.Body.String())
+	}
+}
+
+func TestPluginExportRejectsUnsafePluginID(t *testing.T) {
+	reg := testRegistry(t)
+	for _, pluginID := range []string{"../evil", `vendor.bad"name`, "vendor.bad;name", "vendor.bad name", "vendor.bad\nname"} {
+		_, err := buildPluginExportZip(reg, pluginID)
+		if err == nil || !strings.Contains(err.Error(), "不安全路径字符") {
+			t.Fatalf("pluginID = %q, err = %v, want 不安全路径字符", pluginID, err)
+		}
+	}
+}
+
+func TestPluginExportRejectsUnsafePluginIDRequest(t *testing.T) {
+	reg := testRegistry(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/plugins/vendor%2Fevil.zip", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want bad request; body = %s", res.Code, res.Body.String())
+	}
+}
+
+func TestPluginExportRejectsSymlink(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.symlink", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	pluginDir := filepath.Join(reg.BaseDir, "plugins", "vendor.symlink")
+	if err := os.Symlink(filepath.Join(pluginDir, "plugin.yaml"), filepath.Join(pluginDir, "linked.yaml")); err != nil {
+		t.Skipf("当前环境不能创建 symlink: %v", err)
+	}
+
+	err = buildPluginExportZipMustFail(reg, "vendor.symlink")
+	if err == nil || !strings.Contains(err.Error(), "特殊文件") {
+		t.Fatalf("err = %v, want 特殊文件", err)
 	}
 }
 
@@ -655,6 +891,38 @@ func writeZipFile(t *testing.T, writer *zip.Writer, name, content string) {
 	}
 }
 
+func installDemoToolPlugin(t *testing.T, baseDir string) {
+	t.Helper()
+	pluginDir := filepath.Join(baseDir, "plugins", "demo")
+	if err := os.MkdirAll(filepath.Join(pluginDir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `id: demo
+name: Demo Tools
+version: 1.0.0
+contributes:
+  categories:
+    - id: demo
+      name: 演示
+  tools:
+    - id: demo.hello
+      name: 问候
+      category: demo
+      command: scripts/run.sh
+      workdir: .
+      timeout: 30m
+      tags: [工具标签]
+      confirm:
+        required: false
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "scripts", "run.sh"), []byte("#!/usr/bin/env bash\necho demo\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func installTestPlugin(t *testing.T, baseDir, id, version string) {
 	t.Helper()
 	pluginDir := filepath.Join(baseDir, "plugins", id)
@@ -682,6 +950,62 @@ contributes:
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(pluginDir, "scripts", "run.sh"), []byte("#!/usr/bin/env bash\necho existing\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func buildPluginExportZipMustFail(reg *registry.Registry, pluginID string) error {
+	_, err := buildPluginExportZip(reg, pluginID)
+	return err
+}
+
+func installTestPluginWithWorkflow(t *testing.T, baseDir, id, version string) {
+	t.Helper()
+	pluginDir := filepath.Join(baseDir, "plugins", id)
+	if err := os.MkdirAll(filepath.Join(pluginDir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(pluginDir, "workflows"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `id: ` + id + `
+name: Export Test
+version: ` + version + `
+description: Plugin export fixture
+contributes:
+  categories:
+    - id: upload
+      name: 上传插件
+  tools:
+    - id: ` + id + `.tool
+      name: 导出工具
+      category: upload
+      command: scripts/run.sh
+      workdir: .
+      timeout: 30m
+      confirm:
+        required: false
+  workflows:
+    - path: workflows/flow.yaml
+`
+	workflow := `id: ` + id + `.flow
+name: 导出工作流
+category: upload
+nodes:
+  - id: first
+    tool: ` + id + `.tool
+edges: []
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "plugin.yaml"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "scripts", "run.sh"), []byte("#!/usr/bin/env bash\necho export\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "workflows", "flow.yaml"), []byte(workflow), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "README.md"), []byte("# Export Test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

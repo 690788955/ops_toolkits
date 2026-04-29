@@ -142,7 +142,7 @@ function App() {
     const data = body.data
     setCatalog(data)
     if (options.keepCategory) return data
-    setActiveCategory(current => current || data.categories?.[0]?.id || '')
+    setActiveCategory(current => current || '')
     return data
   }
 
@@ -160,8 +160,9 @@ function App() {
   }, [catalog, activeCategory])
 
   const sourceEntries = useMemo(() => {
-    if (!catalog || !activeCategory) return []
+    if (!catalog) return []
     const source = activeTab === 'tools' ? catalog.tools || [] : catalog.workflows || []
+    if (!activeCategory) return source
     return source.filter(item => item.category === activeCategory)
   }, [catalog, activeCategory, activeTab])
 
@@ -221,6 +222,13 @@ function App() {
         </div>
         <div className="sectionTitle">运维分类</div>
         <div className="categoryList">
+          <button
+            className={activeCategory === '' ? 'category active' : 'category'}
+            onClick={() => { setActiveCategory(''); setSelected(null); setActiveTag(''); resetResult() }}
+          >
+            <span>全局工作流</span>
+            <small>跨分类选择所有可见工具和工作流</small>
+          </button>
           {(catalog.categories || []).map(item => (
             <button
               key={item.id}
@@ -238,8 +246,8 @@ function App() {
       <main className="content">
         <header className="topbar">
           <div>
-            <h2>{category?.name || '未选择分类'}</h2>
-            <p>{category?.description || '选择工具、工作流或打开编排器'}</p>
+            <h2>{category?.name || '全局工作流'}</h2>
+            <p>{category?.description || '跨分类选择工具、工作流或打开编排器'}</p>
           </div>
           <div className="hint">可视化工作流编排</div>
         </header>
@@ -265,6 +273,7 @@ function App() {
       </main>
       {pluginModalOpen && (
         <PluginManagerModal
+          catalog={catalog}
           state={pluginUploadState}
           setState={setPluginUploadState}
           onClose={() => setPluginModalOpen(false)}
@@ -278,9 +287,10 @@ function App() {
   )
 }
 
-function PluginManagerModal({state, setState, onClose, onUploaded}) {
+function PluginManagerModal({catalog, state, setState, onClose, onUploaded}) {
   const [file, setFile] = useState(null)
   const [uploading, setUploading] = useState(false)
+  const exportablePlugins = useMemo(() => [...(catalog?.plugins || [])].sort((left, right) => String(left.id || '').localeCompare(String(right.id || ''), 'zh-CN')), [catalog])
 
   async function uploadPlugin(replace = false) {
     if (!file) {
@@ -311,7 +321,7 @@ function PluginManagerModal({state, setState, onClose, onUploaded}) {
         <div className="modalHeader">
           <div>
             <h3>插件管理</h3>
-            <p>下载插件模板，或上传一个插件 ZIP 包。</p>
+            <p>下载插件模板或上传一个插件 ZIP 包，底部提供插件导出等其他选项。</p>
           </div>
           <button className="modalClose" onClick={onClose}>×</button>
         </div>
@@ -325,6 +335,32 @@ function PluginManagerModal({state, setState, onClose, onUploaded}) {
             <button className="primary" disabled={!file || uploading} onClick={() => uploadPlugin(false)}>上传插件 ZIP</button>
             {state.duplicate && <button className="secondary" disabled={uploading} onClick={() => uploadPlugin(true)}>确认更新</button>}
           </div>
+          <section className="pluginSecondaryOptions">
+            <div>
+              <strong>其他选项</strong>
+              <span>导出用户工作流插件，或将已安装插件打包为可再次上传的 ZIP。</span>
+            </div>
+            <a className="secondary downloadTemplate" href="/api/plugins/user-workflows.zip">导出用户工作流插件</a>
+            <section className="pluginExportPanel">
+              <div>
+                <strong>导出已安装插件</strong>
+                <span>每个插件将下载为可再次上传安装的标准 ZIP 包。</span>
+              </div>
+              <div className="pluginExportList">
+                {exportablePlugins.map(item => (
+                  <div className="pluginExportItem" key={item.id}>
+                    <div>
+                      <strong>{item.name || item.id}</strong>
+                      <span>{item.id}@{item.version || '-'}</span>
+                      {item.description && <small>{item.description}</small>}
+                    </div>
+                    <a className="secondary" href={`/api/plugins/${encodeURIComponent(item.id)}.zip`}>导出</a>
+                  </div>
+                ))}
+                {exportablePlugins.length === 0 && <div className="empty small">当前没有可导出的已安装插件。</div>}
+              </div>
+            </section>
+          </section>
         </div>
         <pre className="modalResult">{state.response ? JSON.stringify(state.response, null, 2) : state.message}</pre>
       </div>
@@ -464,13 +500,16 @@ function RunPanel({activeTab, entries, totalEntries, selected, params, setParams
 }
 
 function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
-  const toolOptions = useMemo(() => {
-    return (catalog.tools || []).filter(tool => !activeCategory || tool.category === activeCategory)
-  }, [catalog, activeCategory])
+  const [workflow, setWorkflow] = useState(emptyWorkflow(activeCategory))
   const workflowOptions = useMemo(() => {
     return (catalog.workflows || []).filter(workflow => !activeCategory || workflow.category === activeCategory)
   }, [catalog, activeCategory])
-  const [workflow, setWorkflow] = useState(emptyWorkflow(activeCategory))
+  const workflowScope = workflowScopeCategory(workflow.category)
+  const scopedCategory = workflowScope === 'global' ? '' : workflowScope
+  const toolOptions = useMemo(() => {
+    return (catalog.tools || []).filter(tool => !scopedCategory || tool.category === scopedCategory)
+  }, [catalog, scopedCategory])
+  const workflowTagOptions = useMemo(() => tagsForEntries([...(catalog.workflows || []), workflow]), [catalog.workflows, workflow])
   const [selectedWorkflowID, setSelectedWorkflowID] = useState('')
   const [selectedNodeID, setSelectedNodeID] = useState('')
   const [workflowParamsText, setWorkflowParamsText] = useState('[]')
@@ -488,7 +527,9 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
 
   useEffect(() => {
-    setWorkflow(prev => ({...prev, category: prev.category || activeCategory}))
+    setWorkflow(prev => ({...prev, category: activeCategory || 'global'}))
+    setEditorActiveTag('')
+    setEditorValidation(null)
   }, [activeCategory])
 
   const [selectedEdgeID, setSelectedEdgeID] = useState('')
@@ -738,6 +779,17 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     setSelectedEdgeID('')
   }
 
+  function updateWorkflowCategory(value) {
+    if (activeCategory && value !== activeCategory) return
+    setWorkflow(current => ({...current, category: workflowScopeCategory(value)}))
+    setEditorValidation(null)
+  }
+
+  function updateWorkflowTags(nextTags) {
+    setWorkflow(current => ({...current, tags: normalizeTags(nextTags)}))
+    setEditorValidation(null)
+  }
+
   function applyNodeParams() {
     if (!selectedNodeID) return
     try {
@@ -777,9 +829,13 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     }
     const draft = buildWorkflowDraft(workflow, nodes, edges, activeCategory, workflowParameters)
     validateConditionDraft(nodes, edges).forEach(error => errors.push(error))
+    if (activeCategory && draft.category !== activeCategory) errors.push(`当前分类上下文只能保存为 ${activeCategory} 工作流。`)
     if (!String(draft.id || '').trim()) errors.push('请先填写工作流 ID。')
     if (!String(draft.name || '').trim()) errors.push('请先填写工作流名称。')
     if (nodes.length === 0) errors.push('请至少添加一个工作流节点。')
+    findOutOfScopeToolNodes(nodes, catalog.tools || [], scopedCategory).forEach(item => {
+      errors.push(`节点 ${item.nodeID}（${item.toolID}）不属于当前工作流工具范围：${item.scopeName}`)
+    })
     findMissingRequiredNodeParams(nodes, catalog.tools || []).forEach(item => {
       errors.push(`节点 ${item.nodeID}（${item.toolName}）缺少必填参数：${item.paramName}`)
     })
@@ -887,6 +943,16 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
             <span>描述</span>
             <input value={workflow.description || ''} onChange={event => setWorkflow({...workflow, description: event.target.value})} placeholder="工作流描述" />
           </label>
+          <label>
+            <span>分类 / 范围</span>
+            <select value={workflow.category || 'global'} onChange={event => updateWorkflowCategory(event.target.value)} disabled={Boolean(activeCategory)}>
+              {!activeCategory && <option value="global">全局工作流（可选择全部工具）</option>}
+              {(catalog.categories || [])
+                .filter(item => !activeCategory || item.id === activeCategory)
+                .map(item => <option key={item.id} value={item.id}>{item.name || item.id}（仅当前分类工具）</option>)}
+            </select>
+          </label>
+          <WorkflowTagsEditor tags={workflow.tags || []} availableTags={workflowTagOptions} onChange={updateWorkflowTags} />
           <label>
             <span>工作流参数（JSON）</span>
             <textarea className="smallTextarea" value={workflowParamsText} onChange={event => setWorkflowParamsText(event.target.value)} />
@@ -1204,6 +1270,38 @@ function ConditionEditor({node, sources, onNameChange, onChange}) {
   )
 }
 
+function WorkflowTagsEditor({tags, availableTags, onChange}) {
+  const [draftTag, setDraftTag] = useState('')
+  function addTag(value) {
+    const tag = String(value || '').trim()
+    if (!tag) return
+    onChange([...(tags || []), tag])
+    setDraftTag('')
+  }
+  function removeTag(tag) {
+    onChange((tags || []).filter(item => item !== tag))
+  }
+  const candidates = (availableTags || []).filter(tag => !(tags || []).includes(tag))
+  return (
+    <div className="workflowTagsEditor">
+      <span>标签</span>
+      <div className="tagList editable">
+        {(tags || []).map(tag => (
+          <button key={tag} type="button" className="tagChip active" onClick={() => removeTag(tag)} title="点击移除标签">{tag} ×</button>
+        ))}
+        {(tags || []).length === 0 && <small>暂无标签，可选择已有标签或输入新标签。</small>}
+      </div>
+      <div className="tagFilters selectableTags">
+        {candidates.map(tag => <button key={tag} type="button" className="tagChip" onClick={() => addTag(tag)}>{tag}</button>)}
+      </div>
+      <div className="tagInputRow">
+        <input value={draftTag} placeholder="输入新标签，回车添加" onChange={event => setDraftTag(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); addTag(draftTag) } }} />
+        <button type="button" className="secondary" onClick={() => addTag(draftTag)}>添加标签</button>
+      </div>
+    </div>
+  )
+}
+
 function ValidationSummary({status}) {
   return (
     <div className="validationSummary">
@@ -1245,7 +1343,7 @@ function emptyWorkflow(category) {
     name: '',
     description: '',
     version: '1.0.0',
-    category: category || '',
+    category: category || 'global',
     tags: [],
     parameters: [],
     nodes: [],
@@ -1353,10 +1451,16 @@ function workflowNodeToFlowNode(node, index, onRemove) {
   }
 }
 
+function workflowScopeCategory(value, fallbackCategory = '') {
+  if (value === 'global') return 'global'
+  return value || fallbackCategory || 'global'
+}
+
 function buildWorkflowDraft(workflow, nodes, edges, category, parameters) {
   return {
     ...workflow,
-    category: workflow.category || category || '',
+    category: workflowScopeCategory(workflow.category, category),
+    tags: normalizeTags(workflow.tags || []),
     parameters: parameters || workflow.parameters || [],
     nodes: nodes.map(node => {
       if (node.type === 'conditionNode') {
@@ -1484,6 +1588,28 @@ function validateConditionDraft(nodes, edges) {
     if (source?.type !== 'conditionNode' && edge.data?.case) errors.push(`非条件节点 ${edge.source} 的连线不能配置 case。`)
   })
   return errors
+}
+
+function normalizeTags(tags) {
+  const seen = new Set()
+  const out = []
+  ;(Array.isArray(tags) ? tags : String(tags || '').split(/[\n,]/)).forEach(item => {
+    const tag = String(item || '').trim()
+    if (!tag || seen.has(tag)) return
+    seen.add(tag)
+    out.push(tag)
+  })
+  return out
+}
+
+function findOutOfScopeToolNodes(nodes, tools, scopedCategory) {
+  if (!scopedCategory) return []
+  const toolMap = new Map((tools || []).map(tool => [tool.id, tool]))
+  return nodes
+    .filter(node => node.type !== 'conditionNode')
+    .map(node => ({node, tool: toolMap.get(node.data.tool)}))
+    .filter(item => item.tool && item.tool.category !== scopedCategory)
+    .map(item => ({nodeID: item.node.id, toolID: item.node.data.tool, scopeName: scopedCategory}))
 }
 
 function defaultParams(parameters) {

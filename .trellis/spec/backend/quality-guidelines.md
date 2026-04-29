@@ -26,6 +26,7 @@ If the Web UI changes, `npm run build --prefix web` must be run so `internal/ser
 - Required parameter validation belongs in `internal/config` and must be reused across entrypoints.
 - Runtime tools must be plugin-oriented: `plugins/<plugin-id>/plugin.yaml` plus plugin-owned implementation files.
 - Plugin upload ZIPs must contain exactly one plugin package, discovered by scanning for `plugin.yaml`; reject archives with zero or multiple plugin manifests.
+- Plugin export ZIPs must reuse the upload-compatible single-plugin package shape and follow `plugin-import-export.md` for route, catalog, and safety contracts.
 - Plugin ZIP extraction must accept normal directory entries such as `vendor.backup/` while still rejecting traversal, absolute paths, symlinks, and special files.
 - Plugin template/dev-kit documentation must focus on plugin authoring only: plugin structure, manifest fields, script parameters, workflows, confirmation, validation, packaging, upload, and troubleshooting.
 - Plugin template demo content must be a copyable standard plugin sample, not a toy hello-world: include complete manifest metadata, normal and high-risk tool examples, workflow contribution, robust script patterns, confirm metadata, README handoff notes, and examples.
@@ -94,6 +95,7 @@ For more detail, read `../guides/cross-platform-runtime-thinking-guide.md`.
 - Plugin parsing and path-safety logic need unit tests in `internal/plugin`.
 - Plugin template/dev-kit tests must assert both positive standard-sample content (complete manifest, confirm example, workflow, robust script snippets, README/examples) and negative host-internal wording (Web UI/page/catalog/API/backend/frontend/source-code/product terms).
 - Plugin upload tests must cover at least: new plugin install, duplicate prompt, higher-version replace, same/lower-version rejection, traversal rejection, explicit directory entries, invalid ZIP, unsafe plugin ID, and multi-plugin ZIP rejection.
+- Plugin export tests must cover at least: successful installed-plugin ZIP download, workflow file inclusion, upload-root rediscovery compatibility, unknown plugin rejection, unsafe plugin ID rejection, symlink/special-file rejection, catalog plugin list, and `/api/plugins/upload` route preservation.
 - Registry plugin normalization needs tests in `internal/registry`.
 - Any change to parameter merge or validation should include regression tests.
 - Any change to API routes should be manually verified with `opsctl serve --port <port>` and `/api/catalog`.
