@@ -33,6 +33,8 @@ If the Web UI changes, `npm run build --prefix web` must be run so `internal/ser
 - Plugin `command` and `workdir` paths must be validated to stay inside the plugin directory.
 - High-risk tools must use `confirm.required`; runner must reject unconfirmed workflow tool nodes as a safety backstop.
 - Workflows stop on first failed step in MVP.
+- Interactive CLI menu may synthesize menu-only pseudo categories such as `__all__` (`全局/全部`) for operator navigation, but pseudo categories must not be written into `config.RootConfig`, plugin manifests, HTTP catalog output, or `opsctl list` data.
+- The CLI menu global/all entry must display every registered tool and workflow; real categories must continue to return only tools and workflows whose category matches the selected real category.
 - Run records must be written under `runs/logs/<run_id>/` with `result.json`, `stdout.log`, and `stderr.log`.
 
 ---
@@ -97,6 +99,7 @@ For more detail, read `../guides/cross-platform-runtime-thinking-guide.md`.
 - Plugin upload tests must cover at least: new plugin install, duplicate prompt, higher-version replace, same/lower-version rejection, traversal rejection, explicit directory entries, invalid ZIP, unsafe plugin ID, and multi-plugin ZIP rejection.
 - Plugin export tests must cover at least: successful installed-plugin ZIP download, workflow file inclusion, upload-root rediscovery compatibility, unknown plugin rejection, unsafe plugin ID rejection, symlink/special-file rejection, catalog plugin list, and `/api/plugins/upload` route preservation.
 - Registry plugin normalization needs tests in `internal/registry`.
+- Interactive menu pseudo-category behavior needs tests in `internal/menu` covering the `全局/全部` entry, global entry inclusion of all tools and workflows, and real category filtering.
 - Any change to parameter merge or validation should include regression tests.
 - Any change to API routes should be manually verified with `opsctl serve --port <port>` and `/api/catalog`.
 - Any change to Web UI should build successfully and be verified through the embedded server.

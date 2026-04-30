@@ -8,8 +8,4 @@ compatibility:
 contributes:
   categories: []
   tools: []
-  workflows:
-    - path: workflows/demo-mytest.yaml
-    - path: workflows/demo.app.yaml
-    - path: workflows/demo.flow.yaml
-    - path: workflows/demo.new_flwow.yaml
+  workflows: []

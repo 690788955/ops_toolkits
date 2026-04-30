@@ -58,3 +58,6 @@ contributes:
       confirm:
         required: true
         message: 这是一个确认流程演示工具，是否继续？
+
+  workflows:
+    - path: workflows/all-nodes-example.yaml

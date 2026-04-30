@@ -18,8 +18,11 @@
   --color-danger: #b42318;
   --color-danger-border: #f4c7c3;
   --color-danger-bg: #fff4f2;
-  --shadow-whisper: rgba(0,0,0,.08) 0 3px 6px, rgba(0,0,0,.07) 0 2px 4px;
-  --shadow-standard: rgba(0,0,0,.1) 0 10px 20px, rgba(0,0,0,.05) 0 3px 6px;
+  --color-success: #1a7f37;
+  --color-success-border: #b7e4c7;
+  --color-success-bg: #f0fff4;
+  --shadow-whisper: rgba(0,0,0,.06) 0 2px 5px;
+  --shadow-standard: rgba(0,0,0,.08) 0 8px 18px, rgba(0,0,0,.04) 0 2px 5px;
   --radius-card: 24px;
   --radius-control: 16px;
   --radius-pill: 9999px;
@@ -167,9 +170,7 @@ button { cursor: pointer; }
 .tagChip,
 .tagList span,
 .runSummary span,
-.paletteTab,
-.controlTitle b,
-.conditionStatus {
+.paletteTab {
   border: 1px solid var(--color-input-border);
   border-radius: var(--radius-pill);
   color: var(--color-text);
@@ -257,29 +258,34 @@ button { cursor: pointer; }
 .tagList.editable small { color: var(--color-muted); font-size: 12px; font-weight: 700; }
 .selectableTags { margin-bottom: 0; }
 .tagInputRow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
-.paramMappings { display: grid; gap: 12px; }
+.paramMappings { display: grid; gap: 16px; }
 .paramMappings > strong { color: var(--color-text); font-size: 14px; font-weight: 800; }
 
 .mappingRow,
 .caseEditor,
 .empty {
   border: 1px solid var(--color-border);
-  border-radius: 20px;
+  border-radius: 18px;
   background: var(--color-panel);
 }
 
 .mappingRow {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 10px;
+  gap: 12px;
   align-items: start;
-  padding: 12px;
+  padding: 14px;
+}
+
+.mappingRow > div:first-child {
+  display: grid;
+  gap: 4px;
 }
 
 .mappingRow span, .mappingRow em { display: block; }
 .mappingRow span { color: var(--color-text); font-size: 13px; font-weight: 800; line-height: 1.35; }
-.mappingRow em { margin-top: 5px; }
-.advancedParams { display: grid; gap: 10px; }
+.mappingRow em { margin-top: 0; }
+.advancedParams { display: grid; gap: 12px; }
 
 input, select, textarea {
   width: 100%;
@@ -296,11 +302,12 @@ textarea {
   resize: vertical;
   font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
-.smallTextarea { min-height: 88px; }
-.nodeInspector textarea { min-height: 120px; }
+.smallTextarea { min-height: 104px; }
+.nodeInspector textarea { min-height: 148px; }
+.caseEditor .smallTextarea { min-height: 124px; }
 input:focus, select:focus, textarea:focus { border-color: var(--color-focus); box-shadow: 0 0 0 3px rgba(37,71,208,.16); }
 input:disabled { color: var(--color-muted); background: var(--color-bg); }
 
@@ -386,6 +393,15 @@ pre {
   font-size: 24px;
   font-weight: 900;
 }
+.modalFooter {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 22px;
+  border-top: 1px solid var(--color-border);
+  padding-top: 16px;
+}
 .pluginModalActions { display: grid; gap: 16px; }
 .downloadTemplate { display: inline-block; text-align: center; text-decoration: none; }
 .pluginSecondaryOptions {
@@ -399,21 +415,11 @@ pre {
 .pluginSecondaryOptions > div:first-child span { display: block; }
 .pluginSecondaryOptions > div:first-child strong { color: var(--color-black); font-size: 15px; font-weight: 900; }
 .pluginSecondaryOptions > div:first-child span { margin-top: 5px; color: var(--color-muted); font-size: 13px; line-height: 1.4; }
-.pluginExportPanel {
-  display: grid;
-  gap: 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 22px;
-  padding: 16px;
-  background: var(--color-panel);
-}
-.pluginExportPanel > div:first-child strong,
-.pluginExportPanel > div:first-child span,
+.modalBackdropNested { z-index: 60; background: rgba(0,0,0,.45); }
+.pluginExportModal { width: min(560px, 100%); }
 .pluginExportItem strong,
 .pluginExportItem span,
 .pluginExportItem small { display: block; }
-.pluginExportPanel > div:first-child strong { color: var(--color-black); font-size: 15px; font-weight: 900; }
-.pluginExportPanel > div:first-child span { margin-top: 5px; color: var(--color-muted); font-size: 13px; line-height: 1.4; }
 .pluginExportList {
   display: grid;
   max-height: 260px;
@@ -435,14 +441,20 @@ pre {
 .pluginExportItem span { margin-top: 4px; color: var(--color-link); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; font-weight: 800; }
 .pluginExportItem small { margin-top: 5px; color: var(--color-muted); font-size: 12px; line-height: 1.35; }
 .pluginExportItem a { text-align: center; text-decoration: none; }
+.nodeConfigModal { width: min(760px, 100%); }
+.edgeConfigModal { width: min(520px, 100%); }
+.nodeConfigEditor { gap: 16px; }
+.nodeConfigEditor .advancedParams textarea { min-height: 220px; }
+.nodeConfigEditor .conditionEditor { gap: 14px; }
+.nodeConfigEditor .caseEditor { gap: 12px; padding: 14px; }
 .modalResult { min-height: 110px; margin-top: 16px; }
 
 .editorLayout {
   display: grid;
-  grid-template-columns: minmax(220px, 300px) minmax(760px, 1fr) minmax(320px, 380px);
+  grid-template-columns: minmax(220px, 300px) minmax(900px, 1fr);
   grid-template-areas:
-    "palette palette palette"
-    "toolbar canvas inspector";
+    "palette palette"
+    "toolbar canvas";
   align-items: stretch;
   align-content: start;
   gap: 24px;
@@ -451,8 +463,7 @@ pre {
 
 .editorToolbar { grid-area: toolbar; }
 .editorPalette { grid-area: palette; }
-.nodeInspector { grid-area: inspector; }
-.editorToolbar, .editorPalette, .nodeInspector { max-height: none; align-self: stretch; }
+.editorToolbar, .editorPalette { max-height: none; align-self: stretch; }
 .editorPaletteFilters { margin-bottom: 12px; }
 
 .validationSummary {
@@ -478,7 +489,7 @@ pre {
 
 .controlPalette, .toolPalette {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
   max-height: 252px;
   overflow: auto;
   gap: 12px;
@@ -487,64 +498,74 @@ pre {
 
 .controlPaletteItem, .paletteItem {
   position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 66px;
   padding: 14px 15px;
+  border-radius: 20px;
 }
 
-.controlPaletteItem::before {
-  content: "";
-  position: absolute;
-  top: 14px;
-  right: 14px;
-  width: 8px;
-  height: 8px;
-  border: 1px solid var(--color-black);
-  border-radius: var(--radius-pill);
-  background: var(--color-surface);
-}
-.controlPaletteItem:not(.disabled):active, .paletteItem:active:not(:disabled) { cursor: grabbing; }
-
-.controlIcon {
-  display: inline-grid;
-  width: 26px;
-  height: 26px;
+.paletteShape {
+  display: grid;
+  width: 34px;
+  height: 34px;
   place-items: center;
-  float: left;
-  margin: 0 9px 5px 0;
-  border: 1px solid var(--color-black);
-  border-radius: 9px;
+  border: 1.5px solid var(--color-black);
   color: var(--color-black);
   background: var(--color-surface);
+  font-family: Inter, "Microsoft YaHei", -apple-system, system-ui, sans-serif;
   font-size: 15px;
   font-weight: 900;
   line-height: 1;
 }
 
-.controlContent { display: block; }
-.controlTitle { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; padding-right: 12px; }
-.controlTitle strong { color: var(--color-black); font-size: 14px; font-weight: 800; }
-.controlTitle span { color: var(--color-muted); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; font-weight: 800; }
-.controlContent p { clear: both; margin: 8px 0 0; color: var(--color-muted); font-size: 12px; line-height: 1.4; font-weight: 700; }
-.capabilityChips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
-.capabilityChips span {
-  border: 1px solid var(--color-input-border);
-  border-radius: var(--radius-pill);
-  padding: 4px 8px;
-  color: var(--color-text);
-  background: var(--color-surface);
-  font-size: 11px;
-  font-weight: 900;
+.paletteShape.tool {
+  height: 26px;
+  border-radius: 6px;
 }
-.controlPreview { display: grid; gap: 3px; margin-top: 9px; }
-.controlPreview small { color: var(--color-muted); font-size: 11px; font-weight: 800; }
-.controlContent em { display: block; margin-top: 8px; color: var(--color-muted); font-size: 11px; font-style: normal; line-height: 1.4; }
-.controlPaletteItem.disabled { cursor: not-allowed; opacity: .62; background: var(--color-panel); }
-.controlPaletteItem.disabled::before { border-color: var(--color-tertiary); }
+
+.paletteShape.condition,
+.paletteShape.parallel,
+.paletteShape.join,
+.paletteShape.loop {
+  border-radius: 7px;
+  transform: rotate(45deg);
+}
+
+.paletteShape.condition::after,
+.paletteShape.parallel::after,
+.paletteShape.join::after,
+.paletteShape.loop::after {
+  content: attr(data-symbol);
+  transform: rotate(-45deg);
+}
+
+.controlPaletteItem:not(.disabled):active, .paletteItem:active:not(:disabled) { cursor: grabbing; }
+.controlContent { display: contents; }
+.paletteItemLabel,
+.nodePickerItem b {
+  overflow: hidden;
+  color: var(--color-black);
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: -.2px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.controlPaletteItem.disabled { cursor: not-allowed; opacity: .48; background: var(--color-panel); }
+.controlPaletteItem.disabled .paletteShape { border-style: dashed; border-color: var(--color-tertiary); color: var(--color-tertiary); }
 .controlPaletteItem.disabled:hover, .controlPaletteItem.disabled:focus { transform: none; border-color: var(--color-border); box-shadow: none; }
-.controlTitle b { padding: 3px 7px; color: var(--color-muted); font-size: 11px; font-weight: 900; }
 .paletteItem:not(.controlPaletteItem) span, .paletteItem:not(.controlPaletteItem) em, .paletteItem:not(.controlPaletteItem) small { display: block; }
-.paletteItem:not(.controlPaletteItem) > span { font-weight: 800; color: var(--color-black); }
-.paletteItem:not(.controlPaletteItem) > em { margin-top: 5px; }
-.paletteItem:not(.controlPaletteItem) > small { margin-top: 7px; color: var(--color-muted); font-size: 12px; font-weight: 700; }
+.paletteItem:not(.controlPaletteItem) > em,
+.paletteItem:not(.controlPaletteItem) > small,
+.controlTitle,
+.capabilityChips,
+.controlContent p,
+.controlPreview,
+.controlIcon,
+.controlContent em { display: none; }
 
 .canvasCard {
   grid-area: canvas;
@@ -555,14 +576,15 @@ pre {
 }
 .canvasCard .react-flow { min-height: 760px; background: var(--color-bg); }
 .react-flow__node { color: var(--color-black); background: transparent; font-weight: 800; }
-.react-flow__node.selected .toolNode, .react-flow__node.selected .conditionNode {
+.react-flow__node.selected .toolNode, .react-flow__node.selected .conditionNode, .react-flow__node.selected .controlNode {
   border-color: var(--color-focus);
-  box-shadow: 0 0 0 4px rgba(37,71,208,.16), var(--shadow-standard);
+  box-shadow: 0 0 0 3px rgba(37,71,208,.16), var(--shadow-whisper);
   transform: translateY(-1px);
 }
 
 .toolNode,
-.conditionNode {
+.conditionNode,
+.controlNode {
   position: relative;
   color: var(--color-black);
   background: var(--color-surface);
@@ -572,80 +594,123 @@ pre {
 
 .toolNode {
   min-width: 188px;
-  border: 2px solid var(--color-black);
-  border-radius: 22px;
-  padding: 15px 36px 15px 17px;
+  border: 1.5px solid var(--color-black);
+  border-radius: 16px;
+  padding: 14px 34px 14px 16px;
 }
+
+.toolNode .nodeHoverMeta,
+.conditionNode .conditionInputSummary,
+.conditionNode small,
+.controlNode small {
+  opacity: 0;
+  max-height: 0;
+  overflow: hidden;
+  transition: opacity .15s ease, max-height .15s ease, margin-top .15s ease;
+}
+
+.toolNode:hover .nodeHoverMeta,
+.toolNode.selected .nodeHoverMeta,
+.react-flow__node.selected .toolNode .nodeHoverMeta,
+.conditionNode:hover .conditionInputSummary,
+.conditionNode:hover small,
+.conditionNode.selected .conditionInputSummary,
+.conditionNode.selected small,
+.react-flow__node.selected .conditionNode .conditionInputSummary,
+.react-flow__node.selected .conditionNode small,
+.controlNode:hover small,
+.controlNode.selected small,
+.react-flow__node.selected .controlNode small {
+  opacity: 1;
+  max-height: 48px;
+}
+
+.flowchartShape {
+  position: relative;
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1.5px solid var(--color-dark-border);
+  color: var(--color-black);
+  background: var(--color-surface);
+  font-family: Inter, "Microsoft YaHei", -apple-system, system-ui, sans-serif;
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1;
+}
+.flowchartShape.decision,
+.flowchartShape.gateway {
+  border-radius: 8px;
+  transform: rotate(45deg);
+}
+.flowchartShape span { display: grid; place-items: center; transform: rotate(-45deg); }
+
+.controlNode {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  min-width: 210px;
+  max-width: 272px;
+  gap: 12px;
+  border: 1.5px solid var(--color-dark-border);
+  border-radius: 18px;
+  padding: 14px 36px 14px 16px;
+}
+.controlNode.parallel { border-color: var(--color-link); }
+.controlNode.join { border-color: var(--color-dark-border); }
+.controlNode.loop { border-color: var(--color-warning-text); }
+.controlNodeText { display: grid; min-width: 0; }
+.controlNode strong,
+.controlNode small { display: block; }
+.controlNode strong { overflow: hidden; color: var(--color-black); font-size: 14px; font-weight: 900; letter-spacing: -.2px; text-overflow: ellipsis; white-space: nowrap; }
+.controlNode small { color: var(--color-muted); font-size: 12px; font-weight: 700; line-height: 1.35; }
+.controlNode:hover small,
+.controlNode.selected small,
+.react-flow__node.selected .controlNode small { margin-top: 5px; }
+.controlNodeInspector { display: grid; gap: 10px; }
 
 .conditionNode {
   display: grid;
-  grid-template-columns: auto minmax(190px, 1fr) minmax(160px, auto);
+  grid-template-columns: auto minmax(170px, 1fr) minmax(150px, auto);
   align-items: start;
-  gap: 12px;
-  min-width: 430px;
-  border: 2px solid var(--color-dark-border);
-  border-radius: 24px;
-  padding: 14px 22px 14px 16px;
-}
-
-.conditionNode::before {
-  content: "";
-  position: absolute;
-  inset: 10px 14px;
-  border: 1px dashed var(--color-input-border);
+  gap: 14px;
+  min-width: 420px;
+  border: 1.5px solid var(--color-dark-border);
   border-radius: 18px;
-  pointer-events: none;
+  padding: 14px 18px 14px 16px;
 }
 
 .conditionDiamond {
-  position: relative;
-  z-index: 1;
   display: grid;
-  flex: 0 0 auto;
-  width: 46px;
-  height: 46px;
-  margin-top: 8px;
+  width: 42px;
+  height: 42px;
+  margin-top: 3px;
   place-items: center;
-  border: 2px solid var(--color-black);
-  border-radius: 10px;
+  border: 1.5px solid var(--color-dark-border);
+  border-radius: 8px;
   color: var(--color-black);
   background: var(--color-surface);
-  box-shadow: var(--shadow-whisper);
   transform: rotate(45deg);
 }
 .conditionDiamond span {
-  margin: 0;
-  color: var(--color-black);
   font-family: Inter, "Microsoft YaHei", -apple-system, system-ui, sans-serif;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 900;
   transform: rotate(-45deg);
 }
 
 .conditionInfoCard {
-  position: relative;
-  z-index: 1;
   display: grid;
   min-width: 0;
-  gap: 6px;
-  padding: 10px 11px;
-  border: 1px solid var(--color-border);
-  border-radius: 16px;
-  background: rgba(255,255,255,.94);
+  gap: 0;
+  padding-top: 5px;
 }
-.conditionNodeHeader { display: grid; gap: 2px; }
-.conditionNodeHeader > span {
-  margin: 0;
-  color: var(--color-muted);
-  font-family: Inter, "Microsoft YaHei", -apple-system, system-ui, sans-serif;
-  font-size: 11px;
-  font-weight: 900;
-  letter-spacing: .4px;
-}
-.conditionNodeHeader strong { color: var(--color-black); font-size: 14px; letter-spacing: -.2px; }
+.conditionInfoCard strong { overflow: hidden; color: var(--color-black); font-size: 14px; letter-spacing: -.2px; text-overflow: ellipsis; white-space: nowrap; }
 .conditionInputSummary {
   overflow: hidden;
-  max-width: 184px;
+  max-width: 220px;
   font-weight: 800;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -653,36 +718,50 @@ pre {
 .conditionNode small {
   display: block;
   overflow: hidden;
-  max-width: 184px;
+  max-width: 220px;
   color: var(--color-muted);
   font-size: 12px;
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.conditionStatus { justify-self: start; padding: 3px 8px; font-size: 11px; font-weight: 900; }
-.conditionStatus.ready { border-color: var(--color-input-border); color: var(--color-text); background: var(--color-surface); }
-.conditionStatus.warning { border-color: var(--color-warning-border); color: var(--color-warning-text); background: var(--color-warning-bg); }
+.conditionState.ready { color: var(--color-muted); }
+.conditionState.warning { color: var(--color-warning-text); }
+.conditionNode:hover .conditionInputSummary,
+.conditionNode:hover small,
+.conditionNode.selected .conditionInputSummary,
+.conditionNode.selected small,
+.react-flow__node.selected .conditionNode .conditionInputSummary,
+.react-flow__node.selected .conditionNode small { margin-top: 5px; }
 .conditionBranchList {
   position: relative;
   z-index: 2;
   display: grid;
-  min-width: 156px;
-  gap: 8px;
+  min-width: 150px;
+  gap: 7px;
 }
 .conditionBranchRow {
   position: relative;
   display: grid;
-  min-height: 42px;
+  grid-template-columns: auto minmax(0, 1fr);
+  min-height: 36px;
   align-items: center;
+  gap: 8px;
   border: 1px solid var(--color-border);
-  border-radius: 14px;
-  padding: 8px 20px 8px 10px;
+  border-radius: 12px;
+  padding: 7px 18px 7px 10px;
   color: var(--color-text);
   background: var(--color-surface);
-  box-shadow: rgba(0,0,0,.04) 0 1px 2px;
+}
+.conditionBranchLine {
+  display: block;
+  width: 16px;
+  height: 1px;
+  background: var(--color-dark-border);
 }
 .conditionBranchRow.default { background: var(--color-panel); }
+.conditionBranchRow.default .conditionBranchLine,
+.conditionBranchRow.disabled .conditionBranchLine { background: var(--color-tertiary); }
 .conditionBranchRow.disabled { opacity: .58; }
 .conditionBranchText {
   display: grid;
@@ -696,21 +775,112 @@ pre {
   white-space: nowrap;
 }
 .conditionBranchText strong { color: var(--color-black); font-size: 12px; font-weight: 900; }
-.conditionBranchText span { color: var(--color-muted); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; font-weight: 800; }
+.conditionBranchText span {
+  max-height: none;
+  opacity: 1;
+  color: var(--color-muted);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 800;
+}
 .conditionBranchHandlePreview {
   position: absolute;
   top: 50%;
-  right: -6px;
-  width: 12px;
-  height: 12px;
+  right: -5px;
+  width: 10px;
+  height: 10px;
   border: 2px solid var(--color-surface);
   border-radius: var(--radius-pill);
   background: var(--color-tertiary);
   transform: translateY(-50%);
 }
 .toolNode strong, .toolNode span { display: block; }
-.toolNode strong { font-size: 14px; letter-spacing: -.2px; }
-.toolNode span { margin-top: 5px; }
+.toolNode strong { overflow: hidden; font-size: 14px; letter-spacing: -.2px; text-overflow: ellipsis; white-space: nowrap; }
+.toolNode .nodeHoverMeta { margin-top: 0; }
+.toolNode:hover .nodeHoverMeta,
+.toolNode.selected .nodeHoverMeta,
+.react-flow__node.selected .toolNode .nodeHoverMeta { margin-top: 5px; }
+
+.runStatusBadge {
+  position: absolute;
+  top: -10px;
+  left: 12px;
+  z-index: 6;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  padding: 3px 8px;
+  color: var(--color-muted);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-whisper);
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1.2;
+  pointer-events: none;
+}
+
+.runStatusBadge.runSucceeded { color: var(--color-success); border-color: var(--color-success-border); background: var(--color-success-bg); }
+.runStatusBadge.runFailed { color: var(--color-danger); border-color: var(--color-danger-border); background: var(--color-danger-bg); }
+.runStatusBadge.runSkipped { color: var(--color-muted); border-color: var(--color-border); background: var(--color-panel); }
+.runStatusBadge.runRunning { color: var(--color-link); border-color: rgba(13,116,206,.32); background: #eef7ff; }
+
+.toolNode.runSucceeded,
+.conditionNode.runSucceeded,
+.controlNode.runSucceeded {
+  border-color: var(--color-success);
+  box-shadow: 0 0 0 2px rgba(26,127,55,.08), var(--shadow-whisper);
+}
+
+.toolNode.runFailed,
+.conditionNode.runFailed,
+.controlNode.runFailed {
+  border-color: var(--color-danger);
+  background: var(--color-danger-bg);
+  box-shadow: 0 0 0 3px rgba(180,35,24,.14), var(--shadow-whisper);
+}
+
+.toolNode.runSkipped,
+.conditionNode.runSkipped,
+.controlNode.runSkipped {
+  border-color: var(--color-tertiary);
+  opacity: .62;
+  filter: grayscale(.18);
+}
+
+.toolNode.runRunning,
+.conditionNode.runRunning,
+.controlNode.runRunning {
+  border-color: var(--color-link);
+  animation: runPulse 1.25s ease-in-out infinite;
+}
+
+@keyframes runPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(13,116,206,.16), var(--shadow-whisper); }
+  50% { box-shadow: 0 0 0 5px rgba(13,116,206,.08), var(--shadow-whisper); }
+}
+
+.conditionBranchRow.matched {
+  border-color: var(--color-success-border);
+  background: var(--color-success-bg);
+}
+.conditionBranchRow.matched .conditionBranchLine { background: var(--color-success); }
+
+.react-flow__edge.runEdgeSucceeded .react-flow__edge-path,
+.react-flow__edge.runEdgeMatched .react-flow__edge-path {
+  stroke: var(--color-success);
+  stroke-width: 2.4;
+}
+.react-flow__edge.runEdgeMatched .react-flow__edge-text { fill: var(--color-success); }
+.react-flow__edge.runEdgeDimmed {
+  opacity: .34;
+}
+.react-flow__edge.runEdgeDimmed .react-flow__edge-path {
+  stroke: var(--color-tertiary);
+  stroke-dasharray: 4 4;
+}
+.react-flow__edge.runEdgeFailed .react-flow__edge-path {
+  stroke: var(--color-danger);
+  stroke-width: 2.2;
+}
 
 .nodeDelete {
   position: absolute;
@@ -851,8 +1021,10 @@ pre {
 }
 .nodePickerItem {
   display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
   width: 100%;
-  gap: 5px;
+  gap: 10px;
   border: 1px solid var(--color-border);
   border-radius: 18px;
   padding: 12px 13px;
@@ -862,9 +1034,9 @@ pre {
   transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease, background .15s ease;
 }
 .nodePickerItem:hover { border-color: var(--color-black); background: var(--color-panel); box-shadow: var(--shadow-whisper); transform: translateY(-1px); }
-.nodePickerItem b { color: var(--color-black); font-size: 14px; font-weight: 900; letter-spacing: -.2px; }
-.nodePickerItem small { overflow: hidden; color: var(--color-muted); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
-.nodePickerItem.control small { font-family: Inter, "Microsoft YaHei", -apple-system, system-ui, sans-serif; }
+.nodePickerItem b { overflow: hidden; color: var(--color-black); font-size: 14px; font-weight: 900; letter-spacing: -.2px; text-overflow: ellipsis; white-space: nowrap; }
+.nodePickerItem .paletteShape { width: 28px; height: 28px; font-size: 13px; }
+.nodePickerItem .paletteShape.tool { height: 22px; }
 
 .canvasDock {
   position: absolute;
@@ -899,9 +1071,21 @@ pre {
 .canvasDock .canvasDockPrimary { border-color: var(--color-black); color: var(--color-surface); background: var(--color-black); }
 .canvasDock .canvasDockPrimary:hover { background: var(--color-black); }
 
-.edgeInspector, .conditionEditor, .caseList, .caseEditor { display: grid; gap: 10px; }
+.edgeInspector, .conditionEditor, .caseList, .caseEditor { display: grid; gap: 12px; }
 .edgeInspector > strong, .caseList > strong { color: var(--color-text); font-size: 14px; font-weight: 900; }
-.caseEditor { padding: 12px; }
+.conditionEditor label {
+  display: grid;
+  gap: 9px;
+}
+.conditionEditor label span {
+  margin-bottom: 0;
+}
+.caseList { gap: 14px; }
+.caseEditor { padding: 14px; }
+.caseEditor input,
+.caseEditor select,
+.caseEditor textarea { background: var(--color-surface); }
+.caseEditor button { justify-self: start; }
 
 @media (max-width: 1500px) {
   .editorLayout {
@@ -909,8 +1093,7 @@ pre {
     grid-template-areas:
       "palette"
       "toolbar"
-      "canvas"
-      "inspector";
+      "canvas";
   }
   .canvasCard, .canvasCard .react-flow { min-height: 580px; }
 }

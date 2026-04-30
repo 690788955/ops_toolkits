@@ -132,6 +132,8 @@ func NormalizeWorkflow(cfg *WorkflowConfig) {
 				cfg.Nodes[i].Type = WorkflowNodeTypeTool
 			} else if cfg.Nodes[i].Condition.Input != "" || len(cfg.Nodes[i].Condition.Cases) > 0 {
 				cfg.Nodes[i].Type = WorkflowNodeTypeCondition
+			} else if cfg.Nodes[i].Loop.Tool != "" || cfg.Nodes[i].Loop.Target != "" || cfg.Nodes[i].Loop.MaxIterations != 0 {
+				cfg.Nodes[i].Type = WorkflowNodeTypeLoop
 			}
 		}
 		if cfg.Nodes[i].OnFailure == "" {

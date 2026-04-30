@@ -255,10 +255,18 @@ func packageCommand(opts *options) *cobra.Command {
 func confirmWorkflowTools(reg *registry.Registry, wf *config.WorkflowConfig, in io.Reader, out io.Writer) (bool, error) {
 	confirmed := false
 	for _, node := range wf.Nodes {
-		if workflowNodeType(node) != config.WorkflowNodeTypeTool {
+		nodeType := workflowNodeType(node)
+		toolID := node.Tool
+		if nodeType == config.WorkflowNodeTypeLoop {
+			toolID = node.Loop.Tool
+		}
+		if nodeType != config.WorkflowNodeTypeTool && nodeType != config.WorkflowNodeTypeLoop {
 			continue
 		}
-		tool, err := reg.Tool(node.Tool)
+		if toolID == "" {
+			continue
+		}
+		tool, err := reg.Tool(toolID)
 		if err != nil {
 			return false, err
 		}
@@ -307,6 +315,9 @@ func displayStepType(step runner.StepRecord) string {
 	if step.Type == config.WorkflowNodeTypeCondition {
 		return "编排节点/条件分支"
 	}
+	if step.Type == config.WorkflowNodeTypeLoop {
+		return "编排节点/循环"
+	}
 	return "工具节点"
 }
 
@@ -316,6 +327,9 @@ func workflowNodeType(node config.WorkflowNode) string {
 	}
 	if node.Tool != "" {
 		return config.WorkflowNodeTypeTool
+	}
+	if node.Loop.Tool != "" || node.Loop.Target != "" || node.Loop.MaxIterations != 0 || len(node.Loop.Params) > 0 {
+		return config.WorkflowNodeTypeLoop
 	}
 	return ""
 }

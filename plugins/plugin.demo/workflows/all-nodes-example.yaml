@@ -1,0 +1,60 @@
+id: plugin.demo.all-nodes-example
+name: 全节点编排示例
+version: 1.0.0
+category: plugin-demo
+description: 演示工具、条件分支和内嵌工具循环节点的工作流
+parameters:
+  - name: name
+    type: string
+    description: 问候目标
+    required: true
+    default: World
+  - name: message
+    type: string
+    description: 问候消息
+    required: false
+    default: Hello from workflow
+nodes:
+  - id: greet
+    type: tool
+    name: 初始问候
+    tool: plugin.demo.greet
+    params:
+      name: "{{ .name }}"
+      message: "{{ .message }}"
+  - id: route
+    type: condition
+    name: 按输出分支
+    condition:
+      input: "{{ .steps.greet.stdout }}"
+      cases:
+        - id: greeted
+          name: 已问候
+          operator: contains
+          values: ["Hello"]
+      default_case: default
+  - id: repeat
+    type: loop
+    name: 循环问候
+    loop:
+      tool: plugin.demo.greet
+      params:
+        name: "{{ .name }}"
+        message: "Loop hello"
+      max_iterations: 2
+  - id: fallback
+    type: tool
+    name: 默认通知
+    tool: plugin.demo.greet
+    params:
+      name: "{{ .name }}"
+      message: "Default branch"
+edges:
+  - from: greet
+    to: route
+  - from: route
+    to: repeat
+    case: greeted
+  - from: route
+    to: fallback
+    case: default

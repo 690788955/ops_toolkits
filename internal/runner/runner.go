@@ -47,6 +47,8 @@ type StepRecord struct {
 	ConditionInput string    `json:"condition_input,omitempty"`
 	MatchedCase    string    `json:"matched_case,omitempty"`
 	SkippedReason  string    `json:"skipped_reason,omitempty"`
+	LoopTarget     string    `json:"loop_target,omitempty"`
+	LoopIterations int       `json:"loop_iterations,omitempty"`
 }
 
 func New(reg *registry.Registry) *Runner {
@@ -84,16 +86,24 @@ func (r *Runner) RunWorkflowWithConfirmation(ctx context.Context, id string, par
 	if err != nil {
 		return nil, err
 	}
-	finalParams := config.MergeParams(wf.Config.Parameters, nil, params)
-	if err := config.ValidateRequired(wf.Config.Parameters, finalParams); err != nil {
+	return r.RunWorkflowConfigWithConfirmation(ctx, wf.Config, params, confirmed, out, errOut)
+}
+
+func (r *Runner) RunWorkflowConfigWithConfirmation(ctx context.Context, wf *config.WorkflowConfig, params map[string]string, confirmed bool, out, errOut io.Writer) (*RunRecord, error) {
+	if wf == nil {
+		return nil, fmt.Errorf("工作流不能为空")
+	}
+	config.NormalizeWorkflow(wf)
+	finalParams := config.MergeParams(wf.Parameters, nil, params)
+	if err := config.ValidateRequired(wf.Parameters, finalParams); err != nil {
 		return nil, err
 	}
-	record := newRecord("workflow", id, finalParams)
+	record := newRecord("workflow", wf.ID, finalParams)
 	runDir, err := r.prepareRun(record.ID)
 	if err != nil {
 		return nil, err
 	}
-	ordered, err := registry.OrderWorkflow(wf.Config)
+	ordered, err := registry.OrderWorkflow(wf)
 	if err != nil {
 		finishRecord(record, err)
 		_ = r.saveRecord(runDir, record)
@@ -105,7 +115,15 @@ func (r *Runner) RunWorkflowWithConfirmation(ctx context.Context, id string, par
 		return record, err
 	}
 	workflowContext := copyParams(finalParams)
-	edgesByFrom, incomingByTo := workflowEdges(wf.Config.Edges)
+	nodeByID := map[string]config.WorkflowNode{}
+	legacyLoopTargets := map[string]bool{}
+	for _, node := range wf.Nodes {
+		nodeByID[node.ID] = node
+		if workflowNodeType(node) == config.WorkflowNodeTypeLoop && node.Loop.Tool == "" && node.Loop.Target != "" {
+			legacyLoopTargets[node.Loop.Target] = true
+		}
+	}
+	edgesByFrom, incomingByTo := workflowEdges(wf.Edges)
 	incomingCaseByTo := map[string]map[string]bool{}
 	for _, edges := range edgesByFrom {
 		for _, edge := range edges {
@@ -119,11 +137,16 @@ func (r *Runner) RunWorkflowWithConfirmation(ctx context.Context, id string, par
 		}
 	}
 	active := map[string]bool{}
-	for _, node := range wf.Config.Nodes {
+	for _, node := range wf.Nodes {
 		active[node.ID] = len(incomingByTo[node.ID]) == 0
 	}
 	for _, node := range ordered {
 		nodeType := workflowNodeType(node)
+		if legacyLoopTargets[node.ID] {
+			reason := "循环目标工具由循环节点内嵌执行"
+			record.Steps = append(record.Steps, skippedStepRecord(node, nodeType, reason))
+			continue
+		}
 		if !active[node.ID] {
 			reason := "条件分支未激活"
 			record.Steps = append(record.Steps, skippedStepRecord(node, nodeType, reason))
@@ -141,6 +164,29 @@ func (r *Runner) RunWorkflowWithConfirmation(ctx context.Context, id string, par
 			activateConditionBranches(node.ID, matchedCase, edgesByFrom, active)
 			workflowContext["steps."+node.ID+".condition.input"] = inputValue
 			workflowContext["steps."+node.ID+".condition.case"] = matchedCase
+			continue
+		}
+		if nodeType == config.WorkflowNodeTypeParallel || nodeType == config.WorkflowNodeTypeJoin {
+			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "succeeded", StartedAt: time.Now(), EndedAt: time.Now()}
+			record.Steps = append(record.Steps, stepRecord)
+			activatePlainBranches(node.ID, edgesByFrom, active)
+			continue
+		}
+		if nodeType == config.WorkflowNodeTypeLoop {
+			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Tool: loopToolID(node, nodeByID), Status: "running", StartedAt: time.Now(), LoopTarget: node.Loop.Target, LoopIterations: node.Loop.MaxIterations}
+			loopErr := r.executeLoop(ctx, node, nodeByID, finalParams, workflowContext, runDir, out, errOut)
+			stepRecord.EndedAt = time.Now()
+			if loopErr != nil {
+				stepRecord.Status = "failed"
+				stepRecord.Error = loopErr.Error()
+				record.Steps = append(record.Steps, stepRecord)
+				err = loopErr
+				break
+			}
+			addLoopContext(workflowContext, node.ID, node.Loop.MaxIterations, runDir)
+			stepRecord.Status = "succeeded"
+			record.Steps = append(record.Steps, stepRecord)
+			activatePlainBranches(node.ID, edgesByFrom, active)
 			continue
 		}
 		stepParams := resolveStepParams(finalParams, workflowContext, node.Params)
@@ -172,15 +218,23 @@ func (r *Runner) RunWorkflowWithConfirmation(ctx context.Context, id string, par
 
 func (r *Runner) validateWorkflowConfirmations(nodes []config.WorkflowNode, confirmed bool) error {
 	for _, node := range nodes {
-		if workflowNodeType(node) != config.WorkflowNodeTypeTool {
+		nodeType := workflowNodeType(node)
+		toolID := node.Tool
+		if nodeType == config.WorkflowNodeTypeLoop {
+			toolID = node.Loop.Tool
+		}
+		if nodeType != config.WorkflowNodeTypeTool && nodeType != config.WorkflowNodeTypeLoop {
 			continue
 		}
-		tool, err := r.Registry.Tool(node.Tool)
+		if toolID == "" {
+			continue
+		}
+		tool, err := r.Registry.Tool(toolID)
 		if err != nil {
 			return err
 		}
 		if tool.Config.Confirm.Required && !node.Confirm && !confirmed {
-			return fmt.Errorf("工作流节点 %s 引用的工具 %s 需要确认", node.ID, node.Tool)
+			return fmt.Errorf("工作流节点 %s 引用的工具 %s 需要确认", node.ID, toolID)
 		}
 	}
 	return nil
@@ -205,7 +259,13 @@ func workflowNodeType(node config.WorkflowNode) string {
 	if node.Tool != "" {
 		return config.WorkflowNodeTypeTool
 	}
-	return config.WorkflowNodeTypeCondition
+	if node.Condition.Input != "" || len(node.Condition.Cases) > 0 || node.Condition.DefaultCase != "" {
+		return config.WorkflowNodeTypeCondition
+	}
+	if node.Loop.Tool != "" || node.Loop.Target != "" || node.Loop.MaxIterations != 0 || len(node.Loop.Params) > 0 {
+		return config.WorkflowNodeTypeLoop
+	}
+	return ""
 }
 
 func skippedStepRecord(node config.WorkflowNode, nodeType, reason string) StepRecord {
@@ -270,6 +330,67 @@ func anyValue(values []string, match func(string) bool) bool {
 	}
 	return false
 }
+func (r *Runner) executeLoop(ctx context.Context, node config.WorkflowNode, nodes map[string]config.WorkflowNode, finalParams, workflowContext map[string]string, runDir string, out, errOut io.Writer) error {
+	toolID := loopToolID(node, nodes)
+	tool, err := r.Registry.Tool(toolID)
+	if err != nil {
+		return err
+	}
+	loopParams := node.Loop.Params
+	if len(loopParams) == 0 && node.Loop.Target != "" {
+		if target, ok := nodes[node.Loop.Target]; ok {
+			loopParams = target.Params
+		}
+	}
+	for iteration := 1; iteration <= node.Loop.MaxIterations; iteration++ {
+		stepParams := resolveStepParams(finalParams, workflowContext, loopParams)
+		stepRunDir := filepath.Join(runDir, node.ID, fmt.Sprintf("%d", iteration))
+		if err := r.executeTool(ctx, tool, stepParams, stepRunDir, out, errOut); err != nil {
+			return fmt.Errorf("循环节点 %s 第 %d 次执行工具 %s 失败: %w", node.ID, iteration, toolID, err)
+		}
+		addStepContext(workflowContext, fmt.Sprintf("%s.%d", node.ID, iteration), stepParams, stepRunDir)
+		addStepContext(workflowContext, node.ID, stepParams, stepRunDir)
+		writeLoopAggregateLogs(runDir, node.ID, node.Loop.MaxIterations)
+	}
+	return nil
+}
+
+func writeLoopAggregateLogs(runDir, nodeID string, maxIterations int) {
+	nodeRunDir := filepath.Join(runDir, nodeID)
+	if err := os.MkdirAll(nodeRunDir, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(nodeRunDir, "stdout.log"), []byte(readLoopText(runDir, nodeID, "stdout.log", maxIterations)), 0o644)
+	_ = os.WriteFile(filepath.Join(nodeRunDir, "stderr.log"), []byte(readLoopText(runDir, nodeID, "stderr.log", maxIterations)), 0o644)
+}
+
+func loopToolID(node config.WorkflowNode, nodes map[string]config.WorkflowNode) string {
+	if node.Loop.Tool != "" {
+		return node.Loop.Tool
+	}
+	if node.Loop.Target != "" {
+		return nodes[node.Loop.Target].Tool
+	}
+	return ""
+}
+
+func addLoopContext(context map[string]string, nodeID string, maxIterations int, runDir string) {
+	context["steps."+nodeID+".loop.iterations"] = fmt.Sprint(maxIterations)
+	context["steps."+nodeID+".stdout"] = strings.TrimSpace(readLoopText(runDir, nodeID, "stdout.log", maxIterations))
+	context["steps."+nodeID+".stderr"] = strings.TrimSpace(readLoopText(runDir, nodeID, "stderr.log", maxIterations))
+}
+
+func readLoopText(runDir, nodeID, fileName string, maxIterations int) string {
+	parts := []string{}
+	for iteration := 1; iteration <= maxIterations; iteration++ {
+		text := strings.TrimSpace(readTextFile(filepath.Join(runDir, nodeID, fmt.Sprintf("%d", iteration), fileName)))
+		if text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
 func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, params map[string]string, runDir string, out, errOut io.Writer) error {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return err

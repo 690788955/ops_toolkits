@@ -104,7 +104,10 @@ Contract details:
 - Fan-in rule: inactive condition edges do not block; active incoming edges must complete successfully.
 - CLI/menu presentation must render condition step records in a human-readable summary while keeping `RunRecord` JSON fields unchanged: show step type `编排节点/条件分支`, `condition_input`, `matched_case`, and `skipped_reason` when present.
 - Workflow-level confirmation scans must ignore condition/control nodes and only prompt for registered tool nodes.
-- Frontend control-node catalog may show planned nodes (`并行分支`, `合流`, `循环`) as disabled roadmap cards, but backend/runtime scope remains limited to executable `condition` control nodes until their schemas and semantics are explicitly added.
+- `type: loop` is an executable control node that owns its repeated tool config in `loop.tool`, `loop.params`, and `loop.max_iterations`; new workflows must not model loop execution by pointing `loop.target` at a separate canvas tool node.
+- Loop nodes must not set top-level `tool` or `condition`. `loop.tool` must reference a registered tool, and `loop.max_iterations` must be between 1 and 20.
+- Runner executes `loop.tool` sequentially for `loop.max_iterations`; `loop.params` are rendered with the same workflow context as tool-node params. Any failed iteration stops the loop and fails the workflow.
+- Defensive backward compatibility may read old `loop.target` drafts, but examples, UI guidance, validation tests, and docs should use embedded `loop.tool` + `loop.params` only.
 
 ### 4. Validation & Error Matrix
 

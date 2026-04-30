@@ -251,6 +251,134 @@ echo should-not-run
 	}
 }
 
+func TestRunWorkflowExecutesEmbeddedLoopTool(t *testing.T) {
+	dir := t.TempDir()
+	loopDir := writeTool(t, dir, "loop", `#!/usr/bin/env bash
+set -euo pipefail
+echo "loop-${OPS_PARAM_NAME}"
+`)
+	afterDir := writeTool(t, dir, "after-loop", `#!/usr/bin/env bash
+set -euo pipefail
+echo "after=${OPS_PARAM_INPUT}"
+`)
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.loop":  {Entry: config.ToolEntry{ID: "demo.loop", Category: "demo"}, Config: toolConfig("demo.loop"), Dir: loopDir},
+			"demo.after": {Entry: config.ToolEntry{ID: "demo.after", Category: "demo"}, Config: toolConfig("demo.after"), Dir: afterDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID:         "demo.loop-flow",
+		Parameters: []config.Parameter{{Name: "name", Required: true}},
+		Nodes: []config.WorkflowNode{
+			{ID: "repeat", Type: config.WorkflowNodeTypeLoop, Loop: config.WorkflowLoop{Tool: "demo.loop", Params: map[string]interface{}{"name": "{{ .name }}"}, MaxIterations: 3}},
+			{ID: "after", Tool: "demo.after", Params: map[string]interface{}{"input": "{{ .steps.repeat.stdout }}"}},
+		},
+		Edges: []config.WorkflowEdge{{From: "repeat", To: "after"}},
+	}
+	reg.Workflows["demo.loop-flow"] = &registry.Workflow{Entry: config.WorkflowRef{ID: "demo.loop-flow"}, Config: wf}
+
+	r := New(reg)
+	record, err := r.RunWorkflow(context.Background(), "demo.loop-flow", map[string]string{"name": "demo"}, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflow error: %v", err)
+	}
+	steps := map[string]StepRecord{}
+	for _, step := range record.Steps {
+		steps[step.ID] = step
+	}
+	if record.Status != "succeeded" || steps["repeat"].Status != "succeeded" || steps["repeat"].Tool != "demo.loop" {
+		t.Fatalf("record = %#v, steps = %#v", record, steps)
+	}
+	loopLog := readFile(t, filepath.Join(r.RunsDir, record.ID, "repeat", "stdout.log"))
+	if strings.Count(loopLog, "loop-demo") != 3 {
+		t.Fatalf("loop aggregate log = %q, want 3 iterations", loopLog)
+	}
+	afterLog := readFile(t, filepath.Join(r.RunsDir, record.ID, "after", "stdout.log"))
+	if !strings.Contains(afterLog, "loop-demo") {
+		t.Fatalf("after node did not receive loop aggregate stdout: %q", afterLog)
+	}
+}
+
+func TestRunWorkflowStopsOnEmbeddedLoopToolFailure(t *testing.T) {
+	dir := t.TempDir()
+	loopDir := writeTool(t, dir, "loop-fail", `#!/usr/bin/env bash
+set -euo pipefail
+exit 7
+`)
+	afterDir := writeTool(t, dir, "after-fail", `#!/usr/bin/env bash
+set -euo pipefail
+echo should-not-run
+`)
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.loop":  {Entry: config.ToolEntry{ID: "demo.loop", Category: "demo"}, Config: toolConfig("demo.loop"), Dir: loopDir},
+			"demo.after": {Entry: config.ToolEntry{ID: "demo.after", Category: "demo"}, Config: toolConfig("demo.after"), Dir: afterDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID: "demo.loop-fail",
+		Nodes: []config.WorkflowNode{
+			{ID: "repeat", Type: config.WorkflowNodeTypeLoop, Loop: config.WorkflowLoop{Tool: "demo.loop", MaxIterations: 2}},
+			{ID: "after", Tool: "demo.after"},
+		},
+		Edges: []config.WorkflowEdge{{From: "repeat", To: "after"}},
+	}
+	reg.Workflows["demo.loop-fail"] = &registry.Workflow{Entry: config.WorkflowRef{ID: "demo.loop-fail"}, Config: wf}
+
+	record, err := New(reg).RunWorkflow(context.Background(), "demo.loop-fail", nil, nilWriter{}, nilWriter{})
+	if err == nil {
+		t.Fatalf("RunWorkflow expected failure")
+	}
+	if record.Status != "failed" || len(record.Steps) != 1 || record.Steps[0].ID != "repeat" || record.Steps[0].Status != "failed" {
+		t.Fatalf("record = %#v", record)
+	}
+}
+
+func TestRunWorkflowPassesParallelAndJoinControlNodes(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := writeTool(t, dir, "done", `#!/usr/bin/env bash
+set -euo pipefail
+echo done
+`)
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.done": {Entry: config.ToolEntry{ID: "demo.done", Category: "demo"}, Config: toolConfig("demo.done"), Dir: toolDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID: "demo.control-flow",
+		Nodes: []config.WorkflowNode{
+			{ID: "split", Type: config.WorkflowNodeTypeParallel},
+			{ID: "join", Type: config.WorkflowNodeTypeJoin},
+			{ID: "done", Tool: "demo.done"},
+		},
+		Edges: []config.WorkflowEdge{{From: "split", To: "join"}, {From: "join", To: "done"}},
+	}
+	reg.Workflows["demo.control-flow"] = &registry.Workflow{Entry: config.WorkflowRef{ID: "demo.control-flow"}, Config: wf}
+
+	record, err := New(reg).RunWorkflow(context.Background(), "demo.control-flow", nil, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflow error: %v", err)
+	}
+	steps := map[string]StepRecord{}
+	for _, step := range record.Steps {
+		steps[step.ID] = step
+	}
+	if record.Status != "succeeded" || steps["split"].Status != "succeeded" || steps["join"].Status != "succeeded" || steps["done"].Status != "succeeded" {
+		t.Fatalf("record = %#v, steps = %#v", record, steps)
+	}
+}
+
 func writeTool(t *testing.T, baseDir, name, script string) string {
 	t.Helper()
 	dir := filepath.Join(baseDir, "tools", "demo", name)

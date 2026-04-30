@@ -42,11 +42,13 @@ func (r *Registry) ValidateWorkflow(wf *config.WorkflowConfig) error {
 		if _, ok := nodes[node.ID]; ok {
 			return fmt.Errorf("节点 ID 重复: %s", node.ID)
 		}
+		nodes[node.ID] = node
+	}
+	for _, node := range wf.Nodes {
 		nodeType := effectiveNodeType(node)
-		if err := r.validateWorkflowNode(node, nodeType); err != nil {
+		if err := r.validateWorkflowNode(node, nodeType, nodes); err != nil {
 			return err
 		}
-		nodes[node.ID] = node
 	}
 	if err := validateWorkflowEdges(wf, nodes); err != nil {
 		return err
@@ -55,7 +57,7 @@ func (r *Registry) ValidateWorkflow(wf *config.WorkflowConfig) error {
 	return err
 }
 
-func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType string) error {
+func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType string, nodes map[string]config.WorkflowNode) error {
 	switch nodeType {
 	case config.WorkflowNodeTypeTool:
 		if node.Tool == "" {
@@ -64,12 +66,18 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		if node.Condition.Input != "" || len(node.Condition.Cases) > 0 || node.Condition.DefaultCase != "" {
 			return fmt.Errorf("工具节点 %s 不能配置 condition", node.ID)
 		}
+		if hasLoopConfig(node.Loop) {
+			return fmt.Errorf("工具节点 %s 不能配置 loop", node.ID)
+		}
 		if _, ok := r.Tools[node.Tool]; !ok {
 			return fmt.Errorf("节点 %s 引用了不存在的工具 %s", node.ID, node.Tool)
 		}
 	case config.WorkflowNodeTypeCondition:
 		if node.Tool != "" {
 			return fmt.Errorf("条件节点 %s 不能同时配置 tool", node.ID)
+		}
+		if hasLoopConfig(node.Loop) {
+			return fmt.Errorf("条件节点 %s 不能配置 loop", node.ID)
 		}
 		if node.Condition.Input == "" {
 			return fmt.Errorf("条件节点 %s 的 condition.input 必填", node.ID)
@@ -98,6 +106,43 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		}
 		if node.Condition.DefaultCase != "" && node.Condition.DefaultCase != "default" {
 			return fmt.Errorf("条件节点 %s 的 default_case 只支持 default", node.ID)
+		}
+	case config.WorkflowNodeTypeParallel, config.WorkflowNodeTypeJoin:
+		if node.Tool != "" {
+			return fmt.Errorf("编排节点 %s 不能配置 tool", node.ID)
+		}
+		if node.Condition.Input != "" || len(node.Condition.Cases) > 0 || node.Condition.DefaultCase != "" {
+			return fmt.Errorf("编排节点 %s 不能配置 condition", node.ID)
+		}
+		if hasLoopConfig(node.Loop) {
+			return fmt.Errorf("编排节点 %s 不能配置 loop", node.ID)
+		}
+	case config.WorkflowNodeTypeLoop:
+		if node.Tool != "" {
+			return fmt.Errorf("循环节点 %s 不能同时配置 tool", node.ID)
+		}
+		if node.Condition.Input != "" || len(node.Condition.Cases) > 0 || node.Condition.DefaultCase != "" {
+			return fmt.Errorf("循环节点 %s 不能配置 condition", node.ID)
+		}
+		loopTool := node.Loop.Tool
+		if loopTool == "" && node.Loop.Target != "" {
+			targetNode, ok := nodes[node.Loop.Target]
+			if !ok {
+				return fmt.Errorf("循环节点 %s 的 loop.target 引用了不存在的节点 %s", node.ID, node.Loop.Target)
+			}
+			if effectiveNodeType(targetNode) != config.WorkflowNodeTypeTool || targetNode.Tool == "" {
+				return fmt.Errorf("循环节点 %s 的 loop.target 必须引用工具节点", node.ID)
+			}
+			loopTool = targetNode.Tool
+		}
+		if loopTool == "" {
+			return fmt.Errorf("循环节点 %s 的 loop.tool 必填", node.ID)
+		}
+		if _, ok := r.Tools[loopTool]; !ok {
+			return fmt.Errorf("循环节点 %s 引用了不存在的工具 %s", node.ID, loopTool)
+		}
+		if node.Loop.MaxIterations < 1 || node.Loop.MaxIterations > 20 {
+			return fmt.Errorf("循环节点 %s 的 loop.max_iterations 必须在 1..20 之间", node.ID)
 		}
 	default:
 		return fmt.Errorf("节点 %s 使用未知类型: %s", node.ID, nodeType)
@@ -141,7 +186,17 @@ func effectiveNodeType(node config.WorkflowNode) string {
 	if node.Tool != "" {
 		return config.WorkflowNodeTypeTool
 	}
+	if node.Condition.Input != "" || len(node.Condition.Cases) > 0 || node.Condition.DefaultCase != "" {
+		return config.WorkflowNodeTypeCondition
+	}
+	if hasLoopConfig(node.Loop) {
+		return config.WorkflowNodeTypeLoop
+	}
 	return ""
+}
+
+func hasLoopConfig(loop config.WorkflowLoop) bool {
+	return loop.Tool != "" || loop.Target != "" || loop.MaxIterations != 0 || len(loop.Params) > 0
 }
 
 func conditionCaseExists(node config.WorkflowNode, caseID string) bool {

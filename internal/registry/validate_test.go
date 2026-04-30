@@ -160,6 +160,44 @@ func TestValidateWorkflowAllowsConditionWithoutOutgoingEdges(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowAcceptsEmbeddedLoopNode(t *testing.T) {
+	reg := &Registry{Tools: map[string]*Tool{"demo.tool": {}}}
+	wf := &config.WorkflowConfig{
+		ID: "demo.loop",
+		Nodes: []config.WorkflowNode{
+			{ID: "loop", Type: config.WorkflowNodeTypeLoop, Loop: config.WorkflowLoop{Tool: "demo.tool", MaxIterations: 3, Params: map[string]interface{}{"name": "{{ .name }}"}}},
+		},
+	}
+
+	if err := reg.ValidateWorkflow(wf); err != nil {
+		t.Fatalf("ValidateWorkflow error = %v", err)
+	}
+}
+
+func TestValidateWorkflowRejectsInvalidLoopNode(t *testing.T) {
+	reg := &Registry{Tools: map[string]*Tool{"demo.tool": {}}}
+	cases := []struct {
+		name string
+		node config.WorkflowNode
+		want string
+	}{
+		{name: "missing tool", node: config.WorkflowNode{ID: "loop", Type: config.WorkflowNodeTypeLoop, Loop: config.WorkflowLoop{MaxIterations: 1}}, want: "loop.tool 必填"},
+		{name: "missing referenced tool", node: config.WorkflowNode{ID: "loop", Type: config.WorkflowNodeTypeLoop, Loop: config.WorkflowLoop{Tool: "missing.tool", MaxIterations: 1}}, want: "不存在的工具"},
+		{name: "bad iterations low", node: config.WorkflowNode{ID: "loop", Type: config.WorkflowNodeTypeLoop, Loop: config.WorkflowLoop{Tool: "demo.tool", MaxIterations: 0}}, want: "1..20"},
+		{name: "bad iterations high", node: config.WorkflowNode{ID: "loop", Type: config.WorkflowNodeTypeLoop, Loop: config.WorkflowLoop{Tool: "demo.tool", MaxIterations: 21}}, want: "1..20"},
+		{name: "node tool forbidden", node: config.WorkflowNode{ID: "loop", Type: config.WorkflowNodeTypeLoop, Tool: "demo.tool", Loop: config.WorkflowLoop{Tool: "demo.tool", MaxIterations: 1}}, want: "不能同时配置 tool"},
+		{name: "condition forbidden", node: config.WorkflowNode{ID: "loop", Type: config.WorkflowNodeTypeLoop, Loop: config.WorkflowLoop{Tool: "demo.tool", MaxIterations: 1}, Condition: config.WorkflowCondition{Input: "x"}}, want: "不能配置 condition"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := reg.ValidateWorkflow(&config.WorkflowConfig{ID: "demo.loop", Nodes: []config.WorkflowNode{tc.node}})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidateWorkflow error = %v, want %s", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestOrderWorkflowReturnsDependencyOrder(t *testing.T) {
 	wf := &config.WorkflowConfig{
 		ID: "demo.flow",

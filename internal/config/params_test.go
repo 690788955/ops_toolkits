@@ -151,18 +151,18 @@ confirm:
 	}
 }
 
-func TestLoadWorkflowDAGSchema(t *testing.T) {
+func TestLoadWorkflowDAGSchemaWithEmbeddedLoop(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "workflow.yaml")
-	content := `id: demo.flow
+	path := filepath.Join(dir, "workflow-loop.yaml")
+	content := `id: demo.loop
 nodes:
-  - id: first
-    tool: demo.first
-  - id: second
-    tool: demo.second
-edges:
-  - from: first
-    to: second
+  - id: repeat
+    type: loop
+    loop:
+      tool: demo.greet
+      params:
+        name: "{{ .name }}"
+      max_iterations: 2
 `
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -171,7 +171,7 @@ edges:
 	if err != nil {
 		t.Fatalf("LoadWorkflow 返回错误: %v", err)
 	}
-	if len(cfg.Nodes) != 2 || len(cfg.Edges) != 1 {
-		t.Fatalf("工作流配置不符合预期: %#v", cfg)
+	if len(cfg.Nodes) != 1 || cfg.Nodes[0].Type != WorkflowNodeTypeLoop || cfg.Nodes[0].Loop.Tool != "demo.greet" || cfg.Nodes[0].Loop.MaxIterations != 2 {
+		t.Fatalf("循环工作流配置不符合预期: %#v", cfg)
 	}
 }

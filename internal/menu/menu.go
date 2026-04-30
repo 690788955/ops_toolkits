@@ -21,6 +21,14 @@ type item struct {
 	description string
 }
 
+const allCategoryID = "__all__"
+
+var allCategory = config.Category{
+	ID:          allCategoryID,
+	Name:        "全局/全部",
+	Description: "显示所有工具和工作流",
+}
+
 func Run(ctx context.Context, reg *registry.Registry, in io.Reader, out, errOut io.Writer) error {
 	scanner := bufio.NewScanner(in)
 	for {
@@ -43,10 +51,8 @@ func Run(ctx context.Context, reg *registry.Registry, in io.Reader, out, errOut 
 }
 
 func selectCategory(reg *registry.Registry, scanner *bufio.Scanner, out io.Writer) (config.Category, bool, error) {
-	categories := reg.Root.DisplayCategories()
-	if len(categories) == 0 {
-		return config.Category{}, false, fmt.Errorf("未配置分类")
-	}
+	categories := append([]config.Category{}, reg.Root.DisplayCategories()...)
+	categories = append(categories, allCategory)
 	for {
 		fmt.Fprintf(out, "\n%s\n", title(reg.Root.DisplayName(), "运维框架"))
 		fmt.Fprintln(out, "请选择运维分类:")
@@ -113,12 +119,12 @@ func selectItem(reg *registry.Registry, categoryID string, scanner *bufio.Scanne
 func itemsForCategory(reg *registry.Registry, categoryID string) []item {
 	items := []item{}
 	for _, tool := range reg.Tools {
-		if tool.Entry.Category == categoryID {
+		if categoryID == allCategoryID || tool.Entry.Category == categoryID {
 			items = append(items, item{kind: "tool", id: tool.Entry.ID, name: tool.Entry.Name, description: tool.Entry.Description})
 		}
 	}
 	for _, wf := range reg.Workflows {
-		if wf.Entry.Category == categoryID {
+		if categoryID == allCategoryID || wf.Entry.Category == categoryID {
 			items = append(items, item{kind: "workflow", id: wf.Entry.ID, name: wf.Entry.Name, description: wf.Entry.Description})
 		}
 	}
@@ -177,10 +183,18 @@ func runSelected(ctx context.Context, reg *registry.Registry, selected item, in 
 func confirmWorkflowTools(reg *registry.Registry, wf *config.WorkflowConfig, in io.Reader, out io.Writer) (bool, error) {
 	confirmed := false
 	for _, node := range wf.Nodes {
-		if workflowNodeType(node) != config.WorkflowNodeTypeTool {
+		nodeType := workflowNodeType(node)
+		toolID := node.Tool
+		if nodeType == config.WorkflowNodeTypeLoop {
+			toolID = node.Loop.Tool
+		}
+		if nodeType != config.WorkflowNodeTypeTool && nodeType != config.WorkflowNodeTypeLoop {
 			continue
 		}
-		tool, err := reg.Tool(node.Tool)
+		if toolID == "" {
+			continue
+		}
+		tool, err := reg.Tool(toolID)
 		if err != nil {
 			return false, err
 		}
@@ -228,6 +242,10 @@ func printWorkflowDetails(reg *registry.Registry, id string, out io.Writer) erro
 			}
 			continue
 		}
+		if workflowNodeType(node) == config.WorkflowNodeTypeLoop {
+			fmt.Fprintf(out, "  %s [编排节点/循环] 工具=%s 次数=%d\n", node.ID, title(node.Loop.Tool, "未配置"), node.Loop.MaxIterations)
+			continue
+		}
 		fmt.Fprintf(out, "  %s [工具节点] 工具=%s\n", node.ID, node.Tool)
 	}
 	if len(wf.Config.Edges) > 0 {
@@ -249,6 +267,9 @@ func workflowNodeType(node config.WorkflowNode) string {
 	}
 	if node.Tool != "" {
 		return config.WorkflowNodeTypeTool
+	}
+	if node.Loop.Tool != "" || node.Loop.Target != "" || node.Loop.MaxIterations != 0 || len(node.Loop.Params) > 0 {
+		return config.WorkflowNodeTypeLoop
 	}
 	return ""
 }
@@ -286,6 +307,9 @@ func printRecord(out io.Writer, record *runner.RunRecord) {
 func displayStepType(step runner.StepRecord) string {
 	if step.Type == config.WorkflowNodeTypeCondition {
 		return "编排节点/条件分支"
+	}
+	if step.Type == config.WorkflowNodeTypeLoop {
+		return "编排节点/循环"
 	}
 	return "工具节点"
 }

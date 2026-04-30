@@ -158,12 +158,20 @@ type WorkflowNode struct {
 	Name      string                 `yaml:"name" json:"name"`
 	Tool      string                 `yaml:"tool" json:"tool"`
 	Condition WorkflowCondition      `yaml:"condition" json:"condition"`
+	Loop      WorkflowLoop           `yaml:"loop" json:"loop"`
 	DependsOn []string               `yaml:"depends_on" json:"depends_on"`
 	Params    map[string]interface{} `yaml:"params" json:"params"`
 	Optional  bool                   `yaml:"optional" json:"optional"`
 	Timeout   string                 `yaml:"timeout" json:"timeout"`
 	Confirm   bool                   `yaml:"confirm" json:"confirm"`
 	OnFailure string                 `yaml:"on_failure" json:"on_failure"`
+}
+
+type WorkflowLoop struct {
+	Tool          string                 `yaml:"tool" json:"tool"`
+	Params        map[string]interface{} `yaml:"params" json:"params"`
+	MaxIterations int                    `yaml:"max_iterations" json:"max_iterations"`
+	Target        string                 `yaml:"target" json:"target,omitempty"`
 }
 
 type WorkflowCondition struct {
@@ -188,6 +196,9 @@ type WorkflowEdge struct {
 const (
 	WorkflowNodeTypeTool      = "tool"
 	WorkflowNodeTypeCondition = "condition"
+	WorkflowNodeTypeParallel  = "parallel"
+	WorkflowNodeTypeJoin      = "join"
+	WorkflowNodeTypeLoop      = "loop"
 )
 
 func (c RootConfig) DisplayName() string {

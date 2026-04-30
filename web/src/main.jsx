@@ -31,7 +31,6 @@ const controlNodeCatalog = [
     secondary: 'Switch / Case',
     description: '根据上游输出或工作流参数选择后续分支',
     capabilities: ['多分支', '默认分支', '读取 stdout/stderr/参数'],
-    preview: ['输入：选择上游输出', '分支：case1 / case2 / default'],
     help: '适合根据巡检结果、返回文本、参数值做分流',
     enabled: true
   },
@@ -39,43 +38,73 @@ const controlNodeCatalog = [
     type: 'parallel',
     title: '并行分支',
     secondary: 'Parallel',
-    description: '将后续任务拆分为多个并行执行路径',
-    capabilities: ['多路径', '并发执行', '规划中'],
-    preview: ['输入：一个上游节点', '输出：多个并行分支'],
-    help: '规划中：后续用于同时执行多组独立运维动作',
-    enabled: false
+    description: '将后续任务拆分为多个分支路径',
+    capabilities: ['多路径', '分支结构'],
+    help: '用于明确 fan-out 分支结构；当前运行按 DAG 顺序调度',
+    enabled: true
   },
   {
-    type: 'merge',
+    type: 'join',
     title: '合流',
-    secondary: 'Merge',
-    description: '等待多个分支汇聚后继续执行',
-    capabilities: ['分支汇聚', '等待策略', '规划中'],
-    preview: ['输入：多个分支', '输出：继续流程'],
-    help: '规划中：后续用于明确分支汇聚和等待语义',
-    enabled: false
+    secondary: 'Join',
+    description: '等待多个上游分支完成后继续流程',
+    capabilities: ['分支汇聚', '等待上游'],
+    help: '用于明确 fan-in 汇聚点；入边完成后节点记为成功',
+    enabled: true
   },
   {
     type: 'loop',
     title: '循环',
     secondary: 'Loop',
-    description: '按条件重复执行一段流程',
-    capabilities: ['重复执行', '退出条件', '规划中'],
-    preview: ['输入：循环范围', '退出：满足条件后继续'],
-    help: '规划中：后续用于批量或重试类流程控制',
-    enabled: false
+    description: '按固定次数重复执行一个内嵌选择的插件工具',
+    capabilities: ['固定次数', '内嵌工具', '安全上限'],
+    help: '执行到循环节点时，按最大次数重复运行已选择的插件工具',
+    enabled: true
   }
 ]
 
-const nodeTypes = {toolNode: ToolNode, conditionNode: ConditionNode}
+const nodeTypes = {toolNode: ToolNode, conditionNode: ConditionNode, controlNode: ControlNode}
+
+function FlowchartShape({kind, marker}) {
+  return (
+    <span className={`flowchartShape ${kind}`} aria-hidden="true">
+      <span>{marker}</span>
+    </span>
+  )
+}
+
+function controlShapeKind(type) {
+  if (type === 'condition') return 'decision'
+  if (type === 'parallel' || type === 'join' || type === 'loop') return `gateway ${type}`
+  return 'planned'
+}
+
+function controlShapeMarker(type) {
+  if (type === 'condition') return '?'
+  if (type === 'parallel') return '+'
+  if (type === 'join') return '∧'
+  if (type === 'loop') return '↻'
+  return '·'
+}
+
+function controlShapeLabel(type) {
+  if (type === 'condition') return 'Decision 条件判断'
+  if (type === 'parallel') return 'Gateway 并行分支'
+  if (type === 'join') return 'Gateway 合流'
+  if (type === 'loop') return 'Loop 固定次数循环'
+  return '流程节点'
+}
 
 function ToolNode({id, data, selected}) {
+  const runTitle = formatNodeRunTitle(data.run)
+  const nodeTitle = [data.name || id, data.tool, runTitle].filter(Boolean).join('\n')
   return (
-    <div className={selected ? 'toolNode selected' : 'toolNode'}>
+    <div className={nodeRunClass('toolNode', selected, data.run)} title={nodeTitle}>
       <Handle type="target" position={Position.Left} />
+      <RunStatusBadge run={data.run} />
       <button className="nodeDelete nodrag nopan" onMouseDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); data.onRemove(id) }} title="删除节点">×</button>
       <strong>{data.name || id}</strong>
-      <span>{data.tool}</span>
+      {data.tool && <span className="nodeHoverMeta">{data.tool}</span>}
       <Handle type="source" position={Position.Right} />
     </div>
   )
@@ -86,23 +115,24 @@ function ConditionNode({id, data, selected}) {
   const condition = data.condition || defaultCondition()
   const status = conditionNodeStatus(condition)
   const branches = conditionBranchRows(condition)
+  const runTitle = formatNodeRunTitle(data.run)
+  const nodeTitle = [data.name || id, conditionSummary(condition), conditionCaseSummary(condition), status.label, runTitle].filter(Boolean).join('\n')
   return (
-    <div className={selected ? 'conditionNode selected' : 'conditionNode'}>
+    <div className={nodeRunClass('conditionNode', selected, data.run)} title={nodeTitle}>
       <Handle type="target" position={Position.Left} />
-      <div className="conditionDiamond" aria-hidden="true"><span>分</span></div>
+      <RunStatusBadge run={data.run} />
+      <div className="conditionDiamond" aria-hidden="true"><span>?</span></div>
       <button className="nodeDelete nodrag nopan" onMouseDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); data.onRemove(id) }} title="删除节点">×</button>
       <div className="conditionInfoCard">
-        <div className="conditionNodeHeader">
-          <span>条件分支</span>
-          <strong>{data.name || id}</strong>
-        </div>
+        <strong>{data.name || id}</strong>
         <div className="conditionInputSummary">{conditionSummary(condition)}</div>
         <small>{conditionCaseSummary(condition)}</small>
-        <div className={status.ready ? 'conditionStatus ready' : 'conditionStatus warning'}>{status.label}</div>
+        <small className={status.ready ? 'conditionState ready' : 'conditionState warning'}>{status.label}</small>
       </div>
       <div className="conditionBranchList" aria-label="条件分支出口">
         {branches.map(branch => (
-          <div key={branch.key} className={`conditionBranchRow ${branch.kind}${branch.disabled ? ' disabled' : ''}`}>
+          <div key={branch.key} className={`conditionBranchRow ${branch.kind}${branch.disabled ? ' disabled' : ''}${data.run?.matchedCase === branch.handleID ? ' matched' : ''}`} title={branch.meta}>
+            <span className="conditionBranchLine" aria-hidden="true" />
             <div className="conditionBranchText">
               <strong>{branch.label}</strong>
               <span>{branch.meta}</span>
@@ -125,6 +155,28 @@ function ConditionNode({id, data, selected}) {
     </div>
   )
 }
+function ControlNode({id, data, selected}) {
+  const loop = data.loop || {}
+  const loopSummary = loop.tool ? `工具 ${loop.tool} × ${loop.max_iterations || 0}` : '未配置循环工具'
+  const runLoopSummary = data.run?.loopIterations ? `实际迭代 ${data.run.loopIterations} 次` : ''
+  const helpText = data.controlType === 'loop' ? [loopSummary, runLoopSummary].filter(Boolean).join('；') : controlNodeHelp(data.controlType)
+  const runTitle = formatNodeRunTitle(data.run)
+  const nodeTitle = [data.name || id, controlShapeLabel(data.controlType), helpText, runTitle].filter(Boolean).join('\n')
+  return (
+    <div className={nodeRunClass(`controlNode ${data.controlType || ''}`, selected, data.run)} title={nodeTitle}>
+      <Handle type="target" position={Position.Left} />
+      <RunStatusBadge run={data.run} />
+      <button className="nodeDelete nodrag nopan" onMouseDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); data.onRemove(id) }} title="删除节点">×</button>
+      <FlowchartShape kind={controlShapeKind(data.controlType)} marker={controlShapeMarker(data.controlType)} />
+      <div className="controlNodeText">
+        <strong>{data.name || id}</strong>
+        <small>{controlShapeLabel(data.controlType)} · {helpText}</small>
+      </div>
+      <Handle type="source" position={Position.Right} />
+    </div>
+  )
+}
+
 function App() {
   const [catalog, setCatalog] = useState(null)
   const [activeCategory, setActiveCategory] = useState('')
@@ -290,6 +342,7 @@ function App() {
 function PluginManagerModal({catalog, state, setState, onClose, onUploaded}) {
   const [file, setFile] = useState(null)
   const [uploading, setUploading] = useState(false)
+  const [exportModalOpen, setExportModalOpen] = useState(false)
   const exportablePlugins = useMemo(() => [...(catalog?.plugins || [])].sort((left, right) => String(left.id || '').localeCompare(String(right.id || ''), 'zh-CN')), [catalog])
 
   async function uploadPlugin(replace = false) {
@@ -341,28 +394,42 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded}) {
               <span>导出用户工作流插件，或将已安装插件打包为可再次上传的 ZIP。</span>
             </div>
             <a className="secondary downloadTemplate" href="/api/plugins/user-workflows.zip">导出用户工作流插件</a>
-            <section className="pluginExportPanel">
-              <div>
-                <strong>导出已安装插件</strong>
-                <span>每个插件将下载为可再次上传安装的标准 ZIP 包。</span>
-              </div>
-              <div className="pluginExportList">
-                {exportablePlugins.map(item => (
-                  <div className="pluginExportItem" key={item.id}>
-                    <div>
-                      <strong>{item.name || item.id}</strong>
-                      <span>{item.id}@{item.version || '-'}</span>
-                      {item.description && <small>{item.description}</small>}
-                    </div>
-                    <a className="secondary" href={`/api/plugins/${encodeURIComponent(item.id)}.zip`}>导出</a>
-                  </div>
-                ))}
-                {exportablePlugins.length === 0 && <div className="empty small">当前没有可导出的已安装插件。</div>}
-              </div>
-            </section>
+            <button className="secondary downloadTemplate" type="button" onClick={() => setExportModalOpen(true)}>导出已安装插件</button>
           </section>
         </div>
         <pre className="modalResult">{state.response ? JSON.stringify(state.response, null, 2) : state.message}</pre>
+      </div>
+      {exportModalOpen && (
+        <PluginExportModal plugins={exportablePlugins} onClose={() => setExportModalOpen(false)} />
+      )}
+    </div>
+  )
+}
+
+function PluginExportModal({plugins, onClose}) {
+  return (
+    <div className="modalBackdrop modalBackdropNested" onClick={onClose}>
+      <div className="modal pluginExportModal" onClick={event => event.stopPropagation()}>
+        <div className="modalHeader">
+          <div>
+            <h3>导出已安装插件</h3>
+            <p>选择一个插件，将其下载为可再次上传安装的标准 ZIP 包。</p>
+          </div>
+          <button className="modalClose" onClick={onClose}>×</button>
+        </div>
+        <div className="pluginExportList">
+          {plugins.map(item => (
+            <div className="pluginExportItem" key={item.id}>
+              <div>
+                <strong>{item.name || item.id}</strong>
+                <span>{item.id}@{item.version || '-'}</span>
+                {item.description && <small>{item.description}</small>}
+              </div>
+              <a className="secondary" href={`/api/plugins/${encodeURIComponent(item.id)}.zip`}>导出</a>
+            </div>
+          ))}
+          {plugins.length === 0 && <div className="empty small">当前没有可导出的已安装插件。</div>}
+        </div>
       </div>
     </div>
   )
@@ -501,17 +568,21 @@ function RunPanel({activeTab, entries, totalEntries, selected, params, setParams
 
 function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   const [workflow, setWorkflow] = useState(emptyWorkflow(activeCategory))
+  const sidebarScopedCategory = activeCategory || ''
   const workflowOptions = useMemo(() => {
-    return (catalog.workflows || []).filter(workflow => !activeCategory || workflow.category === activeCategory)
-  }, [catalog, activeCategory])
+    return (catalog.workflows || []).filter(workflow => !sidebarScopedCategory || workflow.category === sidebarScopedCategory)
+  }, [catalog, sidebarScopedCategory])
   const workflowScope = workflowScopeCategory(workflow.category)
   const scopedCategory = workflowScope === 'global' ? '' : workflowScope
   const toolOptions = useMemo(() => {
-    return (catalog.tools || []).filter(tool => !scopedCategory || tool.category === scopedCategory)
-  }, [catalog, scopedCategory])
+    return (catalog.tools || []).filter(tool => !sidebarScopedCategory || tool.category === sidebarScopedCategory)
+  }, [catalog, sidebarScopedCategory])
   const workflowTagOptions = useMemo(() => tagsForEntries([...(catalog.workflows || []), workflow]), [catalog.workflows, workflow])
   const [selectedWorkflowID, setSelectedWorkflowID] = useState('')
   const [selectedNodeID, setSelectedNodeID] = useState('')
+  const [selectedEdgeID, setSelectedEdgeID] = useState('')
+  const [nodeConfigModalOpen, setNodeConfigModalOpen] = useState(false)
+  const [edgeConfigModalOpen, setEdgeConfigModalOpen] = useState(false)
   const [workflowParamsText, setWorkflowParamsText] = useState('[]')
   const [runParamsText, setRunParamsText] = useState('{}')
   const [nodeParamsText, setNodeParamsText] = useState('{}')
@@ -525,60 +596,123 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   const [nodePickerSearchText, setNodePickerSearchText] = useState('')
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
+  const [canvasRunState, setCanvasRunState] = useState(() => emptyCanvasRunState())
+  const canvasRunVersionRef = useRef(0)
+
+  const clearCanvasRunOverlay = useCallback(() => {
+    canvasRunVersionRef.current += 1
+    setCanvasRunState(current => current.status === 'idle' ? current : emptyCanvasRunState())
+  }, [])
+
+  const handleNodesChange = useCallback(changes => {
+    if (changes.some(change => change.type === 'position' || change.type === 'remove')) {
+      clearCanvasRunOverlay()
+    }
+    onNodesChange(changes)
+  }, [clearCanvasRunOverlay, onNodesChange])
+
+  const handleEdgesChange = useCallback(changes => {
+    if (changes.some(change => change.type === 'remove')) {
+      clearCanvasRunOverlay()
+    }
+    onEdgesChange(changes)
+  }, [clearCanvasRunOverlay, onEdgesChange])
 
   useEffect(() => {
     setWorkflow(prev => ({...prev, category: activeCategory || 'global'}))
     setEditorActiveTag('')
     setEditorValidation(null)
-  }, [activeCategory])
+    setNodeConfigModalOpen(false)
+    setEdgeConfigModalOpen(false)
+    clearCanvasRunOverlay()
+  }, [activeCategory, clearCanvasRunOverlay])
 
-  const [selectedEdgeID, setSelectedEdgeID] = useState('')
   const selectedNode = useMemo(() => nodes.find(node => node.id === selectedNodeID), [nodes, selectedNodeID])
   const selectedEdge = useMemo(() => edges.find(edge => edge.id === selectedEdgeID), [edges, selectedEdgeID])
   const selectedTool = useMemo(() => (catalog.tools || []).find(tool => tool.id === selectedNode?.data.tool), [catalog.tools, selectedNode])
+  const selectedLoopTool = useMemo(() => (catalog.tools || []).find(tool => tool.id === selectedNode?.data.loop?.tool), [catalog.tools, selectedNode])
   const editorAvailableTags = useMemo(() => tagsForEntries(toolOptions), [toolOptions])
   const editorToolOptions = useMemo(() => filterEntries(toolOptions, editorSearchText, editorActiveTag), [toolOptions, editorSearchText, editorActiveTag])
   const nodePickerToolOptions = useMemo(() => filterEntries(toolOptions, nodePickerSearchText, ''), [toolOptions, nodePickerSearchText])
   const workflowParameters = useMemo(() => parseJSONList(workflowParamsText), [workflowParamsText])
   const mappingSources = useMemo(() => buildMappingSources(workflowParameters, selectedNodeID, nodes, edges), [workflowParameters, selectedNodeID, nodes, edges])
+  const displayNodes = useMemo(() => buildDisplayNodes(nodes, canvasRunState), [nodes, canvasRunState])
+  const displayEdges = useMemo(() => buildDisplayEdges(edges, displayNodes, canvasRunState), [edges, displayNodes, canvasRunState])
+
+  useEffect(() => {
+    if (!selectedEdge) {
+      setEdgeConfigModalOpen(false)
+    }
+  }, [selectedEdge])
 
   useEffect(() => {
     if (!selectedNode) {
       setNodeParamsText('{}')
+      setNodeConfigModalOpen(false)
       return
     }
     setNodeParamsText(JSON.stringify(selectedNode.data.params || {}, null, 2))
   }, [selectedNode])
 
+  const closeNodeConfigModal = useCallback(() => {
+    setNodeConfigModalOpen(false)
+  }, [])
+
+  function openNodeConfigModal(nodeID) {
+    setSelectedNodeID(nodeID)
+    setSelectedEdgeID('')
+    setNodeConfigModalOpen(true)
+    setEdgeConfigModalOpen(false)
+    closeNodePicker()
+  }
+
+  function openEdgeConfigModal(edgeID) {
+    setSelectedEdgeID(edgeID)
+    setSelectedNodeID('')
+    setNodeConfigModalOpen(false)
+    setEdgeConfigModalOpen(true)
+    closeNodePicker()
+  }
+
+  const selectedNodeKindLabel = selectedNode?.type === 'conditionNode'
+    ? '条件分支'
+    : selectedNode?.type === 'controlNode'
+      ? controlNodeTitle(selectedNode.data.controlType)
+      : '工具节点'
+
   const onConnect = useCallback(
-    params => setEdges(current => {
-      const isDuplicate = current.some(edge => (
-        edge.source === params.source &&
-        edge.target === params.target &&
-        (edge.sourceHandle || null) === (params.sourceHandle || null) &&
-        (edge.targetHandle || null) === (params.targetHandle || null)
-      ))
-      if (isDuplicate) return current
-      const sourceNode = nodes.find(node => node.id === params.source)
-      const edgeCase = edgeCaseFromHandle(sourceNode, params.sourceHandle)
-      const label = edgeCase ? conditionCaseLabel(sourceNode?.data.condition, edgeCase) : ''
-      return [
-        ...current,
-        {
-          ...params,
-          id: `${params.source}-${params.target}-${params.sourceHandle || 'source'}-${params.targetHandle || 'target'}-${Date.now()}`,
-          type: 'smoothstep',
-          animated: true,
-          label,
-          data: edgeCase ? {case: edgeCase} : {}
-        }
-      ]
-    }),
-    [nodes, setEdges]
+    params => {
+      clearCanvasRunOverlay()
+      setEdges(current => {
+        const isDuplicate = current.some(edge => (
+          edge.source === params.source &&
+          edge.target === params.target &&
+          (edge.sourceHandle || null) === (params.sourceHandle || null) &&
+          (edge.targetHandle || null) === (params.targetHandle || null)
+        ))
+        if (isDuplicate) return current
+        const sourceNode = nodes.find(node => node.id === params.source)
+        const edgeCase = edgeCaseFromHandle(sourceNode, params.sourceHandle)
+        const label = edgeCase ? conditionCaseLabel(sourceNode?.data.condition, edgeCase) : ''
+        return [
+          ...current,
+          {
+            ...params,
+            id: `${params.source}-${params.target}-${params.sourceHandle || 'source'}-${params.targetHandle || 'target'}-${Date.now()}`,
+            type: 'smoothstep',
+            animated: true,
+            label,
+            data: edgeCase ? {case: edgeCase} : {}
+          }
+        ]
+      })
+    },
+    [clearCanvasRunOverlay, nodes, setEdges]
   )
 
   async function loadWorkflow(id) {
     if (!id) return
+    clearCanvasRunOverlay()
     setResult({message: '加载工作流...'})
     try {
       const body = await fetchJSON(`/api/workflows/${id}`)
@@ -586,12 +720,19 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
       setWorkflow(config)
       setWorkflowParamsText(JSON.stringify(config.parameters || [], null, 2))
       setRunParamsText(JSON.stringify(defaultParams(config.parameters || []), null, 2))
-      const flowNodes = (config.nodes || []).map((node, index) => workflowNodeToFlowNode(node, index, removeNode))
+      const workflowNodes = config.nodes || []
+      const legacyTargetMap = legacyLoopTargetMap(workflowNodes)
+      const legacyTargets = new Set(legacyTargetMap.keys())
+      const flowNodes = workflowNodes
+        .filter(node => !legacyTargets.has(node.id))
+        .map((node, index) => workflowNodeToFlowNode(node, index, removeNode, workflowNodes))
       setNodes(flowNodes)
-      setEdges((config.edges || []).map((edge, index) => flowEdgeFromWorkflowEdge(edge, index, flowNodes)))
+      setEdges(remapLegacyLoopEdges(config.edges || [], legacyTargetMap).map((edge, index) => flowEdgeFromWorkflowEdge(edge, index, flowNodes)))
       setSelectedWorkflowID(id)
       setSelectedNodeID('')
       setSelectedEdgeID('')
+      setNodeConfigModalOpen(false)
+      setEdgeConfigModalOpen(false)
       closeNodePicker()
       setResult({message: `已加载工作流 ${id}`})
     } catch (err) {
@@ -600,6 +741,7 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   }
 
   function createWorkflow() {
+    clearCanvasRunOverlay()
     const next = emptyWorkflow(activeCategory)
     setWorkflow(next)
     setWorkflowParamsText('[]')
@@ -609,19 +751,25 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     setSelectedWorkflowID('')
     setSelectedNodeID('')
     setSelectedEdgeID('')
+    setNodeConfigModalOpen(false)
+    setEdgeConfigModalOpen(false)
     closeNodePicker()
     setResult({message: '已创建空白工作流草稿'})
   }
 
   const removeNode = useCallback(id => {
+    clearCanvasRunOverlay()
     setNodes(current => current.filter(node => node.id !== id))
     setEdges(current => current.filter(edge => edge.source !== id && edge.target !== id))
     setResult({message: `已移除节点 ${id}`})
     setSelectedNodeID(current => current === id ? '' : current)
+    setNodeConfigModalOpen(false)
+    setEdgeConfigModalOpen(false)
     setSelectedEdgeID('')
-  }, [setEdges, setNodes, setResult])
+  }, [clearCanvasRunOverlay, setEdges, setNodes, setResult])
 
   function addToolNode(tool, position) {
+    clearCanvasRunOverlay()
     const nodeID = uniqueNodeID(tool.id, nodes)
     const nextNode = newToolFlowNode(tool, nodeID, position || {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}, removeNode)
     setNodes(current => [...current, nextNode])
@@ -629,9 +777,12 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     setSelectedEdgeID('')
     setEditorValidation(null)
     closeNodePicker()
+    setNodeConfigModalOpen(false)
+    setEdgeConfigModalOpen(false)
   }
 
   function addConditionNode(position) {
+    clearCanvasRunOverlay()
     const nodeID = uniqueNodeID('condition', nodes)
     const nextNode = newConditionFlowNode(nodeID, position || {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}, removeNode)
     setNodes(current => [...current, nextNode])
@@ -639,6 +790,27 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     setSelectedEdgeID('')
     setEditorValidation(null)
     closeNodePicker()
+    setNodeConfigModalOpen(false)
+    setEdgeConfigModalOpen(false)
+  }
+
+  function addControlNode(controlType, position) {
+    if (controlType === 'condition') {
+      addConditionNode(position)
+      return
+    }
+    clearCanvasRunOverlay()
+    const control = controlNodeCatalog.find(item => item.type === controlType && item.enabled)
+    if (!control) return
+    const nodeID = uniqueNodeID(controlType, nodes)
+    const nextNode = newControlFlowNode(control, nodeID, position || {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}, removeNode)
+    setNodes(current => [...current, nextNode])
+    setSelectedNodeID(nodeID)
+    setSelectedEdgeID('')
+    setEditorValidation(null)
+    closeNodePicker()
+    setNodeConfigModalOpen(false)
+    setEdgeConfigModalOpen(false)
   }
 
   function defaultCanvasInsertPosition() {
@@ -652,6 +824,11 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   }
 
   function openNodePicker(position) {
+    clearCanvasRunOverlay()
+    setSelectedNodeID('')
+    setSelectedEdgeID('')
+    setNodeConfigModalOpen(false)
+    setEdgeConfigModalOpen(false)
     setNodePicker({open: true, position: position || defaultCanvasInsertPosition()})
     setNodePickerSearchText('')
   }
@@ -681,13 +858,45 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     flowInstance?.fitView({padding: 0.2, duration: 240})
   }
 
+  function fitCanvasViewAfterLayout() {
+    if (!flowInstance) return
+    const fit = () => flowInstance.fitView({padding: 0.24, duration: 260})
+    if (typeof window !== 'undefined' && window.requestAnimationFrame) {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(fit))
+      return
+    }
+    fit()
+  }
+
+  function optimizeCanvasLayout() {
+    clearCanvasRunOverlay()
+    setNodes(current => autoLayoutNodes(current, edges))
+    setResult({message: nodes.length === 0 ? '当前画布没有节点，无需优化排版。' : '已优化工作流排版。'})
+    fitCanvasViewAfterLayout()
+  }
+
   function updateSelectedNodeName(nextName) {
+    clearCanvasRunOverlay()
     setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, name: nextName}} : node))
+    setEditorValidation(null)
   }
 
   function updateSelectedNodeCondition(nextCondition) {
+    clearCanvasRunOverlay()
     setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, condition: nextCondition}} : node))
     syncConditionEdgeLabels(selectedNodeID, nextCondition)
+    setEditorValidation(null)
+  }
+
+  function updateSelectedNodeLoop(nextLoop) {
+    clearCanvasRunOverlay()
+    setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, loop: normalizeLoopConfig(nextLoop)}} : node))
+    setEditorValidation(null)
+  }
+
+  function updateSelectedLoopParam(name, value) {
+    const loop = normalizeLoopConfig(selectedNode?.data.loop || defaultLoop())
+    updateSelectedNodeLoop({...loop, params: {...(loop.params || {}), [name]: value}})
   }
 
   function syncConditionEdgeLabels(nodeID, condition) {
@@ -705,6 +914,7 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   }
 
   function updateSelectedEdgeCase(value) {
+    clearCanvasRunOverlay()
     const edgeToUpdate = selectedEdge
     const sourceNode = nodes.find(node => node.id === edgeToUpdate?.source)
     const edgeCase = sourceNode?.type === 'conditionNode' ? value : ''
@@ -752,8 +962,8 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
       ? flowInstance.screenToFlowPosition({x: event.clientX, y: event.clientY})
       : {x: event.clientX - 420, y: event.clientY - 180}
     const controlType = event.dataTransfer.getData('application/ops-control')
-    if (controlType === 'condition') {
-      addConditionNode(position)
+    if (controlType) {
+      addControlNode(controlType, position)
       return
     }
     const toolID = event.dataTransfer.getData('application/ops-tool')
@@ -769,40 +979,50 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
 
   function removeSelectedEdge() {
     if (!selectedEdgeID) return
+    clearCanvasRunOverlay()
     setEdges(current => current.filter(edge => edge.id !== selectedEdgeID))
     setResult({message: `已移除依赖 ${selectedEdgeID}`})
     setSelectedEdgeID('')
+    setEdgeConfigModalOpen(false)
   }
 
   function clearSelection() {
+    setNodeConfigModalOpen(false)
+    setEdgeConfigModalOpen(false)
     setSelectedNodeID('')
     setSelectedEdgeID('')
   }
 
   function updateWorkflowCategory(value) {
     if (activeCategory && value !== activeCategory) return
+    clearCanvasRunOverlay()
     setWorkflow(current => ({...current, category: workflowScopeCategory(value)}))
     setEditorValidation(null)
   }
 
   function updateWorkflowTags(nextTags) {
+    clearCanvasRunOverlay()
     setWorkflow(current => ({...current, tags: normalizeTags(nextTags)}))
     setEditorValidation(null)
   }
 
   function applyNodeParams() {
-    if (!selectedNodeID) return
+    if (!selectedNodeID) return false
     try {
       updateSelectedNodeParams(JSON.parse(nodeParamsText || '{}'))
       setResult({message: `已更新节点 ${selectedNodeID} 参数`})
+      return true
     } catch (err) {
       setResult({message: `参数（JSON） 无效: ${err.message}`})
+      return false
     }
   }
 
   function updateSelectedNodeParams(nextParams) {
+    clearCanvasRunOverlay()
     setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, params: nextParams}} : node))
     setNodeParamsText(JSON.stringify(nextParams, null, 2))
+    setEditorValidation(null)
   }
 
   function updateMappedParam(name, value) {
@@ -829,9 +1049,22 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     }
     const draft = buildWorkflowDraft(workflow, nodes, edges, activeCategory, workflowParameters)
     validateConditionDraft(nodes, edges).forEach(error => errors.push(error))
+    validateControlDraft(nodes, edges, catalog.tools || []).forEach(error => errors.push(error))
     if (activeCategory && draft.category !== activeCategory) errors.push(`当前分类上下文只能保存为 ${activeCategory} 工作流。`)
-    if (!String(draft.id || '').trim()) errors.push('请先填写工作流 ID。')
-    if (!String(draft.name || '').trim()) errors.push('请先填写工作流名称。')
+    if (!String(draft.id || '').trim()) {
+      if (mode === 'save') {
+        errors.push('请先填写工作流 ID。')
+      } else {
+        draft.id = 'draft'
+      }
+    }
+    if (!String(draft.name || '').trim()) {
+      if (mode === 'save') {
+        errors.push('请先填写工作流名称。')
+      } else {
+        draft.name = '未保存草稿'
+      }
+    }
     if (nodes.length === 0) errors.push('请至少添加一个工作流节点。')
     findOutOfScopeToolNodes(nodes, catalog.tools || [], scopedCategory).forEach(item => {
       errors.push(`节点 ${item.nodeID}（${item.toolID}）不属于当前工作流工具范围：${item.scopeName}`)
@@ -880,8 +1113,17 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   async function runDraft() {
     const check = preflightWorkflowDraft('run')
     if (check.errors.length > 0) {
+      clearCanvasRunOverlay()
       showEditorValidation(check)
       return
+    }
+    const runVersion = canvasRunVersionRef.current + 1
+    canvasRunVersionRef.current = runVersion
+    const runNodesSnapshot = nodes
+    setCanvasRunState(buildRunningCanvasRunState(runNodesSnapshot))
+    const applyRunOverlay = nextState => {
+      if (canvasRunVersionRef.current !== runVersion) return
+      setCanvasRunState(nextState)
     }
     try {
       setEditorValidation(null)
@@ -889,19 +1131,39 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
       try {
         runParams = JSON.parse(runParamsText || '{}')
       } catch (err) {
+        applyRunOverlay(buildFailedCanvasRunState(runNodesSnapshot, `执行参数 JSON 无效：${err.message}`))
         const status = {title: '执行前检查未通过', errors: [`执行参数 JSON 无效：${err.message}`], warnings: []}
         showEditorValidation(status)
         return
       }
       setResult({message: '执行工作流...'})
-      const body = await postJSON(`/api/workflows/${check.draft.id}/run`, {params: runParams})
+      const body = await postJSON(`/api/workflows/${check.draft.id}/run`, {params: runParams, workflow: check.draft})
       if (body.id) {
-        setResult({run: body, detail: await fetchRunDetail(body.id)})
+        const detail = await fetchRunDetail(body.id)
+        applyRunOverlay(buildCanvasRunStateFromDetail(detail?.data || detail, runNodesSnapshot))
+        setResult({run: body, detail})
         return
       }
+      applyRunOverlay(buildFailedCanvasRunState(runNodesSnapshot, summarizeAPIResponse(body, '工作流已提交执行，但没有返回运行记录。')))
       setResult({message: summarizeAPIResponse(body, '工作流已提交执行。'), response: body})
     } catch (err) {
-      setResult({message: readableAPIError(err, '工作流执行失败。'), response: err.body})
+      const body = err.body || {}
+      const runID = body.id || body.ID
+      let detail = extractRunDetailFromResponse(body)
+      if (!detail && runID) {
+        try {
+          const fetched = await fetchRunDetail(runID)
+          detail = fetched?.data || fetched
+        } catch {
+          detail = null
+        }
+      }
+      if (detail?.record) {
+        applyRunOverlay(buildCanvasRunStateFromDetail(detail, runNodesSnapshot, readableAPIError(err, '工作流执行失败。')))
+      } else {
+        applyRunOverlay(buildFailedCanvasRunState(runNodesSnapshot, readableAPIError(err, '工作流执行失败。')))
+      }
+      setResult({message: readableAPIError(err, '工作流执行失败。'), response: body, detail: detail ? {data: detail} : undefined, run: runID ? {id: runID, status: body.status || 'failed'} : undefined})
     }
   }
 
@@ -912,6 +1174,7 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
           <h3>工作流编排器</h3>
           <span>{nodes.length} 节点 / {edges.length} 依赖</span>
         </div>
+        {editorValidation?.errors?.length > 0 && <ValidationSummary status={editorValidation} />}
         <div className="form compact">
           <label>
             <span>加载已有工作流</span>
@@ -933,15 +1196,15 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
           </div>
           <label>
             <span>工作流 ID</span>
-            <input value={workflow.id || ''} onChange={event => setWorkflow({...workflow, id: event.target.value})} placeholder="demo.my-flow" />
+            <input value={workflow.id || ''} onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, id: event.target.value}) }} placeholder="demo.my-flow" />
           </label>
           <label>
             <span>名称</span>
-            <input value={workflow.name || ''} onChange={event => setWorkflow({...workflow, name: event.target.value})} placeholder="工作流名称" />
+            <input value={workflow.name || ''} onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, name: event.target.value}) }} placeholder="工作流名称" />
           </label>
           <label>
             <span>描述</span>
-            <input value={workflow.description || ''} onChange={event => setWorkflow({...workflow, description: event.target.value})} placeholder="工作流描述" />
+            <input value={workflow.description || ''} onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, description: event.target.value}) }} placeholder="工作流描述" />
           </label>
           <label>
             <span>分类 / 范围</span>
@@ -955,11 +1218,11 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
           <WorkflowTagsEditor tags={workflow.tags || []} availableTags={workflowTagOptions} onChange={updateWorkflowTags} />
           <label>
             <span>工作流参数（JSON）</span>
-            <textarea className="smallTextarea" value={workflowParamsText} onChange={event => setWorkflowParamsText(event.target.value)} />
+            <textarea className="smallTextarea" value={workflowParamsText} onChange={event => { clearCanvasRunOverlay(); setWorkflowParamsText(event.target.value) }} />
           </label>
           <label>
             <span>执行参数（JSON）</span>
-            <textarea className="smallTextarea" value={runParamsText} onChange={event => setRunParamsText(event.target.value)} />
+            <textarea className="smallTextarea" value={runParamsText} onChange={event => { clearCanvasRunOverlay(); setRunParamsText(event.target.value) }} />
           </label>
         </div>
       </section>
@@ -1002,11 +1265,9 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
             </div>
             <div className="toolPalette" role="tabpanel" aria-label="插件工具">
               {editorToolOptions.map(tool => (
-                <button key={tool.id} type="button" className="paletteItem" draggable onDragStart={event => handleToolDragStart(event, tool)} onClick={() => addToolNode(tool)}>
-                  <span>{tool.name || tool.id}</span>
-                  <em>{tool.id}</em>
-                  <small>拖到画布，或点击添加</small>
-                  <TagList tags={tool.tags || []} />
+                <button key={tool.id} type="button" className="paletteItem" draggable onDragStart={event => handleToolDragStart(event, tool)} onClick={() => addToolNode(tool)} title={`${tool.name || tool.id}\n${tool.id}${tool.description ? `\n${tool.description}` : ''}`}>
+                  <span className="paletteShape tool" aria-hidden="true" />
+                  <span className="paletteItemLabel">{tool.name || tool.id}</span>
                 </button>
               ))}
               {editorToolOptions.length === 0 && <div className="empty small">没有匹配的插件工具。</div>}
@@ -1025,25 +1286,12 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
                   draggable={!disabled}
                   disabled={disabled}
                   aria-disabled={disabled}
-                  onDragStart={event => {
-                    if (disabled) return
-                    handleControlDragStart(event, control)
-                  }}
-                  onClick={() => control.type === 'condition' && addConditionNode()}
-                  title={control.help}
+                  onDragStart={disabled ? undefined : event => handleControlDragStart(event, control)}
+                  onClick={disabled ? undefined : () => addControlNode(control.type)}
+                  title={`${control.title}\n${control.secondary}\n${control.help || control.description}${disabled ? '\n规划中' : ''}`}
                 >
-                  <div className="controlIcon" aria-hidden="true">◇</div>
-                  <div className="controlContent">
-                    <div className="controlTitle"><strong>{control.title}</strong><span>{control.secondary}</span>{disabled && <b>规划中</b>}</div>
-                    <p>{control.description}</p>
-                    <div className="capabilityChips">
-                      {control.capabilities.map(item => <span key={item}>{item}</span>)}
-                    </div>
-                    <div className="controlPreview">
-                      {control.preview.map(item => <small key={item}>{item}</small>)}
-                    </div>
-                    <em>{control.help}</em>
-                  </div>
+                  <span className={`paletteShape ${control.type}`} data-symbol={controlShapeMarker(control.type)} aria-hidden="true" />
+                  <span className="paletteItemLabel">{control.title}</span>
                 </button>
               )
             })}
@@ -1053,14 +1301,14 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
 
       <section className="card canvasCard" ref={canvasCardRef} onDragOver={handleCanvasDragOver} onDrop={handleCanvasDrop}>
         <ReactFlow
-          nodes={nodes}
-          edges={edges}
+          nodes={displayNodes}
+          edges={displayEdges}
           nodeTypes={nodeTypes}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
+          onNodesChange={handleNodesChange}
+          onEdgesChange={handleEdgesChange}
           onConnect={onConnect}
-          onNodeClick={(_, node) => { setSelectedNodeID(node.id); setSelectedEdgeID(''); closeNodePicker() }}
-          onEdgeClick={(_, edge) => { setSelectedEdgeID(edge.id); setSelectedNodeID(''); closeNodePicker() }}
+          onNodeClick={(_, node) => openNodeConfigModal(node.id)}
+          onEdgeClick={(_, edge) => openEdgeConfigModal(edge.id)}
           onPaneClick={() => { clearSelection(); closeNodePicker() }}
           onInit={setFlowInstance}
           fitView
@@ -1083,7 +1331,7 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
               totalTools={toolOptions.length}
               position={nodePicker.position}
               onAddTool={tool => addToolNode(tool, nodePicker.position)}
-              onAddCondition={() => addConditionNode(nodePicker.position)}
+              onAddControl={controlType => addControlNode(controlType, nodePicker.position)}
               onClose={closeNodePicker}
             />
           )}
@@ -1091,59 +1339,129 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
             onZoomIn={() => zoomCanvas('in')}
             onZoomOut={() => zoomCanvas('out')}
             onFitView={fitCanvasView}
+            onAutoLayout={optimizeCanvasLayout}
             onAddNode={() => openNodePicker()}
             onRunWorkflow={runDraft}
           />
         </ReactFlow>
       </section>
 
-      <section className="card nodeInspector">
-        <div className="cardHeader">
-          <h3>节点参数</h3>
-          {selectedNode && <span>{selectedNode.id}</span>}
-          {selectedEdge && <span>{selectedEdge.source} → {selectedEdge.target}</span>}
-        </div>
-        {editorValidation?.errors?.length > 0 && <ValidationSummary status={editorValidation} />}
-        {selectedEdge && <EdgeInspector edge={selectedEdge} sourceNode={nodes.find(node => node.id === selectedEdge.source)} onCaseChange={updateSelectedEdgeCase} />}
-        {!selectedNode ? (!selectedEdge && <div className="empty small">点击画布节点后编辑参数，点击连线后可删除依赖。</div>) : (
-          <div className="form compact">
-            {selectedNode.type !== 'conditionNode' ? (
-              <>
-                <label>
-                  <span>节点标识</span>
-                  <input value={selectedNode.id} disabled />
-                </label>
-                <label>
-                  <span>工具标识</span>
-                  <input value={selectedNode.data.tool} disabled />
-                </label>
-                <ParamMappingEditor tool={selectedTool} params={selectedNode.data.params || {}} sources={mappingSources} onChange={updateMappedParam} />
-                <details className="advancedParams">
-                  <summary>高级 JSON 编辑</summary>
-                  <label>
-                    <span>参数（JSON）</span>
-                    <textarea value={nodeParamsText} onChange={event => setNodeParamsText(event.target.value)} />
-                  </label>
-                  <div className="empty small">可引用上游节点：{"{{ .steps.节点ID.stdout }}"} 或 {"{{ .steps.节点ID.params.参数名 }}"}</div>
-                  <button className="secondary" onClick={applyNodeParams}>应用参数</button>
-                </details>
-              </>
-            ) : (
-              <ConditionEditor node={selectedNode} sources={mappingSources} onNameChange={updateSelectedNodeName} onChange={updateSelectedNodeCondition} />
-            )}
-          </div>
-        )}
-      </section>
+      {nodeConfigModalOpen && selectedNode && (
+        <NodeConfigModal
+          node={selectedNode}
+          kindLabel={selectedNodeKindLabel}
+          onClose={closeNodeConfigModal}
+          onSave={() => {
+            if (selectedNode.type === 'toolNode' && !applyNodeParams()) return
+            closeNodeConfigModal()
+          }}
+        >
+          <NodeConfigEditor
+            node={selectedNode}
+            tool={selectedTool}
+            sources={mappingSources}
+            paramsText={nodeParamsText}
+            setParamsText={setNodeParamsText}
+            onNameChange={updateSelectedNodeName}
+            onConditionChange={updateSelectedNodeCondition}
+            onLoopChange={updateSelectedNodeLoop}
+            loopTool={selectedLoopTool}
+            tools={toolOptions}
+            onParamChange={updateMappedParam}
+            onLoopParamChange={updateSelectedLoopParam}
+            onApplyParams={applyNodeParams}
+          />
+        </NodeConfigModal>
+      )}
+
+      {edgeConfigModalOpen && selectedEdge && (
+        <EdgeConfigModal
+          edge={selectedEdge}
+          sourceNode={nodes.find(node => node.id === selectedEdge.source)}
+          onCaseChange={updateSelectedEdgeCase}
+          onClose={() => setEdgeConfigModalOpen(false)}
+        />
+      )}
     </div>
   )
 }
 
-function NodePickerPanel({searchText, setSearchText, tools, totalTools, onAddTool, onAddCondition, onClose}) {
-  const enabledControl = controlNodeCatalog.find(control => control.type === 'condition')
+function NodeConfigModal({node, kindLabel, children, onClose, onSave}) {
+  return (
+    <div className="modalBackdrop" onClick={onClose}>
+      <div className="modal nodeConfigModal" onClick={event => event.stopPropagation()}>
+        <div className="modalHeader">
+          <div>
+            <h3>节点配置</h3>
+            <p>{kindLabel} · {node.data.name || node.id}</p>
+          </div>
+          <button type="button" className="modalClose" onClick={onClose}>×</button>
+        </div>
+        {children}
+        <div className="modalFooter">
+          <button type="button" className="secondary" onClick={onClose}>取消</button>
+          <button type="button" className="primary" onClick={onSave}>保存配置</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function NodeConfigEditor({node, tool, loopTool, tools, sources, paramsText, setParamsText, onNameChange, onConditionChange, onLoopChange, onParamChange, onLoopParamChange, onApplyParams}) {
+  if (!node) return null
+  return (
+    <div className="form nodeConfigEditor">
+      {node.type === 'conditionNode' ? (
+        <ConditionEditor node={node} sources={sources} onNameChange={onNameChange} onChange={onConditionChange} />
+      ) : node.type === 'controlNode' ? (
+        <ControlNodeInspector node={node} tools={tools} loopTool={loopTool} sources={sources} onNameChange={onNameChange} onLoopChange={onLoopChange} onLoopParamChange={onLoopParamChange} />
+      ) : (
+        <ToolNodeConfigEditor
+          node={node}
+          tool={tool}
+          sources={sources}
+          paramsText={paramsText}
+          setParamsText={setParamsText}
+          onParamChange={onParamChange}
+          onApplyParams={onApplyParams}
+        />
+      )}
+    </div>
+  )
+}
+
+function ToolNodeConfigEditor({node, tool, sources, paramsText, setParamsText, onParamChange, onApplyParams}) {
+  return (
+    <>
+      <label>
+        <span>节点标识</span>
+        <input value={node.id} disabled />
+      </label>
+      <label>
+        <span>工具标识</span>
+        <input value={node.data.tool} disabled />
+      </label>
+      <ParamMappingEditor tool={tool} params={node.data.params || {}} sources={sources} onChange={onParamChange} />
+      <details className="advancedParams">
+        <summary>高级 JSON 编辑</summary>
+        <label>
+          <span>参数（JSON）</span>
+          <textarea value={paramsText} onChange={event => setParamsText(event.target.value)} />
+        </label>
+        <div className="empty small">可引用上游节点：{"{{ .steps.节点ID.stdout }}"} 或 {"{{ .steps.节点ID.params.参数名 }}"}</div>
+        <button type="button" className="secondary" onClick={() => onApplyParams()}>应用参数</button>
+      </details>
+    </>
+  )
+}
+
+function NodePickerPanel({searchText, setSearchText, tools, totalTools, onAddTool, onAddControl, onClose}) {
   const keyword = searchText.trim().toLowerCase()
-  const showCondition = !keyword || [enabledControl?.title, enabledControl?.secondary, enabledControl?.description, enabledControl?.help]
-    .filter(Boolean)
-    .some(value => String(value).toLowerCase().includes(keyword))
+  const matchingControls = controlNodeCatalog
+    .filter(control => control.enabled)
+    .filter(control => !keyword || [control.title, control.secondary, control.description, control.help]
+      .filter(Boolean)
+      .some(value => String(value).toLowerCase().includes(keyword)))
   return (
     <div className="nodePickerLayer nodrag nopan" onMouseDown={event => event.stopPropagation()}>
       <div className="nodePickerPanel">
@@ -1155,22 +1473,24 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, onAddToo
           <button type="button" className="modalClose" onClick={onClose}>×</button>
         </div>
         <input value={searchText} placeholder="搜索工具名称、描述或 ID" onChange={event => setSearchText(event.target.value)} autoFocus />
-        {showCondition && (
+        {matchingControls.length > 0 && (
           <div className="nodePickerSection">
             <span>编排节点</span>
-            <button type="button" className="nodePickerItem control" onClick={onAddCondition}>
-              <b>{enabledControl?.title || '条件分支'}</b>
-              <small>{enabledControl?.secondary || 'Switch / Case'} · 根据结果选择后续分支</small>
-            </button>
+            {matchingControls.map(control => (
+              <button key={control.type} type="button" className="nodePickerItem control" onClick={() => onAddControl(control.type)} title={`${control.title}\n${control.secondary}\n${control.help || control.description}`}>
+                <span className={`paletteShape ${control.type}`} data-symbol={controlShapeMarker(control.type)} aria-hidden="true" />
+                <b>{control.title}</b>
+              </button>
+            ))}
           </div>
         )}
         <div className="nodePickerSection">
           <span>插件工具 · {tools.length} / {totalTools}</span>
           <div className="nodePickerList">
             {tools.map(tool => (
-              <button key={tool.id} type="button" className="nodePickerItem" onClick={() => onAddTool(tool)}>
+              <button key={tool.id} type="button" className="nodePickerItem" onClick={() => onAddTool(tool)} title={`${tool.name || tool.id}\n${tool.id}${tool.description ? `\n${tool.description}` : ''}`}>
+                <span className="paletteShape tool" aria-hidden="true" />
                 <b>{tool.name || tool.id}</b>
-                <small>{tool.id}</small>
               </button>
             ))}
             {tools.length === 0 && <div className="empty small">没有匹配的插件工具。</div>}
@@ -1181,21 +1501,42 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, onAddToo
   )
 }
 
-function CanvasDock({onZoomIn, onZoomOut, onFitView, onAddNode, onRunWorkflow}) {
+function CanvasDock({onZoomIn, onZoomOut, onFitView, onAutoLayout, onAddNode, onRunWorkflow}) {
   return (
     <div className="canvasDock nodrag nopan" onMouseDown={event => event.stopPropagation()}>
       <button type="button" onClick={onZoomOut} title="缩小">−</button>
       <button type="button" onClick={onZoomIn} title="放大">+</button>
       <button type="button" onClick={onFitView}>适配视图</button>
+      <button type="button" onClick={onAutoLayout}>优化排版</button>
       <button type="button" onClick={onAddNode}>添加节点</button>
       <button type="button" className="canvasDockPrimary" onClick={onRunWorkflow}>运行工作流</button>
     </div>
   )
 }
 
+function EdgeConfigModal({edge, sourceNode, onCaseChange, onClose}) {
+  return (
+    <div className="modalBackdrop" onClick={onClose}>
+      <div className="modal edgeConfigModal" onClick={event => event.stopPropagation()}>
+        <div className="modalHeader">
+          <div>
+            <h3>连线配置</h3>
+            <p>{edge.source} → {edge.target}</p>
+          </div>
+          <button type="button" className="modalClose" onClick={onClose}>×</button>
+        </div>
+        <EdgeInspector edge={edge} sourceNode={sourceNode} onCaseChange={onCaseChange} />
+        <div className="modalFooter">
+          <button type="button" className="primary" onClick={onClose}>完成</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function EdgeInspector({edge, sourceNode, onCaseChange}) {
   if (sourceNode?.type !== 'conditionNode') {
-    return <div className="empty small">已选择依赖线，可在上方点击“删除依赖”。</div>
+    return <div className="empty small">已选择依赖线，可使用左侧工具栏“删除依赖”。</div>
   }
   const condition = sourceNode.data.condition || defaultCondition()
   const currentCase = edge.data?.case || edge.sourceHandle || ''
@@ -1270,6 +1611,53 @@ function ConditionEditor({node, sources, onNameChange, onChange}) {
   )
 }
 
+function ControlNodeInspector({node, tools, loopTool, sources, onNameChange, onLoopChange, onLoopParamChange}) {
+  const isLoop = node.data.controlType === 'loop'
+  const loop = normalizeLoopConfig(node.data.loop || defaultLoop())
+  function updateLoop(patch) {
+    onLoopChange(normalizeLoopConfig({...loop, ...patch}))
+  }
+  function changeLoopTool(toolID) {
+    const tool = (tools || []).find(item => item.id === toolID)
+    updateLoop({tool: toolID, params: defaultParams(tool?.parameters || [])})
+  }
+  return (
+    <div className="controlNodeInspector">
+      <label>
+        <span>节点标识</span>
+        <input value={node.id} disabled />
+      </label>
+      <label>
+        <span>节点类型</span>
+        <input value={controlNodeTitle(node.data.controlType)} disabled />
+      </label>
+      <label>
+        <span>显示名称</span>
+        <input value={node.data.name || ''} placeholder={controlNodeTitle(node.data.controlType)} onChange={event => onNameChange(event.target.value)} />
+      </label>
+      {isLoop ? (
+        <>
+          <label>
+            <span>循环工具</span>
+            <select value={loop.tool || ''} onChange={event => changeLoopTool(event.target.value)}>
+              <option value="">选择要重复执行的插件工具...</option>
+              {(tools || []).map(tool => <option key={tool.id} value={tool.id}>{tool.name || tool.id}（{tool.id}）</option>)}
+            </select>
+          </label>
+          <label>
+            <span>最大循环次数</span>
+            <input type="number" min="1" max="20" value={loop.max_iterations || 1} onChange={event => updateLoop({max_iterations: event.target.value})} />
+          </label>
+          <ParamMappingEditor tool={loopTool} params={loop.params || {}} sources={sources} onChange={onLoopParamChange} emptyMessage="请先选择循环工具，再配置该工具的输入参数。" />
+          <div className="empty small">循环节点会重复执行上方选择的工具，不需要在画布上额外添加目标工具节点；普通连线仍保持 DAG。</div>
+        </>
+      ) : (
+        <div className="empty small">{controlNodeHelp(node.data.controlType)}。该节点不需要配置工具或参数，运行时自身记录为成功。</div>
+      )}
+    </div>
+  )
+}
+
 function WorkflowTagsEditor({tags, availableTags, onChange}) {
   const [draftTag, setDraftTag] = useState('')
   function addTag(value) {
@@ -1313,9 +1701,9 @@ function ValidationSummary({status}) {
   )
 }
 
-function ParamMappingEditor({tool, params, sources, onChange}) {
+function ParamMappingEditor({tool, params, sources, onChange, emptyMessage}) {
   const parameters = tool?.parameters || []
-  if (!tool) return <div className="empty small">未找到当前节点工具定义。</div>
+  if (!tool) return <div className="empty small">{emptyMessage || '未找到当前节点工具定义。'}</div>
   if (parameters.length === 0) return <div className="empty small">当前工具没有声明输入参数。</div>
   return (
     <div className="paramMappings">
@@ -1335,6 +1723,273 @@ function ParamMappingEditor({tool, params, sources, onChange}) {
       ))}
     </div>
   )
+}
+
+function emptyCanvasRunState() {
+  return {
+    status: 'idle',
+    nodes: {},
+    edges: {},
+    conditionMatches: {},
+    message: ''
+  }
+}
+
+function buildRunningCanvasRunState(nodes) {
+  const overlay = emptyCanvasRunState()
+  overlay.status = 'running'
+  overlay.message = '工作流执行中'
+  ;(nodes || []).forEach(node => {
+    overlay.nodes[node.id] = {
+      status: 'running',
+      label: runStatusLabel('running'),
+      title: '执行中'
+    }
+  })
+  return overlay
+}
+
+function buildFailedCanvasRunState(nodes, message) {
+  const overlay = emptyCanvasRunState()
+  overlay.status = 'failed'
+  overlay.message = message || '工作流执行失败。'
+  ;(nodes || []).forEach(node => {
+    overlay.nodes[node.id] = {
+      status: 'failed',
+      label: runStatusLabel('failed'),
+      error: overlay.message,
+      title: overlay.message
+    }
+  })
+  return overlay
+}
+
+function buildCanvasRunStateFromDetail(detail, nodes, fallbackError = '') {
+  const record = detail?.record || detail?.data?.record || {}
+  const nodeIDs = new Set((nodes || []).map(node => node.id))
+  const nodeByID = new Map((nodes || []).map(node => [node.id, node]))
+  const overlay = emptyCanvasRunState()
+  overlay.status = normalizeRunStatus(record.status || (fallbackError ? 'failed' : 'succeeded'))
+  overlay.message = record.error || fallbackError || ''
+  ;(record.steps || []).forEach(step => {
+    if (!step) return
+    const normalized = normalizeStepForOverlay(step)
+    const directNodeID = nodeIDs.has(step.id) ? step.id : ''
+    const iteration = parseLoopIterationStepID(step.id)
+    if (directNodeID) {
+      overlay.nodes[directNodeID] = mergeRunNodeOverlay(overlay.nodes[directNodeID], normalized)
+      if (normalized.matchedCase) overlay.conditionMatches[directNodeID] = normalized.matchedCase
+      return
+    }
+    if (iteration?.loopID && nodeIDs.has(iteration.loopID)) {
+      const loopIterationSteps = [...(overlay.nodes[iteration.loopID]?.iterationSteps || []), normalized]
+      const loopSummary = {
+        status: normalized.status,
+        label: runStatusLabel(normalized.status),
+        loopIterations: Math.max(Number(overlay.nodes[iteration.loopID]?.loopIterations || 0), iteration.iteration || 0),
+        iterationSteps: loopIterationSteps
+      }
+      if (normalized.error) loopSummary.error = normalized.error
+      overlay.nodes[iteration.loopID] = mergeRunNodeOverlay(overlay.nodes[iteration.loopID], loopSummary)
+    }
+    if (iteration?.targetID && nodeIDs.has(iteration.targetID)) {
+      const targetIterationSteps = [...(overlay.nodes[iteration.targetID]?.iterationSteps || []), normalized]
+      const targetSummary = {
+        status: normalized.status,
+        label: runStatusLabel(normalized.status),
+        loopIterationCount: Number(overlay.nodes[iteration.targetID]?.loopIterationCount || 0) + 1,
+        iterationSteps: targetIterationSteps
+      }
+      if (normalized.error) targetSummary.error = normalized.error
+      overlay.nodes[iteration.targetID] = mergeRunNodeOverlay(overlay.nodes[iteration.targetID], targetSummary)
+    }
+  })
+  if ((record.status === 'failed' || fallbackError) && (record.steps || []).length === 0) {
+    ;(nodes || []).forEach(node => {
+      overlay.nodes[node.id] = {status: 'failed', label: runStatusLabel('failed'), error: record.error || fallbackError || '工作流执行失败。'}
+    })
+  }
+  if ((record.status === 'failed' || fallbackError) && !Object.values(overlay.nodes).some(item => item.status === 'failed')) {
+    const lastRunnableNode = [...(record.steps || [])].reverse().find(step => nodeIDs.has(step.id))
+    if (lastRunnableNode) {
+      overlay.nodes[lastRunnableNode.id] = mergeRunNodeOverlay(overlay.nodes[lastRunnableNode.id], {status: 'failed', label: runStatusLabel('failed'), error: record.error || fallbackError})
+    }
+  }
+  ;(nodes || []).forEach(node => {
+    if (overlay.status === 'running') {
+      overlay.nodes[node.id] = overlay.nodes[node.id] || {status: 'running', label: runStatusLabel('running')}
+      return
+    }
+    if (!overlay.nodes[node.id] && (record.steps || []).length > 0) {
+      overlay.nodes[node.id] = {status: 'skipped', label: runStatusLabel('skipped'), skippedReason: '运行记录中没有该节点步骤'}
+    }
+    const run = overlay.nodes[node.id]
+    if (node.type === 'controlNode' && node.data?.controlType === 'loop' && run?.loopIterations === undefined && run?.iterationSteps?.length) {
+      run.loopIterations = run.iterationSteps.length
+    }
+    if (nodeByID.get(node.id)?.type === 'conditionNode' && run?.matchedCase) {
+      overlay.conditionMatches[node.id] = run.matchedCase
+    }
+  })
+  return overlay
+}
+
+function normalizeStepForOverlay(step) {
+  const status = normalizeRunStatus(step.status)
+  return {
+    id: step.id,
+    type: step.type,
+    tool: step.tool,
+    status,
+    label: runStatusLabel(status),
+    error: step.error || '',
+    skippedReason: step.skipped_reason || step.skippedReason || '',
+    conditionInput: step.condition_input || step.conditionInput || '',
+    matchedCase: step.matched_case || step.matchedCase || '',
+    loopTarget: step.loop_target || step.loopTarget || '',
+    loopIterations: Number(step.loop_iterations || step.loopIterations || 0) || 0
+  }
+}
+
+function mergeRunNodeOverlay(previous, next) {
+  const merged = {...(previous || {}), ...(next || {})}
+  const previousStatus = previous?.status
+  const nextStatus = next?.status
+  if (previousStatus || nextStatus) {
+    merged.status = strongerRunStatus(previousStatus, nextStatus)
+    merged.label = runStatusLabel(merged.status)
+  }
+  if (previous?.error && next?.error && previous.error !== next.error) merged.error = `${previous.error}\n${next.error}`
+  if (previous?.skippedReason && next?.skippedReason && previous.skippedReason !== next.skippedReason) merged.skippedReason = `${previous.skippedReason}\n${next.skippedReason}`
+  if (previous?.iterationSteps || next?.iterationSteps) merged.iterationSteps = dedupeRunSteps([...(previous?.iterationSteps || []), ...(next?.iterationSteps || [])])
+  if (previous?.loopIterations || next?.loopIterations) merged.loopIterations = Math.max(Number(previous?.loopIterations || 0), Number(next?.loopIterations || 0))
+  if (previous?.loopIterationCount || next?.loopIterationCount) merged.loopIterationCount = Math.max(Number(previous?.loopIterationCount || 0), Number(next?.loopIterationCount || 0))
+  return merged
+}
+
+function dedupeRunSteps(steps) {
+  const seen = new Set()
+  const out = []
+  ;(steps || []).forEach(step => {
+    const key = step?.id || JSON.stringify(step)
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push(step)
+  })
+  return out
+}
+
+function strongerRunStatus(left, right) {
+  const rank = {failed: 5, running: 4, skipped: 3, succeeded: 2, idle: 1}
+  return (rank[normalizeRunStatus(right)] || 0) > (rank[normalizeRunStatus(left)] || 0) ? normalizeRunStatus(right) : normalizeRunStatus(left)
+}
+
+function parseLoopIterationStepID(id) {
+  const match = String(id || '').match(/^(.+)#(\d+)-(.+)$/)
+  if (!match) return null
+  return {loopID: match[1], iteration: Number(match[2]) || 0, targetID: match[3]}
+}
+
+function buildDisplayNodes(nodes, runState) {
+  const overlayNodes = runState?.nodes || {}
+  return (nodes || []).map(node => ({
+    ...node,
+    data: {
+      ...node.data,
+      run: overlayNodes[node.id] || null
+    }
+  }))
+}
+
+function buildDisplayEdges(edges, displayNodes, runState) {
+  const nodeRun = new Map((displayNodes || []).map(node => [node.id, node.data?.run]))
+  const nodeByID = new Map((displayNodes || []).map(node => [node.id, node]))
+  const conditionMatches = runState?.conditionMatches || {}
+  return (edges || []).map(edge => {
+    const sourceNode = nodeByID.get(edge.source)
+    const sourceRun = nodeRun.get(edge.source)
+    const targetRun = nodeRun.get(edge.target)
+    const edgeCase = edge.data?.case || edge.sourceHandle || ''
+    const matchedCase = conditionMatches[edge.source] || sourceRun?.matchedCase || ''
+    const isConditionEdge = sourceNode?.type === 'conditionNode' || Boolean(edgeCase)
+    let runClass = ''
+    if (isConditionEdge && matchedCase) {
+      runClass = edgeCase === matchedCase ? 'runEdgeMatched' : 'runEdgeDimmed'
+    } else if (sourceRun?.status === 'succeeded' && targetRun?.status === 'succeeded') {
+      runClass = 'runEdgeSucceeded'
+    } else if (sourceRun?.status === 'failed' || targetRun?.status === 'failed') {
+      runClass = 'runEdgeFailed'
+    }
+    return {
+      ...edge,
+      animated: edge.animated || runClass === 'runEdgeMatched',
+      className: [edge.className, runClass].filter(Boolean).join(' '),
+      data: {
+        ...(edge.data || {}),
+        run: runClass || null
+      }
+    }
+  })
+}
+
+function nodeRunClass(baseClass, selected, run) {
+  const runStatus = run?.status
+  return [baseClass, selected ? 'selected' : '', runStatus && runStatus !== 'idle' ? `run${capitalizeStatus(runStatus)}` : ''].filter(Boolean).join(' ')
+}
+
+function RunStatusBadge({run}) {
+  if (!run?.status || run.status === 'idle') return null
+  return <span className={`runStatusBadge run${capitalizeStatus(run.status)}`} title={formatNodeRunTitle(run)}>{runStatusLabel(run.status)}</span>
+}
+
+function formatNodeRunTitle(run) {
+  if (!run?.status) return ''
+  const parts = [`运行状态：${runStatusLabel(run.status)}`]
+  if (run.error) parts.push(`错误：${run.error}`)
+  if (run.skippedReason) parts.push(`跳过原因：${run.skippedReason}`)
+  if (run.matchedCase) parts.push(`命中分支：${run.matchedCase}`)
+  if (run.conditionInput) parts.push(`条件输入：${run.conditionInput}`)
+  if (run.loopIterations) parts.push(`循环次数：${run.loopIterations}`)
+  if (run.loopTarget) parts.push(`兼容目标：${run.loopTarget}`)
+  if (run.loopIterationCount) parts.push(`目标节点循环执行：${run.loopIterationCount} 次`)
+  if (run.iterationSteps?.length) {
+    const failedIterations = run.iterationSteps.filter(step => step.status === 'failed')
+    parts.push(`循环迭代记录：${run.iterationSteps.length} 条`)
+    if (failedIterations.length > 0) parts.push(`失败迭代：${failedIterations.map(step => step.id).join(', ')}`)
+  }
+  return parts.join('\n')
+}
+
+function runStatusLabel(status) {
+  const normalized = normalizeRunStatus(status)
+  if (normalized === 'succeeded') return '成功'
+  if (normalized === 'failed') return '失败'
+  if (normalized === 'skipped') return '跳过'
+  if (normalized === 'running') return '运行中'
+  return '未运行'
+}
+
+function normalizeRunStatus(status) {
+  const value = String(status || '').toLowerCase()
+  if (value === 'success' || value === 'succeeded' || value === 'ok') return 'succeeded'
+  if (value === 'fail' || value === 'failed' || value === 'error') return 'failed'
+  if (value === 'skip' || value === 'skipped') return 'skipped'
+  if (value === 'running' || value === 'pending') return 'running'
+  return value || 'idle'
+}
+
+function capitalizeStatus(status) {
+  const normalized = normalizeRunStatus(status)
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1)
+}
+
+function extractRunDetailFromResponse(body) {
+  if (!body) return null
+  if (body.record) return body
+  if (body.data?.record) return body.data
+  if (body.detail?.record) return body.detail
+  if (body.data?.detail?.record) return body.data.detail
+  return null
 }
 
 function emptyWorkflow(category) {
@@ -1377,6 +2032,62 @@ function newConditionFlowNode(id, position, onRemove) {
     },
     position
   }
+}
+
+function newControlFlowNode(control, id, position, onRemove) {
+  const data = {
+    controlType: control.type,
+    title: control.title,
+    name: id,
+    onRemove
+  }
+  if (control.type === 'loop') data.loop = defaultLoop()
+  return {
+    id,
+    type: 'controlNode',
+    data,
+    position
+  }
+}
+
+function defaultLoop() {
+  return {
+    tool: '',
+    params: {},
+    max_iterations: 3
+  }
+}
+
+function normalizeLoopConfig(loop) {
+  const params = loop?.params && typeof loop.params === 'object' && !Array.isArray(loop.params) ? loop.params : {}
+  return {
+    tool: String(loop?.tool || '').trim(),
+    params,
+    max_iterations: clampLoopIterations(loop?.max_iterations || loop?.maxIterations || 1)
+  }
+}
+
+function clampLoopIterations(value) {
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isFinite(parsed)) return 1
+  return Math.min(20, Math.max(1, parsed))
+}
+function loopNodeStatus(loop) {
+  const hasTool = Boolean(String(loop?.tool || '').trim())
+  const iterations = Number(loop?.max_iterations || 0)
+  return hasTool && iterations >= 1 && iterations <= 20
+    ? {ready: true, label: '可运行'}
+    : {ready: false, label: '配置不完整'}
+}
+
+function controlNodeTitle(type) {
+  const control = controlNodeCatalog.find(item => item.type === type)
+  return control?.title || type || '编排节点'
+}
+
+function controlNodeHelp(type) {
+  const control = controlNodeCatalog.find(item => item.type === type)
+  return control?.help || '编排控制节点'
 }
 
 function updateCaseValuesText(value) {
@@ -1423,8 +2134,37 @@ function edgeCaseFromHandle(sourceNode, sourceHandle) {
   return sourceHandle || ''
 }
 
-function workflowNodeToFlowNode(node, index, onRemove) {
-  const nodeType = node.type || (node.tool ? 'tool' : 'condition')
+function legacyLoopTargetMap(workflowNodes) {
+  const nodeIDs = new Set((workflowNodes || []).map(node => node.id))
+  const targetMap = new Map()
+  ;(workflowNodes || []).forEach(node => {
+    const nodeType = node.type || (node.tool ? 'tool' : node.loop ? 'loop' : '')
+    const targetID = nodeType === 'loop' && !node.loop?.tool ? String(node.loop?.target || '') : ''
+    if (targetID && nodeIDs.has(targetID)) targetMap.set(targetID, node.id)
+  })
+  return targetMap
+}
+
+function remapLegacyLoopEdges(edges, targetMap) {
+  if (!targetMap || targetMap.size === 0) return edges || []
+  const seen = new Set()
+  return (edges || [])
+    .map(edge => {
+      if (targetMap.has(edge.from)) return {...edge, from: targetMap.get(edge.from)}
+      if (targetMap.has(edge.to)) return {...edge, to: targetMap.get(edge.to)}
+      return edge
+    })
+    .filter(edge => {
+      if (edge.from === edge.to) return false
+      const key = `${edge.from}->${edge.to}:${edge.case || ''}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+}
+
+function workflowNodeToFlowNode(node, index, onRemove, workflowNodes = []) {
+  const nodeType = node.type || (node.tool ? 'tool' : node.loop ? 'loop' : 'condition')
   if (nodeType === 'condition') {
     return {
       id: node.id,
@@ -1436,6 +2176,23 @@ function workflowNodeToFlowNode(node, index, onRemove) {
       },
       position: {x: 80 + index * 220, y: 120 + (index % 3) * 90}
     }
+  }
+  if (nodeType === 'parallel' || nodeType === 'join' || nodeType === 'loop') {
+    const control = controlNodeCatalog.find(item => item.type === nodeType) || {type: nodeType, title: controlNodeTitle(nodeType)}
+    const flowNode = newControlFlowNode(control, node.id, {x: 80 + index * 220, y: 120 + (index % 3) * 90}, onRemove)
+    flowNode.data.name = node.name || node.id
+    if (nodeType === 'loop') {
+      const loop = normalizeLoopConfig(node.loop || defaultLoop())
+      if (!loop.tool && node.loop?.target) {
+        const target = (workflowNodes || []).find(item => item.id === node.loop.target)
+        if (target?.tool) {
+          loop.tool = target.tool
+          loop.params = target.params && Object.keys(loop.params || {}).length === 0 ? target.params : loop.params
+        }
+      }
+      flowNode.data.loop = loop
+    }
+    return flowNode
   }
   return {
     id: node.id,
@@ -1470,6 +2227,15 @@ function buildWorkflowDraft(workflow, nodes, edges, category, parameters) {
           name: node.data.name || node.id,
           condition: node.data.condition || defaultCondition()
         }
+      }
+      if (node.type === 'controlNode') {
+        const draftNode = {
+          id: node.id,
+          type: node.data.controlType,
+          name: node.data.name || node.id
+        }
+        if (node.data.controlType === 'loop') draftNode.loop = normalizeLoopConfig(node.data.loop || defaultLoop())
+        return draftNode
       }
       return {
         id: node.id,
@@ -1515,6 +2281,95 @@ function flowEdgeFromWorkflowEdge(edge, index, nodes = []) {
     label: edgeCase ? conditionCaseLabel(sourceNode?.data.condition, edgeCase) : '',
     data: edgeCase ? {case: edgeCase} : {}
   }
+}
+
+function autoLayoutNodes(nodes, edges) {
+  if (!nodes.length) return nodes
+
+  const nodeIDs = new Set(nodes.map(node => node.id))
+  const nodeOrder = new Map(nodes.map((node, index) => [node.id, index]))
+  const children = new Map(nodes.map(node => [node.id, []]))
+  const incomingCounts = new Map(nodes.map(node => [node.id, 0]))
+  const depths = new Map(nodes.map(node => [node.id, 0]))
+
+  ;(edges || []).forEach(edge => {
+    if (!nodeIDs.has(edge.source) || !nodeIDs.has(edge.target) || edge.source === edge.target) return
+    children.get(edge.source).push(edge.target)
+    incomingCounts.set(edge.target, (incomingCounts.get(edge.target) || 0) + 1)
+  })
+
+  const queue = nodes
+    .filter(node => (incomingCounts.get(node.id) || 0) === 0)
+    .map(node => node.id)
+  const visited = new Set()
+
+  while (queue.length > 0) {
+    const nodeID = queue.shift()
+    if (visited.has(nodeID)) continue
+    visited.add(nodeID)
+    const nextDepth = (depths.get(nodeID) || 0) + 1
+    ;(children.get(nodeID) || [])
+      .sort((left, right) => (nodeOrder.get(left) || 0) - (nodeOrder.get(right) || 0))
+      .forEach(childID => {
+        depths.set(childID, Math.max(depths.get(childID) || 0, nextDepth))
+        const nextIncoming = (incomingCounts.get(childID) || 0) - 1
+        incomingCounts.set(childID, nextIncoming)
+        if (nextIncoming === 0) queue.push(childID)
+      })
+  }
+
+  if (visited.size < nodes.length) {
+    const fallbackDepth = Math.max(0, ...Array.from(depths.values())) + 1
+    nodes.forEach(node => {
+      if (visited.has(node.id)) return
+      depths.set(node.id, fallbackDepth + (nodeOrder.get(node.id) || 0))
+    })
+  }
+
+  const layers = new Map()
+  nodes.forEach(node => {
+    const depth = depths.get(node.id) || 0
+    if (!layers.has(depth)) layers.set(depth, [])
+    layers.get(depth).push(node)
+  })
+
+  const orderedLayers = Array.from(layers.entries())
+    .sort(([left], [right]) => left - right)
+    .map(([, layerNodes]) => layerNodes.sort((left, right) => (nodeOrder.get(left.id) || 0) - (nodeOrder.get(right.id) || 0)))
+  const layerMetrics = orderedLayers.map(layerNodes => {
+    const sizes = layerNodes.map(autoLayoutNodeSize)
+    const height = sizes.reduce((total, size) => total + size.height, 0) + Math.max(0, sizes.length - 1) * 42
+    const width = Math.max(...sizes.map(size => size.width))
+    return {sizes, height, width}
+  })
+  const maxLayerHeight = Math.max(...layerMetrics.map(metric => metric.height), 0)
+  const positions = new Map()
+  let x = 80
+
+  orderedLayers.forEach((layerNodes, layerIndex) => {
+    const metrics = layerMetrics[layerIndex]
+    let y = 80 + Math.max(0, (maxLayerHeight - metrics.height) / 2)
+    layerNodes.forEach((node, nodeIndex) => {
+      const size = metrics.sizes[nodeIndex]
+      positions.set(node.id, {x, y})
+      y += size.height + 42
+    })
+    x += metrics.width + 140
+  })
+
+  return nodes.map(node => ({
+    ...node,
+    position: positions.get(node.id) || node.position || {x: 80, y: 80}
+  }))
+}
+
+function autoLayoutNodeSize(node) {
+  if (node.type === 'conditionNode') {
+    const branchCount = conditionBranchRows(node.data.condition || defaultCondition()).length
+    return {width: 440, height: Math.max(156, 72 + branchCount * 42)}
+  }
+  if (node.type === 'controlNode') return {width: 250, height: 82}
+  return {width: 210, height: 74}
 }
 
 function conditionCaseLabel(condition, caseID) {
@@ -1590,6 +2445,26 @@ function validateConditionDraft(nodes, edges) {
   return errors
 }
 
+function validateControlDraft(nodes, edges, tools = []) {
+  const errors = []
+  const toolMap = new Map((tools || []).map(tool => [tool.id, tool]))
+  nodes.filter(node => node.type === 'controlNode').forEach(node => {
+    if (node.data.controlType === 'loop') {
+      const loop = normalizeLoopConfig(node.data.loop || {})
+      if (!loop.tool) errors.push(`循环节点 ${node.id} 请选择循环工具。`)
+      if (loop.tool && !toolMap.has(loop.tool)) errors.push(`循环节点 ${node.id} 引用了不存在的工具：${loop.tool}`)
+      if (!Number.isInteger(loop.max_iterations) || loop.max_iterations < 1 || loop.max_iterations > 20) errors.push(`循环节点 ${node.id} 的最大循环次数必须在 1 到 20 之间。`)
+    }
+    if (node.data.controlType === 'parallel' && !edges.some(edge => edge.source === node.id)) {
+      errors.push(`并行分支节点 ${node.id} 至少需要一条出边。`)
+    }
+    if (node.data.controlType === 'join' && !edges.some(edge => edge.target === node.id)) {
+      errors.push(`合流节点 ${node.id} 至少需要一条入边。`)
+    }
+  })
+  return errors
+}
+
 function normalizeTags(tags) {
   const seen = new Set()
   const out = []
@@ -1606,10 +2481,13 @@ function findOutOfScopeToolNodes(nodes, tools, scopedCategory) {
   if (!scopedCategory) return []
   const toolMap = new Map((tools || []).map(tool => [tool.id, tool]))
   return nodes
-    .filter(node => node.type !== 'conditionNode')
-    .map(node => ({node, tool: toolMap.get(node.data.tool)}))
+    .filter(node => node.type === 'toolNode' || (node.type === 'controlNode' && node.data.controlType === 'loop'))
+    .map(node => {
+      const toolID = node.type === 'controlNode' ? node.data.loop?.tool : node.data.tool
+      return {node, toolID, tool: toolMap.get(toolID)}
+    })
     .filter(item => item.tool && item.tool.category !== scopedCategory)
-    .map(item => ({nodeID: item.node.id, toolID: item.node.data.tool, scopeName: scopedCategory}))
+    .map(item => ({nodeID: item.node.id, toolID: item.toolID, scopeName: scopedCategory}))
 }
 
 function defaultParams(parameters) {
@@ -1633,15 +2511,28 @@ function findMissingRequiredNodeParams(nodes, tools) {
   const toolMap = new Map((tools || []).map(tool => [tool.id, tool]))
   const missing = []
   nodes.forEach(node => {
-    if (node.type === 'conditionNode') return
-    const tool = toolMap.get(node.data.tool)
-    ;(tool?.parameters || []).forEach(param => {
-      if (!param.required) return
-      const value = node.data.params?.[param.name]
-      if (value === undefined || value === null || String(value).trim() === '') {
-        missing.push({nodeID: node.id, toolName: tool.name || tool.id, paramName: param.name})
-      }
-    })
+    if (node.type === 'toolNode') {
+      const tool = toolMap.get(node.data.tool)
+      ;(tool?.parameters || []).forEach(param => {
+        if (!param.required) return
+        const value = node.data.params?.[param.name]
+        if (value === undefined || value === null || String(value).trim() === '') {
+          missing.push({nodeID: node.id, toolName: tool.name || tool.id, paramName: param.name})
+        }
+      })
+      return
+    }
+    if (node.type === 'controlNode' && node.data.controlType === 'loop') {
+      const loop = normalizeLoopConfig(node.data.loop || defaultLoop())
+      const tool = toolMap.get(loop.tool)
+      ;(tool?.parameters || []).forEach(param => {
+        if (!param.required) return
+        const value = loop.params?.[param.name]
+        if (value === undefined || value === null || String(value).trim() === '') {
+          missing.push({nodeID: node.id, toolName: tool.name || tool.id, paramName: param.name})
+        }
+      })
+    }
   })
   return missing
 }
@@ -1685,6 +2576,12 @@ function combineWorkflowStepLogs(steps, record) {
     if (step.type === 'condition') {
       if (step.condition_input !== undefined) parts.push(`条件输入: ${step.condition_input}`)
       if (step.matched_case) parts.push(`命中分支: ${step.matched_case}`)
+    } else if (step.type === 'loop') {
+      if (step.tool) parts.push(`循环工具: ${step.tool}`)
+      if (step.loop_target) parts.push(`兼容目标: ${step.loop_target}`)
+      if (step.loop_iterations) parts.push(`循环次数: ${step.loop_iterations}`)
+    } else if (step.type === 'parallel' || step.type === 'join') {
+      parts.push('编排控制节点已完成')
     }
     if (step.skipped_reason) parts.push(`跳过原因: ${step.skipped_reason}`)
     const stepLogs = steps?.[step.id] || {}
@@ -1706,6 +2603,9 @@ function combineWorkflowStepLogs(steps, record) {
 
 function displayStepType(type) {
   if (type === 'condition') return '编排节点/条件分支'
+  if (type === 'parallel') return '编排节点/并行分支'
+  if (type === 'join') return '编排节点/合流'
+  if (type === 'loop') return '编排节点/循环'
   return '工具节点'
 }
 

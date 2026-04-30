@@ -87,6 +87,10 @@ func printWorkflowHelp(out io.Writer, wf *registry.Workflow) {
 			printConditionNodeHelp(out, node, cfg.Edges)
 			continue
 		}
+		if nodeType == config.WorkflowNodeTypeLoop {
+			printLoopNodeHelp(out, node)
+			continue
+		}
 		fmt.Fprintf(out, "  %s\t工具节点\t工具=%s", node.ID, node.Tool)
 		if node.Name != "" {
 			fmt.Fprintf(out, "\t%s", node.Name)
@@ -141,6 +145,29 @@ func printConditionNodeHelp(out io.Writer, node config.WorkflowNode, edges []con
 	}
 	if count == 0 {
 		fmt.Fprintln(out, "      无")
+	}
+}
+
+func printLoopNodeHelp(out io.Writer, node config.WorkflowNode) {
+	fmt.Fprintf(out, "  %s\t编排节点/循环", node.ID)
+	if node.Name != "" {
+		fmt.Fprintf(out, "\t%s", node.Name)
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "    工具: %s\n", fallbackText(node.Loop.Tool, "未配置"))
+	fmt.Fprintf(out, "    最大循环次数: %d\n", node.Loop.MaxIterations)
+	if len(node.Loop.Params) == 0 {
+		fmt.Fprintln(out, "    参数: 无")
+		return
+	}
+	fmt.Fprintln(out, "    参数:")
+	keys := make([]string, 0, len(node.Loop.Params))
+	for key := range node.Loop.Params {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(out, "      %s=%v\n", key, node.Loop.Params[key])
 	}
 }
 

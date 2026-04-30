@@ -4,4 +4,4 @@ runs/
 web/node_modules/
 graphify-out/
 .claude/worktrees/
-workflows/
+/workflows/

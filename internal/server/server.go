@@ -578,8 +578,9 @@ type pluginCatalogEntry struct {
 }
 
 type runRequest struct {
-	Params  map[string]string `json:"params"`
-	Confirm bool              `json:"confirm"`
+	Params   map[string]string      `json:"params"`
+	Confirm  bool                   `json:"confirm"`
+	Workflow *config.WorkflowConfig `json:"workflow,omitempty"`
 }
 
 type workflowSaveRequest struct {
@@ -764,22 +765,31 @@ func handleWorkflowRun(w http.ResponseWriter, req *http.Request, reg *registry.R
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 		return
 	}
-	wf, err := reg.Workflow(id)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
-		return
+	workflowConfig := reqBody.Workflow
+	if workflowConfig == nil {
+		wf, err := reg.Workflow(id)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+			return
+		}
+		workflowConfig = wf.Config
 	}
-	params := config.MergeParams(wf.Config.Parameters, nil, reqBody.Params)
-	if err := config.ValidateRequired(wf.Config.Parameters, params); err != nil {
+	params := config.MergeParams(workflowConfig.Parameters, nil, reqBody.Params)
+	if err := config.ValidateRequired(workflowConfig.Parameters, params); err != nil {
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 		return
 	}
-	if wf.Config.Confirm.Required && !reqBody.Confirm {
+	if workflowConfig.Confirm.Required && !reqBody.Confirm {
 		writeJSON(w, http.StatusBadRequest, response{Error: "该工作流需要确认后执行"})
 		return
 	}
-	if err := confirmWorkflowTools(reg, wf.Config, reqBody.Confirm); err != nil {
+	if err := confirmWorkflowTools(reg, workflowConfig, reqBody.Confirm); err != nil {
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	if reqBody.Workflow != nil {
+		record, err := r.RunWorkflowConfigWithConfirmation(context.Background(), workflowConfig, params, reqBody.Confirm, io.Discard, io.Discard)
+		writeRunResponse(w, record, err)
 		return
 	}
 	record, err := r.RunWorkflowWithConfirmation(context.Background(), id, params, reqBody.Confirm, io.Discard, io.Discard)
@@ -792,15 +802,25 @@ func confirmWorkflowTools(reg *registry.Registry, wf *config.WorkflowConfig, con
 		if nodeType == "" && node.Tool != "" {
 			nodeType = config.WorkflowNodeTypeTool
 		}
-		if nodeType != config.WorkflowNodeTypeTool {
+		if nodeType == "" && (node.Loop.Tool != "" || node.Loop.Target != "" || node.Loop.MaxIterations != 0 || len(node.Loop.Params) > 0) {
+			nodeType = config.WorkflowNodeTypeLoop
+		}
+		toolID := node.Tool
+		if nodeType == config.WorkflowNodeTypeLoop {
+			toolID = node.Loop.Tool
+		}
+		if nodeType != config.WorkflowNodeTypeTool && nodeType != config.WorkflowNodeTypeLoop {
 			continue
 		}
-		tool, err := reg.Tool(node.Tool)
+		if toolID == "" {
+			continue
+		}
+		tool, err := reg.Tool(toolID)
 		if err != nil {
 			return err
 		}
 		if tool.Config.Confirm.Required && !node.Confirm && !confirmed {
-			return fmt.Errorf("工作流节点 %s 引用的工具 %s 需要确认", node.ID, node.Tool)
+			return fmt.Errorf("工作流节点 %s 引用的工具 %s 需要确认", node.ID, toolID)
 		}
 	}
 	return nil

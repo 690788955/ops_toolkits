@@ -112,6 +112,35 @@ func TestWorkflowValidateAPIRejectsMissingTool(t *testing.T) {
 	}
 }
 
+func TestWorkflowRunAPIRunsUnsavedDraftWithoutPersisting(t *testing.T) {
+	reg := testRegistry(t)
+	toolDir := reg.Tools["demo.hello"].Dir
+	if err := os.MkdirAll(filepath.Join(toolDir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(toolDir, "bin", "run.sh"), []byte("#!/usr/bin/env bash\necho draft-run\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"params":{},"workflow":{"id":"demo.unsaved","name":"未保存草稿","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.unsaved/run", strings.NewReader(body))
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `"id":"workflow-`) || !strings.Contains(res.Body.String(), `"status":"succeeded"`) {
+		t.Fatalf("响应缺少运行成功信息: %s", res.Body.String())
+	}
+	if _, ok := reg.Workflows["demo.unsaved"]; ok {
+		t.Fatalf("未保存草稿不应写入注册表: %#v", reg.Workflows["demo.unsaved"])
+	}
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "plugins", "user.workflows", "workflows", "demo.unsaved.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("未保存草稿不应写入 workflow 文件，stat err = %v", err)
+	}
+}
+
 func TestWorkflowSaveAPI(t *testing.T) {
 	reg := testRegistry(t)
 	body := `{"workflow":{"id":"demo.saved","name":"已保存","category":"demo","tags":["自定义","迁移"],"nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`
@@ -703,6 +732,57 @@ func TestWorkflowSaveAPIPreservesConditionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWorkflowSaveAPIPreservesParallelJoinRoundTrip(t *testing.T) {
+	reg := testRegistry(t)
+	payload := `{"workflow":{"id":"demo.parallel","name":"并行合流流程","category":"demo","nodes":[{"id":"split","type":"parallel","name":"并行分支"},{"id":"left","tool":"demo.hello"},{"id":"right","tool":"demo.hello"},{"id":"join","type":"join","name":"合流"},{"id":"done","tool":"demo.hello"}],"edges":[{"from":"split","to":"left"},{"from":"split","to":"right"},{"from":"left","to":"join"},{"from":"right","to":"join"},{"from":"join","to":"done"}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.parallel/save", strings.NewReader(payload))
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	saved := reg.Workflows["demo.parallel"].Config
+	if saved.Nodes[0].Type != config.WorkflowNodeTypeParallel || saved.Nodes[3].Type != config.WorkflowNodeTypeJoin {
+		t.Fatalf("parallel/join round-trip lost node types: %#v", saved.Nodes)
+	}
+	workflowFile := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "workflows", "demo.parallel.yaml")
+	content, err := os.ReadFile(workflowFile)
+	if err != nil {
+		t.Fatalf("read saved workflow: %v", err)
+	}
+	text := string(content)
+	if !strings.Contains(text, "type: parallel") || !strings.Contains(text, "type: join") {
+		t.Fatalf("saved workflow missing parallel/join types: %s", text)
+	}
+}
+
+func TestWorkflowSaveAPIPreservesLoopRoundTrip(t *testing.T) {
+	reg := testRegistry(t)
+	payload := `{"workflow":{"id":"demo.loop","name":"循环流程","category":"demo","nodes":[{"id":"repeat","type":"loop","name":"固定循环","loop":{"tool":"demo.hello","params":{"name":"{{ .name }}"},"max_iterations":3}},{"id":"done","tool":"demo.hello"}],"edges":[{"from":"repeat","to":"done"}]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.loop/save", strings.NewReader(payload))
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	saved := reg.Workflows["demo.loop"].Config
+	if saved.Nodes[0].Type != config.WorkflowNodeTypeLoop || saved.Nodes[0].Loop.Tool != "demo.hello" || saved.Nodes[0].Loop.Params["name"] != "{{ .name }}" || saved.Nodes[0].Loop.MaxIterations != 3 {
+		t.Fatalf("loop round-trip lost fields: %#v", saved.Nodes)
+	}
+	workflowFile := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "workflows", "demo.loop.yaml")
+	content, err := os.ReadFile(workflowFile)
+	if err != nil {
+		t.Fatalf("read saved workflow: %v", err)
+	}
+	text := string(content)
+	if !strings.Contains(text, "type: loop") || !strings.Contains(text, "tool: demo.hello") || !strings.Contains(text, "max_iterations: 3") {
+		t.Fatalf("saved workflow missing loop fields: %s", text)
+	}
+}
 func testRegistry(t *testing.T) *registry.Registry {
 	t.Helper()
 	dir := t.TempDir()
