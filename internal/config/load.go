@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,6 +20,41 @@ func LoadRoot(path string) (*RootConfig, error) {
 	}
 	normalizeRoot(&cfg)
 	return &cfg, nil
+}
+
+func SaveRoot(path string, cfg *RootConfig) error {
+	if cfg == nil {
+		return fmt.Errorf("配置不能为空")
+	}
+	type rootConfigDisk struct {
+		App      AppConfig      `yaml:"app,omitempty"`
+		Paths    PathsConfig    `yaml:"paths,omitempty"`
+		Server   ServerConfig   `yaml:"server,omitempty"`
+		Menu     MenuConfig     `yaml:"menu,omitempty"`
+		Registry RegistryConfig `yaml:"registry,omitempty"`
+		Plugins  PluginsConfig  `yaml:"plugins"`
+		UI       UIConfig       `yaml:"ui,omitempty"`
+	}
+	disk := rootConfigDisk{
+		App:      cfg.App,
+		Paths:    cfg.Paths,
+		Server:   cfg.Server,
+		Menu:     cfg.Menu,
+		Registry: cfg.Registry,
+		Plugins:  cfg.Plugins,
+		UI:       cfg.UI,
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(disk); err != nil {
+		_ = enc.Close()
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Clean(path), buf.Bytes(), 0o644)
 }
 
 func LoadTool(path string) (*ToolConfig, error) {

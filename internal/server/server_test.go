@@ -3,7 +3,9 @@ package server
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,7 @@ import (
 
 	"shell_ops/internal/config"
 	"shell_ops/internal/registry"
+	"shell_ops/internal/runner"
 )
 
 func TestWebIndexDisablesBrowserCache(t *testing.T) {
@@ -346,6 +349,109 @@ func TestToolDevKitDownloadAPI(t *testing.T) {
 	}
 }
 
+func TestToolDevKitTemplateCanRunWithoutModificationViaInstall(t *testing.T) {
+	baseReg := testRegistry(t)
+	handler := NewHandler(baseReg)
+
+	devkitReq := httptest.NewRequest(http.MethodGet, "/api/dev/toolkit.zip", nil)
+	devkitRes := httptest.NewRecorder()
+	handler.ServeHTTP(devkitRes, devkitReq)
+	if devkitRes.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", devkitRes.Code, devkitRes.Body.String())
+	}
+
+	staging := t.TempDir()
+	if err := extractPluginZip(devkitRes.Body.Bytes(), staging); err != nil {
+		t.Fatalf("解压模板开发包失败: %v", err)
+	}
+	srcPluginDir := filepath.Join(staging, "plugins", "plugin.template")
+	if _, err := os.Stat(filepath.Join(srcPluginDir, "plugin.yaml")); err != nil {
+		t.Fatalf("模板插件目录缺失: %v", err)
+	}
+	dstPluginDir := filepath.Join(baseReg.BaseDir, "plugins", "plugin.template")
+	if err := copyDir(srcPluginDir, dstPluginDir); err != nil {
+		t.Fatalf("安装模板插件失败: %v", err)
+	}
+
+	reloaded, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("模板插件安装后 validate/load 失败: %v", err)
+	}
+	if _, ok := reloaded.Tools["plugin.template.inspect"]; !ok {
+		t.Fatalf("模板工具未注册")
+	}
+	if _, ok := reloaded.Workflows["plugin.template.maintenance-flow"]; !ok {
+		t.Fatalf("模板工作流未注册")
+	}
+
+	r := runner.New(reloaded)
+	toolRecord, err := r.RunTool(context.Background(), "plugin.template.inspect", map[string]string{
+		"target":  "demo",
+		"action":  "inspect",
+		"dry_run": "true",
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("模板工具试跑失败: %v, record=%#v", err, toolRecord)
+	}
+	if toolRecord == nil || toolRecord.Status != "succeeded" {
+		t.Fatalf("模板工具试跑状态异常: %#v", toolRecord)
+	}
+
+	workflowRecord, err := r.RunWorkflowWithConfirmation(context.Background(), "plugin.template.maintenance-flow", map[string]string{
+		"target":  "demo",
+		"action":  "apply",
+		"dry_run": "true",
+	}, true, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("模板工作流试跑失败: %v, record=%#v", err, workflowRecord)
+	}
+	if workflowRecord == nil || workflowRecord.Status != "succeeded" {
+		t.Fatalf("模板工作流试跑状态异常: %#v", workflowRecord)
+	}
+}
+
+func TestToolDevKitTemplateCanRunWithoutModificationViaUpload(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+
+	devkitReq := httptest.NewRequest(http.MethodGet, "/api/dev/toolkit.zip", nil)
+	devkitRes := httptest.NewRecorder()
+	handler.ServeHTTP(devkitRes, devkitReq)
+	if devkitRes.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", devkitRes.Code, devkitRes.Body.String())
+	}
+
+	uploadReq := pluginUploadRequest(t, devkitRes.Body.Bytes(), false)
+	uploadRes := httptest.NewRecorder()
+	handler.ServeHTTP(uploadRes, uploadReq)
+	if uploadRes.Code != http.StatusOK {
+		t.Fatalf("上传模板插件失败 status = %d, body = %s", uploadRes.Code, uploadRes.Body.String())
+	}
+	if !strings.Contains(uploadRes.Body.String(), `"plugin_id":"plugin.template"`) {
+		t.Fatalf("上传返回缺少模板插件 ID: %s", uploadRes.Body.String())
+	}
+
+	toolReq := httptest.NewRequest(http.MethodPost, "/api/tools/plugin.template.inspect/run", strings.NewReader(`{"params":{"target":"demo","action":"inspect","dry_run":"true"}}`))
+	toolRes := httptest.NewRecorder()
+	handler.ServeHTTP(toolRes, toolReq)
+	if toolRes.Code != http.StatusOK {
+		t.Fatalf("模板工具 API 试跑失败 status = %d, body = %s", toolRes.Code, toolRes.Body.String())
+	}
+	if !strings.Contains(toolRes.Body.String(), `"status":"succeeded"`) {
+		t.Fatalf("模板工具 API 试跑未成功: %s", toolRes.Body.String())
+	}
+
+	workflowReq := httptest.NewRequest(http.MethodPost, "/api/workflows/plugin.template.maintenance-flow/run", strings.NewReader(`{"confirm":true,"params":{"target":"demo","action":"apply","dry_run":"true"}}`))
+	workflowRes := httptest.NewRecorder()
+	handler.ServeHTTP(workflowRes, workflowReq)
+	if workflowRes.Code != http.StatusOK {
+		t.Fatalf("模板工作流 API 试跑失败 status = %d, body = %s", workflowRes.Code, workflowRes.Body.String())
+	}
+	if !strings.Contains(workflowRes.Body.String(), `"status":"succeeded"`) {
+		t.Fatalf("模板工作流 API 试跑未成功: %s", workflowRes.Body.String())
+	}
+}
+
 func TestCatalogAPIIncludesExportablePlugins(t *testing.T) {
 	baseReg := testRegistry(t)
 	installTestPluginWithWorkflow(t, baseReg.BaseDir, "vendor.catalog", "1.0.0")
@@ -496,6 +602,541 @@ func TestPluginExportRejectsUnsafePluginIDRequest(t *testing.T) {
 
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want bad request; body = %s", res.Code, res.Body.String())
+	}
+}
+
+func TestPluginDisableAddsConfigAndRefreshesCatalog(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.disable", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	handler := NewHandler(reg)
+	req := httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.disable/disable", nil)
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	rootConfig, err := os.ReadFile(filepath.Join(reg.BaseDir, "configs", "ops.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rootConfig), "id: upload") {
+		t.Fatalf("禁用写配置不应把运行期插件分类写入磁盘: %s", rootConfig)
+	}
+	if !strings.Contains(string(rootConfig), "vendor.disable") {
+		t.Fatalf("禁用配置未写入插件 ID: %s", rootConfig)
+	}
+	catalogReq := httptest.NewRequest(http.MethodGet, "/api/catalog", nil)
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, catalogReq)
+	body := catalogRes.Body.String()
+	if strings.Contains(body, "vendor.disable.tool") {
+		t.Fatalf("禁用插件贡献不应继续出现在 catalog: %s", body)
+	}
+	if !strings.Contains(body, "vendor.disable") || !strings.Contains(body, `"disabled":true`) {
+		t.Fatalf("catalog 应包含已禁用插件状态: %s", body)
+	}
+	var catalogBody struct {
+		Data struct {
+			Categories []categoryCatalogEntry `json:"categories"`
+			Plugins    []pluginCatalogEntry   `json:"plugins"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(catalogRes.Body.Bytes(), &catalogBody); err != nil {
+		t.Fatalf("catalog JSON 解析失败: %v", err)
+	}
+	var disabledPlugin *pluginCatalogEntry
+	for i := range catalogBody.Data.Plugins {
+		if catalogBody.Data.Plugins[i].ID == "vendor.disable" {
+			disabledPlugin = &catalogBody.Data.Plugins[i]
+			break
+		}
+	}
+	if disabledPlugin == nil || !disabledPlugin.Disabled {
+		t.Fatalf("catalog 应包含已禁用插件状态: %#v", catalogBody.Data.Plugins)
+	}
+	var disabledCategory *categoryCatalogEntry
+	for i := range catalogBody.Data.Categories {
+		if catalogBody.Data.Categories[i].ID == "upload" {
+			disabledCategory = &catalogBody.Data.Categories[i]
+			break
+		}
+	}
+	if disabledCategory == nil || !disabledCategory.Disabled || disabledCategory.Source == nil {
+		t.Fatalf("catalog 应保留禁用插件分类来源，供前端置灰: %#v", catalogBody.Data.Categories)
+	}
+	if disabledCategory.Source.PluginID != "vendor.disable" || disabledCategory.Source.PluginName != "Existing Test" || disabledCategory.Source.PluginVersion != "1.0.0" {
+		t.Fatalf("禁用分类 source 缺少前端提示所需插件信息: %#v", disabledCategory.Source)
+	}
+}
+
+func TestPluginCatalogKeepsSharedDisabledCategoryEnabled(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.disabledshared", "1.0.0")
+	installTestPlugin(t, baseReg.BaseDir, "vendor.enabledshared", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	handler := NewHandler(reg)
+	disableRes := httptest.NewRecorder()
+	handler.ServeHTTP(disableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.disabledshared/disable", nil))
+	if disableRes.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", disableRes.Code, disableRes.Body.String())
+	}
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if catalogRes.Code != http.StatusOK {
+		t.Fatalf("catalog status = %d, body = %s", catalogRes.Code, catalogRes.Body.String())
+	}
+
+	var body struct {
+		Data struct {
+			Categories []categoryCatalogEntry `json:"categories"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(catalogRes.Body.Bytes(), &body); err != nil {
+		t.Fatalf("catalog JSON 解析失败: %v", err)
+	}
+	var uploadCategory *categoryCatalogEntry
+	for i := range body.Data.Categories {
+		if body.Data.Categories[i].ID == "upload" {
+			uploadCategory = &body.Data.Categories[i]
+			break
+		}
+	}
+	if uploadCategory == nil {
+		t.Fatalf("catalog 缺少共享分类 upload: %s", catalogRes.Body.String())
+	}
+	if uploadCategory.Disabled || uploadCategory.Source != nil {
+		t.Fatalf("仍有启用插件引用共享分类时不应置灰或设置禁用来源: %#v", uploadCategory)
+	}
+	bodyText := catalogRes.Body.String()
+	if strings.Contains(bodyText, "vendor.disabledshared.tool") {
+		t.Fatalf("禁用插件工具不应出现在 catalog: %s", bodyText)
+	}
+	if !strings.Contains(bodyText, "vendor.enabledshared.tool") {
+		t.Fatalf("启用插件工具应继续出现在 catalog: %s", bodyText)
+	}
+}
+
+func TestPluginEnableRemovesDisabledConfigAndRefreshesCatalog(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.enable", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	handler := NewHandler(reg)
+	disableRes := httptest.NewRecorder()
+	handler.ServeHTTP(disableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.enable/disable", nil))
+	if disableRes.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", disableRes.Code, disableRes.Body.String())
+	}
+	enableRes := httptest.NewRecorder()
+
+	handler.ServeHTTP(enableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.enable/enable", nil))
+
+	if enableRes.Code != http.StatusOK {
+		t.Fatalf("enable status = %d, body = %s", enableRes.Code, enableRes.Body.String())
+	}
+	rootConfig, err := os.ReadFile(filepath.Join(reg.BaseDir, "configs", "ops.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rootConfig), "vendor.enable") {
+		t.Fatalf("启用成功后应清理 disabled 配置: %s", rootConfig)
+	}
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	body := catalogRes.Body.String()
+	if !strings.Contains(body, "vendor.enable.tool") {
+		t.Fatalf("启用后插件贡献应重新出现在 catalog: %s", body)
+	}
+	var catalogBody struct {
+		Data struct {
+			Plugins []pluginCatalogEntry `json:"plugins"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(catalogRes.Body.Bytes(), &catalogBody); err != nil {
+		t.Fatalf("catalog JSON 解析失败: %v", err)
+	}
+	for _, plugin := range catalogBody.Data.Plugins {
+		if plugin.ID == "vendor.enable" && plugin.Disabled {
+			t.Fatalf("启用后插件不应继续标记 disabled: %#v", plugin)
+		}
+	}
+}
+
+func TestPluginEnableRollsBackConfigOnReloadFailure(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.enablerollback", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	handler := NewHandler(reg)
+	disableRes := httptest.NewRecorder()
+	handler.ServeHTTP(disableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.enablerollback/disable", nil))
+	if disableRes.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", disableRes.Code, disableRes.Body.String())
+	}
+	installTestPlugin(t, reg.BaseDir, "vendor.enablebad", "1.0.0")
+	if err := os.WriteFile(filepath.Join(reg.BaseDir, "plugins", "vendor.enablebad", "plugin.yaml"), []byte("id: ../bad\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	enableRes := httptest.NewRecorder()
+
+	handler.ServeHTTP(enableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.enablerollback/enable", nil))
+
+	if enableRes.Code != http.StatusBadRequest {
+		t.Fatalf("enable status = %d, want bad request; body = %s", enableRes.Code, enableRes.Body.String())
+	}
+	rootConfig, err := os.ReadFile(filepath.Join(reg.BaseDir, "configs", "ops.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rootConfig), "vendor.enablerollback") {
+		t.Fatalf("刷新失败时应回滚并保留 disabled 配置: %s", rootConfig)
+	}
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if strings.Contains(catalogRes.Body.String(), "vendor.enablerollback.tool") {
+		t.Fatalf("启用刷新失败后旧注册表应保持禁用状态: %s", catalogRes.Body.String())
+	}
+}
+
+func TestPluginEnableRejectUnknownUnsafeAndNonPost(t *testing.T) {
+	reg := testRegistry(t)
+	cases := []struct {
+		method string
+		path   string
+		want   int
+		text   string
+	}{
+		{http.MethodPost, "/api/plugins/vendor.missing/enable", http.StatusNotFound, "vendor.missing"},
+		{http.MethodPost, "/api/plugins/vendor.enable.zip/enable", http.StatusBadRequest, "不要使用 .zip"},
+		{http.MethodPost, "/api/plugins/vendor%2Fevil/enable", http.StatusBadRequest, "不安全路径字符"},
+		{http.MethodGet, "/api/plugins/vendor.method/enable", http.StatusMethodNotAllowed, "method not allowed"},
+	}
+	for _, tc := range cases {
+		res := httptest.NewRecorder()
+		NewHandler(reg).ServeHTTP(res, httptest.NewRequest(tc.method, tc.path, nil))
+		if res.Code != tc.want {
+			t.Fatalf("%s %s status = %d, want %d; body = %s", tc.method, tc.path, res.Code, tc.want, res.Body.String())
+		}
+		if tc.text != "" && !strings.Contains(res.Body.String(), tc.text) {
+			t.Fatalf("%s %s 响应缺少 %q: %s", tc.method, tc.path, tc.text, res.Body.String())
+		}
+	}
+}
+func TestPluginDeleteRemovesDisabledPluginAndCleansConfig(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.delete", "1.0.0")
+	writeTestRootConfigWithCategories(t, baseReg.BaseDir, []config.Category{{ID: "demo", Name: "演示"}, {ID: "upload", Name: "上传插件"}})
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	handler := NewHandler(reg)
+	disableReq := httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.delete/disable", nil)
+	disableRes := httptest.NewRecorder()
+	handler.ServeHTTP(disableRes, disableReq)
+	if disableRes.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", disableRes.Code, disableRes.Body.String())
+	}
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/plugins/vendor.delete", nil)
+	deleteRes := httptest.NewRecorder()
+
+	handler.ServeHTTP(deleteRes, deleteReq)
+
+	if deleteRes.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, body = %s", deleteRes.Code, deleteRes.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "plugins", "vendor.delete")); !os.IsNotExist(err) {
+		t.Fatalf("插件目录应被删除，stat err = %v", err)
+	}
+	rootConfig, err := os.ReadFile(filepath.Join(reg.BaseDir, "configs", "ops.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rootConfig), "vendor.delete") || strings.Contains(string(rootConfig), "id: upload") {
+		t.Fatalf("删除成功后应清理 disabled 配置和插件独有分类: %s", rootConfig)
+	}
+	catalogReq := httptest.NewRequest(http.MethodGet, "/api/catalog", nil)
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, catalogReq)
+	if strings.Contains(catalogRes.Body.String(), "vendor.delete") || strings.Contains(catalogRes.Body.String(), `"id":"upload"`) {
+		t.Fatalf("删除插件不应继续出现在 catalog 或残留独有分类: %s", catalogRes.Body.String())
+	}
+}
+
+func TestPluginDeletePreservesUserCategoryThatOnlySharesID(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.keepcategory", "1.0.0")
+	writeTestRootConfigWithCategories(t, baseReg.BaseDir, []config.Category{{ID: "demo", Name: "演示"}, {ID: "upload", Name: "用户自定义上传分类", Description: "手写分类不应因 ID 相同被删除"}})
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	handler := NewHandler(reg)
+	disableRes := httptest.NewRecorder()
+	handler.ServeHTTP(disableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.keepcategory/disable", nil))
+	if disableRes.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", disableRes.Code, disableRes.Body.String())
+	}
+	deleteRes := httptest.NewRecorder()
+
+	handler.ServeHTTP(deleteRes, httptest.NewRequest(http.MethodDelete, "/api/plugins/vendor.keepcategory", nil))
+
+	if deleteRes.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, body = %s", deleteRes.Code, deleteRes.Body.String())
+	}
+	rootConfig, err := os.ReadFile(filepath.Join(reg.BaseDir, "configs", "ops.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootText := string(rootConfig)
+	if !strings.Contains(rootText, "id: upload") || !strings.Contains(rootText, "用户自定义上传分类") {
+		t.Fatalf("删除插件不应误删用户手写的非插件分类: %s", rootText)
+	}
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if !strings.Contains(catalogRes.Body.String(), `"id":"upload"`) || strings.Contains(catalogRes.Body.String(), "vendor.keepcategory") {
+		t.Fatalf("catalog 应保留用户分类并移除插件: %s", catalogRes.Body.String())
+	}
+}
+
+func TestPluginDeleteKeepsSharedCategoryWhenEnabledPluginStillUsesIt(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.deleteshared", "1.0.0")
+	installTestPlugin(t, baseReg.BaseDir, "vendor.keepshared", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	handler := NewHandler(reg)
+	disableRes := httptest.NewRecorder()
+	handler.ServeHTTP(disableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.deleteshared/disable", nil))
+	if disableRes.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", disableRes.Code, disableRes.Body.String())
+	}
+	deleteRes := httptest.NewRecorder()
+
+	handler.ServeHTTP(deleteRes, httptest.NewRequest(http.MethodDelete, "/api/plugins/vendor.deleteshared", nil))
+
+	if deleteRes.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, body = %s", deleteRes.Code, deleteRes.Body.String())
+	}
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	body := catalogRes.Body.String()
+	if strings.Contains(body, "vendor.deleteshared") {
+		t.Fatalf("已删除插件不应继续出现在 catalog: %s", body)
+	}
+	if !strings.Contains(body, "vendor.keepshared.tool") || !strings.Contains(body, `"id":"upload"`) {
+		t.Fatalf("共享分类仍有启用插件使用时应保留: %s", body)
+	}
+}
+
+func TestPluginDeleteRejectsEnabledPlugin(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.enabled", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodDelete, "/api/plugins/vendor.enabled", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want bad request; body = %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "请先禁用") {
+		t.Fatalf("响应缺少先禁用提示: %s", res.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "plugins", "vendor.enabled")); err != nil {
+		t.Fatalf("未禁用插件不应被删除: %v", err)
+	}
+	rootConfig, err := os.ReadFile(filepath.Join(reg.BaseDir, "configs", "ops.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rootConfig), "vendor.enabled") {
+		t.Fatalf("删除失败不应写入或清理 disabled 配置: %s", rootConfig)
+	}
+}
+
+func TestPluginDisableDeleteRejectUnknownPlugin(t *testing.T) {
+	reg := testRegistry(t)
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.missing/disable", nil),
+		httptest.NewRequest(http.MethodDelete, "/api/plugins/vendor.missing", nil),
+	} {
+		res := httptest.NewRecorder()
+		NewHandler(reg).ServeHTTP(res, req)
+		if res.Code != http.StatusNotFound {
+			t.Fatalf("%s %s status = %d, want not found; body = %s", req.Method, req.URL.Path, res.Code, res.Body.String())
+		}
+	}
+}
+
+func TestPluginDisableDeleteRejectUnsafePluginID(t *testing.T) {
+	reg := testRegistry(t)
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/api/plugins/vendor%2Fevil/disable", nil),
+		httptest.NewRequest(http.MethodDelete, "/api/plugins/vendor%2Fevil", nil),
+	} {
+		res := httptest.NewRecorder()
+		NewHandler(reg).ServeHTTP(res, req)
+		if res.Code != http.StatusBadRequest {
+			t.Fatalf("%s %s status = %d, want bad request; body = %s", req.Method, req.URL.Path, res.Code, res.Body.String())
+		}
+		if !strings.Contains(res.Body.String(), "不安全路径字符") {
+			t.Fatalf("响应缺少插件 ID 安全提示: %s", res.Body.String())
+		}
+	}
+}
+
+func TestPluginDisableRollsBackConfigOnReloadFailure(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.rollback", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	installTestPlugin(t, baseReg.BaseDir, "vendor.reloadbad", "1.0.0")
+	if err := os.WriteFile(filepath.Join(reg.BaseDir, "plugins", "vendor.reloadbad", "plugin.yaml"), []byte("id: ../bad\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.rollback/disable", nil))
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want bad request; body = %s", res.Code, res.Body.String())
+	}
+	rootConfig, err := os.ReadFile(filepath.Join(reg.BaseDir, "configs", "ops.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rootConfig), "vendor.rollback") {
+		t.Fatalf("刷新失败时应回滚 disabled 配置: %s", rootConfig)
+	}
+}
+
+func TestPluginDeleteKeepsDisabledConfigOnDeleteFailure(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.deletefail", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	handler := NewHandler(reg)
+	disableRes := httptest.NewRecorder()
+	handler.ServeHTTP(disableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.deletefail/disable", nil))
+	if disableRes.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", disableRes.Code, disableRes.Body.String())
+	}
+	if err := os.Remove(filepath.Join(reg.BaseDir, "plugins", "vendor.deletefail", "plugin.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	deleteRes := httptest.NewRecorder()
+
+	handler.ServeHTTP(deleteRes, httptest.NewRequest(http.MethodDelete, "/api/plugins/vendor.deletefail", nil))
+
+	if deleteRes.Code != http.StatusBadRequest {
+		t.Fatalf("delete status = %d, want bad request; body = %s", deleteRes.Code, deleteRes.Body.String())
+	}
+	rootConfig, err := os.ReadFile(filepath.Join(reg.BaseDir, "configs", "ops.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rootConfig), "vendor.deletefail") {
+		t.Fatalf("删除失败时应保留 disabled 配置: %s", rootConfig)
+	}
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "plugins", "vendor.deletefail")); err != nil {
+		t.Fatalf("删除失败时不应移除插件目录: %v", err)
+	}
+}
+
+func TestPluginRoutesPreserveUploadUserWorkflowActionsDeleteAndExport(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	uploadRes := httptest.NewRecorder()
+
+	handler.ServeHTTP(uploadRes, pluginUploadRequest(t, pluginZip(t, "vendor.route", "1.0.0", false), false))
+
+	if uploadRes.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", uploadRes.Code, uploadRes.Body.String())
+	}
+	exportRes := httptest.NewRecorder()
+	handler.ServeHTTP(exportRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.route.zip", nil))
+	if exportRes.Code != http.StatusOK {
+		t.Fatalf("plugin export status = %d, body = %s", exportRes.Code, exportRes.Body.String())
+	}
+	if contentType := exportRes.Header().Get("Content-Type"); contentType != "application/zip" {
+		t.Fatalf("export Content-Type = %q, want application/zip", contentType)
+	}
+	disableRes := httptest.NewRecorder()
+	handler.ServeHTTP(disableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.route/disable", nil))
+	if disableRes.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", disableRes.Code, disableRes.Body.String())
+	}
+	enableRes := httptest.NewRecorder()
+	handler.ServeHTTP(enableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.route/enable", nil))
+	if enableRes.Code != http.StatusOK {
+		t.Fatalf("enable status = %d, body = %s", enableRes.Code, enableRes.Body.String())
+	}
+	disableAgainRes := httptest.NewRecorder()
+	handler.ServeHTTP(disableAgainRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.route/disable", nil))
+	if disableAgainRes.Code != http.StatusOK {
+		t.Fatalf("disable-again status = %d, body = %s", disableAgainRes.Code, disableAgainRes.Body.String())
+	}
+	deleteRes := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRes, httptest.NewRequest(http.MethodDelete, "/api/plugins/vendor.route", nil))
+	if deleteRes.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, body = %s", deleteRes.Code, deleteRes.Body.String())
+	}
+	workflowRes := httptest.NewRecorder()
+	handler.ServeHTTP(workflowRes, httptest.NewRequest(http.MethodGet, "/api/plugins/user-workflows.zip", nil))
+	if workflowRes.Code != http.StatusOK {
+		t.Fatalf("user workflow export status = %d, body = %s", workflowRes.Code, workflowRes.Body.String())
+	}
+	if contentType := workflowRes.Header().Get("Content-Type"); contentType != "application/zip" {
+		t.Fatalf("Content-Type = %q, want application/zip", contentType)
+	}
+}
+
+func TestPluginDisableRejectsNonPostMethod(t *testing.T) {
+	reg := testRegistry(t)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.method/disable", nil))
+
+	if res.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want method not allowed; body = %s", res.Code, res.Body.String())
+	}
+}
+
+func TestPluginDeleteRejectsZipPath(t *testing.T) {
+	reg := testRegistry(t)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, httptest.NewRequest(http.MethodDelete, "/api/plugins/vendor.delete.zip", nil))
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want bad request; body = %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "请使用插件 ID") {
+		t.Fatalf("响应缺少插件 ID 提示: %s", res.Body.String())
 	}
 }
 
@@ -832,6 +1473,31 @@ menu:
       name: 演示
 `
 	if err := os.WriteFile(filepath.Join(configDir, "ops.yaml"), []byte(root), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeTestRootConfigWithCategories(t *testing.T, dir string, categories []config.Category) {
+	t.Helper()
+	configDir := filepath.Join(dir, "configs")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var builder strings.Builder
+	builder.WriteString("app:\n  name: Test Ops\npaths:\n  tools: []\n  workflows: []\n  runs: runs\n  logs: runs/logs\nplugins:\n  paths:\n    - plugins\n  strict: true\n  disabled: []\nmenu:\n  categories:\n")
+	for _, category := range categories {
+		builder.WriteString("    - id: ")
+		builder.WriteString(category.ID)
+		builder.WriteString("\n      name: ")
+		builder.WriteString(category.Name)
+		builder.WriteString("\n")
+		if category.Description != "" {
+			builder.WriteString("      description: ")
+			builder.WriteString(category.Description)
+			builder.WriteString("\n")
+		}
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "ops.yaml"), []byte(builder.String()), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

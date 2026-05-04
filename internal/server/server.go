@@ -548,10 +548,16 @@ printf '确认\n确认\n' | ./bin/opsctl.exe run workflow plugin.template.mainte
 type catalogResponse struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
-	Categories  []config.Category      `json:"categories"`
+	Categories  []categoryCatalogEntry `json:"categories"`
 	Tools       []toolCatalogEntry     `json:"tools"`
 	Workflows   []workflowCatalogEntry `json:"workflows"`
 	Plugins     []pluginCatalogEntry   `json:"plugins"`
+}
+
+type categoryCatalogEntry struct {
+	config.Category
+	Disabled bool             `json:"disabled"`
+	Source   *registry.Source `json:"source,omitempty"`
 }
 
 type toolCatalogEntry struct {
@@ -575,6 +581,7 @@ type pluginCatalogEntry struct {
 	Name        string `json:"name"`
 	Version     string `json:"version"`
 	Description string `json:"description,omitempty"`
+	Disabled    bool   `json:"disabled"`
 }
 
 type runRequest struct {
@@ -914,11 +921,23 @@ func userWorkflowPluginExportHandler(state *serverState) http.HandlerFunc {
 
 func pluginDownloadHandler(state *serverState) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
+		name := strings.TrimPrefix(req.URL.Path, "/api/plugins/")
+		if strings.HasSuffix(name, "/disable") {
+			handlePluginDisable(w, req, state, strings.TrimSuffix(name, "/disable"))
+			return
+		}
+		if strings.HasSuffix(name, "/enable") {
+			handlePluginEnable(w, req, state, strings.TrimSuffix(name, "/enable"))
+			return
+		}
+		if req.Method == http.MethodDelete {
+			handlePluginDelete(w, req, state, strings.Trim(name, "/"))
+			return
+		}
 		if req.Method != http.MethodGet {
 			methodNotAllowed(w)
 			return
 		}
-		name := strings.TrimPrefix(req.URL.Path, "/api/plugins/")
 		pluginID, ok := strings.CutSuffix(name, ".zip")
 		if !ok || strings.TrimSpace(pluginID) == "" {
 			writeJSON(w, http.StatusNotFound, response{Error: "not found"})
@@ -1037,12 +1056,9 @@ func registerWeb(mux *http.ServeMux) {
 }
 
 func buildCatalog(reg *registry.Registry) catalogResponse {
-	out := catalogResponse{Name: reg.Root.DisplayName(), Description: reg.Root.DisplayDescription(), Categories: reg.Root.DisplayCategories()}
-	for _, pkg := range installedPluginPackages(reg) {
-		if !registryKnowsPlugin(reg, pkg) {
-			continue
-		}
-		out.Plugins = append(out.Plugins, pluginCatalogEntry{ID: pkg.Manifest.ID, Name: pkg.Manifest.Name, Version: pkg.Manifest.Version, Description: pkg.Manifest.Description})
+	out := catalogResponse{Name: reg.Root.DisplayName(), Description: reg.Root.DisplayDescription(), Categories: catalogCategoryEntries(reg)}
+	for _, item := range catalogPluginEntries(reg) {
+		out.Plugins = append(out.Plugins, item)
 	}
 	for _, tool := range reg.Tools {
 		out.Tools = append(out.Tools, toolCatalogEntry{ToolEntry: tool.Entry, Tags: tool.Config.Tags, Parameters: tool.Config.Parameters, Confirm: tool.Config.Confirm, Source: tool.Source})
@@ -1051,6 +1067,65 @@ func buildCatalog(reg *registry.Registry) catalogResponse {
 		out.Workflows = append(out.Workflows, workflowCatalogEntry{WorkflowRef: wf.Entry, Tags: wf.Config.Tags, Parameters: wf.Config.Parameters, Confirm: effectiveWorkflowConfirm(reg, wf.Config), Source: wf.Source})
 	}
 	return out
+}
+
+func catalogCategoryEntries(reg *registry.Registry) []categoryCatalogEntry {
+	entries := []categoryCatalogEntry{}
+	seen := map[string]bool{}
+	activeCategories := map[string]bool{}
+	for _, tool := range reg.Tools {
+		if tool.Entry.Category != "" {
+			activeCategories[tool.Entry.Category] = true
+		}
+	}
+	for _, wf := range reg.Workflows {
+		if wf.Entry.Category != "" {
+			activeCategories[wf.Entry.Category] = true
+		}
+	}
+	disabledCategories := map[string]config.Category{}
+	disabledSources := map[string]registry.Source{}
+	disabledOrder := []string{}
+	for _, pkg := range installedAnyPluginPackages(reg) {
+		if !pluginDisabled(reg.Root.Plugins.Disabled, pkg) {
+			continue
+		}
+		source := registry.Source{Type: "plugin", PluginID: pkg.Manifest.ID, PluginName: pkg.Manifest.Name, PluginVersion: pkg.Manifest.Version}
+		for _, category := range pkg.Manifest.Contributes.Categories {
+			if category.ID == "" || activeCategories[category.ID] {
+				continue
+			}
+			if _, exists := disabledCategories[category.ID]; !exists {
+				disabledOrder = append(disabledOrder, category.ID)
+			}
+			disabledCategories[category.ID] = category
+			disabledSources[category.ID] = source
+		}
+	}
+	for _, category := range reg.Root.DisplayCategories() {
+		if category.ID == "" || seen[category.ID] {
+			continue
+		}
+		entry := categoryCatalogEntry{Category: category}
+		if source, ok := disabledSources[category.ID]; ok && !activeCategories[category.ID] {
+			sourceCopy := source
+			entry.Disabled = true
+			entry.Source = &sourceCopy
+		}
+		entries = append(entries, entry)
+		seen[category.ID] = true
+	}
+	for _, id := range disabledOrder {
+		if seen[id] {
+			continue
+		}
+		category := disabledCategories[id]
+		source := disabledSources[id]
+		sourceCopy := source
+		entries = append(entries, categoryCatalogEntry{Category: category, Disabled: true, Source: &sourceCopy})
+		seen[id] = true
+	}
+	return entries
 }
 
 func effectiveWorkflowConfirm(reg *registry.Registry, wf *config.WorkflowConfig) config.Confirmation {

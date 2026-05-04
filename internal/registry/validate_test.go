@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -167,6 +168,34 @@ func TestValidateWorkflowAcceptsEmbeddedLoopNode(t *testing.T) {
 		Nodes: []config.WorkflowNode{
 			{ID: "loop", Type: config.WorkflowNodeTypeLoop, Loop: config.WorkflowLoop{Tool: "demo.tool", MaxIterations: 3, Params: map[string]interface{}{"name": "{{ .name }}"}}},
 		},
+	}
+
+	if err := reg.ValidateWorkflow(wf); err != nil {
+		t.Fatalf("ValidateWorkflow error = %v", err)
+	}
+}
+
+func TestValidateWorkflowAcceptsPluginDemoAllNodesExample(t *testing.T) {
+	wf, err := config.LoadWorkflow(filepath.Join("..", "..", "plugins", "plugin.demo", "workflows", "all-nodes-example.yaml"))
+	if err != nil {
+		t.Fatalf("LoadWorkflow error = %v", err)
+	}
+	reg := &Registry{Tools: map[string]*Tool{"plugin.demo.greet": {}}}
+
+	if err := reg.ValidateWorkflow(wf); err != nil {
+		t.Fatalf("ValidateWorkflow error = %v", err)
+	}
+}
+
+func TestValidateWorkflowAcceptsLegacyLoopTargetDraft(t *testing.T) {
+	reg := &Registry{Tools: map[string]*Tool{"demo.tool": {}}}
+	wf := &config.WorkflowConfig{
+		ID: "demo.loop",
+		Nodes: []config.WorkflowNode{
+			{ID: "loop", Type: config.WorkflowNodeTypeLoop, Loop: config.WorkflowLoop{Target: "body", MaxIterations: 2}},
+			{ID: "body", Type: config.WorkflowNodeTypeTool, Tool: "demo.tool"},
+		},
+		Edges: []config.WorkflowEdge{{From: "loop", To: "body"}},
 	}
 
 	if err := reg.ValidateWorkflow(wf); err != nil {

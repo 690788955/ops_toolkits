@@ -6,19 +6,20 @@ import (
 )
 
 type RootConfig struct {
-	App         AppConfig      `yaml:"app" json:"app"`
-	Paths       PathsConfig    `yaml:"paths" json:"paths"`
-	Server      ServerConfig   `yaml:"server" json:"server"`
-	Menu        MenuConfig     `yaml:"menu" json:"menu"`
-	Registry    RegistryConfig `yaml:"registry" json:"registry"`
-	Plugins     PluginsConfig  `yaml:"plugins" json:"plugins"`
-	UI          UIConfig       `yaml:"ui" json:"ui"`
-	Name        string         `yaml:"name" json:"-"`
-	Description string         `yaml:"description" json:"-"`
-	Categories  []Category     `yaml:"categories" json:"-"`
-	Tools       []ToolEntry    `yaml:"tools" json:"-"`
-	Workflows   []WorkflowRef  `yaml:"workflows" json:"-"`
-	HTTP        HTTPConfig     `yaml:"http" json:"-"`
+	App               AppConfig      `yaml:"app" json:"app"`
+	Paths             PathsConfig    `yaml:"paths" json:"paths"`
+	Server            ServerConfig   `yaml:"server" json:"server"`
+	Menu              MenuConfig     `yaml:"menu" json:"menu"`
+	Registry          RegistryConfig `yaml:"registry" json:"registry"`
+	Plugins           PluginsConfig  `yaml:"plugins" json:"plugins"`
+	UI                UIConfig       `yaml:"ui" json:"ui"`
+	Name              string         `yaml:"name" json:"-"`
+	Description       string         `yaml:"description" json:"-"`
+	Categories        []Category     `yaml:"categories" json:"-"`
+	Tools             []ToolEntry    `yaml:"tools" json:"-"`
+	Workflows         []WorkflowRef  `yaml:"workflows" json:"-"`
+	HTTP              HTTPConfig     `yaml:"http" json:"-"`
+	RuntimeCategories []Category     `yaml:"-" json:"-"`
 }
 
 type AppConfig struct {
@@ -216,10 +217,29 @@ func (c RootConfig) DisplayDescription() string {
 }
 
 func (c RootConfig) DisplayCategories() []Category {
-	if len(c.Menu.Categories) > 0 {
-		return c.Menu.Categories
+	base := c.Menu.Categories
+	if len(base) == 0 {
+		base = c.Categories
 	}
-	return c.Categories
+	if len(c.RuntimeCategories) == 0 {
+		return base
+	}
+	out := make([]Category, 0, len(base)+len(c.RuntimeCategories))
+	seen := map[string]bool{}
+	for _, category := range base {
+		out = append(out, category)
+		if category.ID != "" {
+			seen[category.ID] = true
+		}
+	}
+	for _, category := range c.RuntimeCategories {
+		if category.ID == "" || seen[category.ID] {
+			continue
+		}
+		out = append(out, category)
+		seen[category.ID] = true
+	}
+	return out
 }
 
 func (c RootConfig) ListenAddr() string {

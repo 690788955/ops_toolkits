@@ -192,9 +192,18 @@ function App() {
   async function refreshCatalog(options = {}) {
     const body = await fetchJSON('/api/catalog')
     const data = body.data
+    const categories = data.categories || []
+    const disabledCategoryIDs = new Set(categories.filter(item => item.disabled).map(item => item.id))
+    const categoryIDs = new Set(categories.map(item => item.id))
+    const entryIDs = new Set([...(data.tools || []), ...(data.workflows || [])].map(item => item.id))
     setCatalog(data)
-    if (options.keepCategory) return data
-    setActiveCategory(current => current || '')
+    setActiveCategory(current => current && (disabledCategoryIDs.has(current) || !categoryIDs.has(current)) ? '' : current || '')
+    setSelected(current => {
+      if (!current) return current
+      if (current.category && disabledCategoryIDs.has(current.category)) return null
+      if (current.id && !entryIDs.has(current.id)) return null
+      return current
+    })
     return data
   }
 
@@ -211,12 +220,14 @@ function App() {
     return catalog?.categories?.find(item => item.id === activeCategory)
   }, [catalog, activeCategory])
 
+  const categoryDisabled = Boolean(category?.disabled)
+
   const sourceEntries = useMemo(() => {
-    if (!catalog) return []
+    if (!catalog || categoryDisabled) return []
     const source = activeTab === 'tools' ? catalog.tools || [] : catalog.workflows || []
     if (!activeCategory) return source
     return source.filter(item => item.category === activeCategory)
-  }, [catalog, activeCategory, activeTab])
+  }, [catalog, activeCategory, activeTab, categoryDisabled])
 
   const availableTags = useMemo(() => tagsForEntries(sourceEntries), [sourceEntries])
 
@@ -281,16 +292,22 @@ function App() {
             <span>全局工作流</span>
             <small>跨分类选择所有可见工具和工作流</small>
           </button>
-          {(catalog.categories || []).map(item => (
-            <button
-              key={item.id}
-              className={item.id === activeCategory ? 'category active' : 'category'}
-              onClick={() => { setActiveCategory(item.id); setSelected(null); setActiveTag(''); resetResult() }}
-            >
-              <span>{item.name || item.id}</span>
-              <small>{item.description}</small>
-            </button>
-          ))}
+          {(catalog.categories || []).map(item => {
+            const disabled = Boolean(item.disabled)
+            return (
+              <button
+                key={item.id}
+                className={`${item.id === activeCategory ? 'category active' : 'category'}${disabled ? ' disabled' : ''}`}
+                disabled={disabled}
+                aria-disabled={disabled}
+                title={disabled ? `插件 ${item.source?.plugin_name || item.source?.plugin_id || ''} 已禁用，此分类暂不可用` : undefined}
+                onClick={() => { setActiveCategory(item.id); setSelected(null); setActiveTag(''); resetResult() }}
+              >
+                <span>{item.name || item.id}</span>
+                <small>{disabled ? `插件已禁用：${item.source?.plugin_name || item.source?.plugin_id || '未知插件'}` : item.description}</small>
+              </button>
+            )
+          })}
         </div>
         <button className="pluginAction" onClick={() => setPluginModalOpen(true)} title="插件管理">+</button>
       </aside>
@@ -333,17 +350,23 @@ function App() {
             await refreshCatalog({keepCategory: true})
             setResult({message: JSON.stringify(body, null, 2)})
           }}
+          onChanged={async body => {
+            await refreshCatalog({keepCategory: true})
+            setResult({message: summarizeAPIResponse(body, '插件状态已更新。'), response: body})
+          }}
         />
       )}
     </div>
   )
 }
 
-function PluginManagerModal({catalog, state, setState, onClose, onUploaded}) {
+function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onChanged}) {
   const [file, setFile] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [exportModalOpen, setExportModalOpen] = useState(false)
-  const exportablePlugins = useMemo(() => [...(catalog?.plugins || [])].sort((left, right) => String(left.id || '').localeCompare(String(right.id || ''), 'zh-CN')), [catalog])
+  const [pluginActionID, setPluginActionID] = useState('')
+  const plugins = useMemo(() => [...(catalog?.plugins || [])].sort((left, right) => String(left.id || '').localeCompare(String(right.id || ''), 'zh-CN')), [catalog])
+  const exportablePlugins = useMemo(() => plugins.filter(item => !item.disabled), [plugins])
 
   async function uploadPlugin(replace = false) {
     if (!file) {
@@ -368,13 +391,59 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded}) {
     }
   }
 
+  async function disablePlugin(pluginID) {
+    if (!pluginID) return
+    setPluginActionID(pluginID)
+    setState({message: `正在禁用插件 ${pluginID}...`})
+    try {
+      const body = await postJSON(`/api/plugins/${encodeURIComponent(pluginID)}/disable`, {})
+      setState({message: `插件 ${pluginID} 已禁用，可在确认影响后删除。`, response: body})
+      await onChanged(body)
+    } catch (err) {
+      setState({message: readableAPIError(err, '禁用插件失败。'), response: err.body})
+    } finally {
+      setPluginActionID('')
+    }
+  }
+
+  async function enablePlugin(pluginID) {
+    if (!pluginID) return
+    setPluginActionID(pluginID)
+    setState({message: `正在启用插件 ${pluginID}...`})
+    try {
+      const body = await postJSON(`/api/plugins/${encodeURIComponent(pluginID)}/enable`, {})
+      setState({message: `插件 ${pluginID} 已启用。`, response: body})
+      await onChanged(body)
+    } catch (err) {
+      setState({message: readableAPIError(err, '启用插件失败。'), response: err.body})
+    } finally {
+      setPluginActionID('')
+    }
+  }
+
+  async function deletePlugin(pluginID) {
+    if (!pluginID) return
+    if (!window.confirm(`将永久删除插件 ${pluginID} 的插件目录。此操作不会删除运行日志，但无法撤销。是否继续？`)) return
+    setPluginActionID(pluginID)
+    setState({message: `正在删除插件 ${pluginID}...`})
+    try {
+      const body = await deleteJSON(`/api/plugins/${encodeURIComponent(pluginID)}`)
+      setState({message: `插件 ${pluginID} 已删除。`, response: body})
+      await onChanged(body)
+    } catch (err) {
+      setState({message: readableAPIError(err, '删除插件失败。'), response: err.body})
+    } finally {
+      setPluginActionID('')
+    }
+  }
+
   return (
     <div className="modalBackdrop" onClick={onClose}>
       <div className="modal" onClick={event => event.stopPropagation()}>
         <div className="modalHeader">
           <div>
             <h3>插件管理</h3>
-            <p>下载插件模板或上传一个插件 ZIP 包，底部提供插件导出等其他选项。</p>
+            <p>下载插件模板、上传插件 ZIP，或按“先禁用、再删除”的流程管理已安装插件。</p>
           </div>
           <button className="modalClose" onClick={onClose}>×</button>
         </div>
@@ -395,6 +464,33 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded}) {
             </div>
             <a className="secondary downloadTemplate" href="/api/plugins/user-workflows.zip">导出用户工作流插件</a>
             <button className="secondary downloadTemplate" type="button" onClick={() => setExportModalOpen(true)}>导出已安装插件</button>
+          </section>
+          <section className="pluginInstalledListSection">
+            <div>
+              <strong>已安装插件</strong>
+              <span>启用插件需先禁用；禁用后可执行删除。</span>
+            </div>
+            <div className="pluginExportList">
+              {plugins.map(item => (
+                <div className={item.disabled ? 'pluginExportItem pluginDisabled' : 'pluginExportItem'} key={item.id}>
+                  <div>
+                    <strong>{item.name || item.id}</strong>
+                    <span>{item.id}@{item.version || '-'}</span>
+                    <small>{item.disabled ? '状态：已禁用' : '状态：启用中'}</small>
+                    {item.description && <small>{item.description}</small>}
+                  </div>
+                  {item.disabled ? (
+                    <div className="buttonRow pluginItemActions">
+                      <button className="secondary" disabled={pluginActionID === item.id} onClick={() => enablePlugin(item.id)}>启用</button>
+                      <button className="secondary danger" disabled={pluginActionID === item.id} onClick={() => deletePlugin(item.id)}>删除</button>
+                    </div>
+                  ) : (
+                    <button className="secondary" disabled={pluginActionID === item.id} onClick={() => disablePlugin(item.id)}>禁用</button>
+                  )}
+                </div>
+              ))}
+              {plugins.length === 0 && <div className="empty small">当前没有已安装插件。</div>}
+            </div>
           </section>
         </div>
         <pre className="modalResult">{state.response ? JSON.stringify(state.response, null, 2) : state.message}</pre>
@@ -1211,7 +1307,7 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
             <select value={workflow.category || 'global'} onChange={event => updateWorkflowCategory(event.target.value)} disabled={Boolean(activeCategory)}>
               {!activeCategory && <option value="global">全局工作流（可选择全部工具）</option>}
               {(catalog.categories || [])
-                .filter(item => !activeCategory || item.id === activeCategory)
+                .filter(item => !item.disabled && (!activeCategory || item.id === activeCategory))
                 .map(item => <option key={item.id} value={item.id}>{item.name || item.id}（仅当前分类工具）</option>)}
             </select>
           </label>
@@ -2684,6 +2780,18 @@ async function postJSON(path, payload) {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(payload)
   })
+  const body = await res.json()
+  if (!res.ok) {
+    const err = new Error(body.error || res.statusText)
+    err.status = res.status
+    err.body = body
+    throw err
+  }
+  return body
+}
+
+async function deleteJSON(path) {
+  const res = await fetch(path, {method: 'DELETE'})
   const body = await res.json()
   if (!res.ok) {
     const err = new Error(body.error || res.statusText)

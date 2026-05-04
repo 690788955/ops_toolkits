@@ -247,12 +247,12 @@ func (r *Registry) addCategory(category config.Category) {
 	if category.ID == "" {
 		return
 	}
-	for _, existing := range r.Root.Menu.Categories {
+	for _, existing := range r.Root.DisplayCategories() {
 		if existing.ID == category.ID {
 			return
 		}
 	}
-	r.Root.Menu.Categories = append(r.Root.Menu.Categories, category)
+	r.Root.RuntimeCategories = append(r.Root.RuntimeCategories, category)
 }
 
 func normalizePluginTool(pkg plugin.Package, contributed plugin.Tool) (*config.ToolConfig, string, error) {

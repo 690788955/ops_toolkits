@@ -124,22 +124,24 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		if node.Condition.Input != "" || len(node.Condition.Cases) > 0 || node.Condition.DefaultCase != "" {
 			return fmt.Errorf("循环节点 %s 不能配置 condition", node.ID)
 		}
-		loopTool := node.Loop.Tool
-		if loopTool == "" && node.Loop.Target != "" {
-			targetNode, ok := nodes[node.Loop.Target]
-			if !ok {
+		if node.Loop.Target != "" {
+			if node.Loop.Tool != "" {
+				return fmt.Errorf("循环节点 %s 不能同时配置 loop.tool 和 loop.target", node.ID)
+			}
+			if targetNode, ok := nodes[node.Loop.Target]; ok {
+				if effectiveNodeType(targetNode) != config.WorkflowNodeTypeTool || targetNode.Tool == "" {
+					return fmt.Errorf("循环节点 %s 的 loop.target 必须引用工具节点", node.ID)
+				}
+				node.Loop.Tool = targetNode.Tool
+			} else {
 				return fmt.Errorf("循环节点 %s 的 loop.target 引用了不存在的节点 %s", node.ID, node.Loop.Target)
 			}
-			if effectiveNodeType(targetNode) != config.WorkflowNodeTypeTool || targetNode.Tool == "" {
-				return fmt.Errorf("循环节点 %s 的 loop.target 必须引用工具节点", node.ID)
-			}
-			loopTool = targetNode.Tool
 		}
-		if loopTool == "" {
+		if node.Loop.Tool == "" {
 			return fmt.Errorf("循环节点 %s 的 loop.tool 必填", node.ID)
 		}
-		if _, ok := r.Tools[loopTool]; !ok {
-			return fmt.Errorf("循环节点 %s 引用了不存在的工具 %s", node.ID, loopTool)
+		if _, ok := r.Tools[node.Loop.Tool]; !ok {
+			return fmt.Errorf("循环节点 %s 引用了不存在的工具 %s", node.ID, node.Loop.Tool)
 		}
 		if node.Loop.MaxIterations < 1 || node.Loop.MaxIterations > 20 {
 			return fmt.Errorf("循环节点 %s 的 loop.max_iterations 必须在 1..20 之间", node.ID)

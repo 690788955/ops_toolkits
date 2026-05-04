@@ -106,6 +106,7 @@ Contract details:
 - Workflow-level confirmation scans must ignore condition/control nodes and only prompt for registered tool nodes.
 - `type: loop` is an executable control node that owns its repeated tool config in `loop.tool`, `loop.params`, and `loop.max_iterations`; new workflows must not model loop execution by pointing `loop.target` at a separate canvas tool node.
 - Loop nodes must not set top-level `tool` or `condition`. `loop.tool` must reference a registered tool, and `loop.max_iterations` must be between 1 and 20.
+- Loop nodes must not set `loop.tool` and `loop.target` at the same time; mixed configuration is rejected to avoid ambiguous execution sources.
 - Runner executes `loop.tool` sequentially for `loop.max_iterations`; `loop.params` are rendered with the same workflow context as tool-node params. Any failed iteration stops the loop and fails the workflow.
 - Defensive backward compatibility may read old `loop.target` drafts, but examples, UI guidance, validation tests, and docs should use embedded `loop.tool` + `loop.params` only.
 
