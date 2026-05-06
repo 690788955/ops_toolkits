@@ -605,6 +605,8 @@ func TestPluginExportRejectsUnsafePluginIDRequest(t *testing.T) {
 	}
 }
 
+// 以下测试针对已废弃的业务配置机制，已注释
+/*
 func TestPluginHostConfigGetMissingReturnsEmpty(t *testing.T) {
 	baseReg := testRegistry(t)
 	installTestPlugin(t, baseReg.BaseDir, "vendor.config", "1.0.0")
@@ -788,7 +790,7 @@ func TestPluginHostConfigAllowsDisabledPlugin(t *testing.T) {
 		t.Fatalf("禁用插件配置未写入: %v", err)
 	}
 }
-
+*/
 
 func TestPluginDisableAddsConfigAndRefreshesCatalog(t *testing.T) {
 	baseReg := testRegistry(t)
@@ -1270,11 +1272,7 @@ func TestPluginRoutesPreserveUploadUserWorkflowActionsDeleteAndExport(t *testing
 	if contentType := exportRes.Header().Get("Content-Type"); contentType != "application/zip" {
 		t.Fatalf("export Content-Type = %q, want application/zip", contentType)
 	}
-	configRes := httptest.NewRecorder()
-	handler.ServeHTTP(configRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.route/config", nil))
-	if configRes.Code != http.StatusOK {
-		t.Fatalf("config status = %d, body = %s", configRes.Code, configRes.Body.String())
-	}
+	// 配置路由已移除，业务配置已废弃
 	disableRes := httptest.NewRecorder()
 	handler.ServeHTTP(disableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.route/disable", nil))
 	if disableRes.Code != http.StatusOK {

@@ -1197,92 +1197,18 @@ function GlobalEnvConfigPanel({onBack, onSaved}) {
 }
 
 function PluginConfigPanel({plugin, onBack, onSaved}) {
-  const [activeTab, setActiveTab] = useState('config') // 'config' or 'files'
-  const [content, setContent] = useState('')
-  const [path, setPath] = useState('')
-  const [exists, setExists] = useState(false)
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState('正在读取插件配置...')
   const pluginID = plugin?.id || ''
-
-  useEffect(() => {
-    let cancelled = false
-    async function loadConfig() {
-      setLoading(true)
-      setMessage('正在读取插件配置...')
-      try {
-        const configBody = await fetchJSON(`/api/plugins/${encodeURIComponent(pluginID)}/config`)
-        if (cancelled) return
-        setContent(configBody.data?.content || '')
-        setPath(configBody.data?.path || `configs/plugins/${pluginID}.yaml`)
-        setExists(Boolean(configBody.data?.exists))
-        setMessage(configBody.data?.exists ? '已加载现有宿主配置。' : '当前还没有宿主配置文件，保存后会创建。')
-      } catch (err) {
-        if (!cancelled) setMessage(readableAPIError(err, '读取插件配置失败。'))
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-    if (pluginID) loadConfig()
-    return () => { cancelled = true }
-  }, [pluginID])
-
-  async function saveConfig() {
-    setSaving(true)
-    setMessage('正在保存插件配置...')
-    try {
-      const body = await putJSON(`/api/plugins/${encodeURIComponent(pluginID)}/config`, {content})
-      setExists(Boolean(body.data?.exists))
-      setPath(body.data?.path || path)
-      setMessage('插件业务配置已保存并刷新运行时配置。')
-      await onSaved(body)
-    } catch (err) {
-      setMessage(readableAPIError(err, '保存插件配置失败。'))
-    } finally {
-      setSaving(false)
-    }
-  }
 
   return (
     <div className="grid">
       <section className="card pluginConfigCard">
         <div className="cardHeader">
           <div>
-            <h3>维护插件配置</h3>
-            <p>{plugin.name || pluginID}：业务配置 {path || `configs/plugins/${pluginID}.yaml`}</p>
+            <h3>插件配置文件</h3>
+            <p>{plugin.name || pluginID}：管理插件工具使用的配置文件</p>
           </div>
         </div>
-        <div className="pluginConfigTabs">
-          <button
-            className={activeTab === 'config' ? 'active' : ''}
-            onClick={() => setActiveTab('config')}
-          >
-            业务配置
-          </button>
-          <button
-            className={activeTab === 'files' ? 'active' : ''}
-            onClick={() => setActiveTab('files')}
-          >
-            配置文件
-          </button>
-        </div>
-        {activeTab === 'config' ? (
-          <div className="pluginConfigEditor">
-            <div className="empty small">{exists ? '正在编辑已有业务配置文件。' : '无配置文件时可从空 YAML 开始，保存后创建。'}</div>
-            <label>
-              <span>YAML 内容</span>
-              <textarea value={content} disabled={loading || saving} placeholder="例如：&#10;service:&#10;  name: demo-service&#10;  endpoint: http://127.0.0.1:9200" onChange={event => setContent(event.target.value)} />
-            </label>
-            <div className="buttonRow">
-              <button className="primary" disabled={loading || saving} onClick={saveConfig}>保存业务配置</button>
-              <button className="secondary" disabled={saving} onClick={onBack}>返回列表</button>
-            </div>
-            <pre className="modalResult">{message}</pre>
-          </div>
-        ) : (
-          <PluginConfigFilesPanel pluginID={pluginID} onBack={onBack} />
-        )}
+        <PluginConfigFilesPanel pluginID={pluginID} onBack={onBack} />
       </section>
     </div>
   )

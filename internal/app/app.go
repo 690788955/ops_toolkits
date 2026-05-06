@@ -432,10 +432,6 @@ func toolConfigLayers(reg *registry.Registry, tool *registry.Tool) config.Values
 		config.MergeParameterDefaults(tool.Config.Parameters),
 		reg.GlobalEnv,
 		reg.Root.ConfigDefaults,
-		tool.Config.PluginConfig.SharedConfig,
-		tool.Config.PluginConfig.PackageDefaultConfig,
-		tool.Config.ConfigDefaults,
-		tool.Config.PluginConfig.HostConfig,
 	)
 }
 

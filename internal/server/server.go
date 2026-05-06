@@ -1126,32 +1126,7 @@ func pluginDownloadHandler(state *serverState) http.HandlerFunc {
 			handlePluginEnable(w, req, state, pluginID)
 			return
 		}
-		if pluginID, ok := strings.CutSuffix(name, "/config"); ok {
-			handlePluginConfig(w, req, state, pluginID)
-			return
-		}
-		// 版本管理路由
-		if parts := strings.Split(strings.Trim(name, "/"), "/"); len(parts) >= 2 && parts[len(parts)-2] == "versions" {
-			// /api/plugins/{id}/config/versions/{version}/default
-			if len(parts) >= 4 && parts[len(parts)-1] == "default" {
-				pluginID := strings.Join(parts[:len(parts)-4], "/")
-				version := parts[len(parts)-2]
-				handleSetDefaultVersion(w, req, state, "plugin", pluginID, version)
-				return
-			}
-			// /api/plugins/{id}/config/versions/{version}
-			if len(parts) >= 3 {
-				pluginID := strings.Join(parts[:len(parts)-3], "/")
-				version := parts[len(parts)-1]
-				handleConfigVersion(w, req, state, "plugin", pluginID, version)
-				return
-			}
-		}
-		if pluginID, ok := strings.CutSuffix(name, "/config/versions"); ok {
-			// /api/plugins/{id}/config/versions
-			handleConfigVersions(w, req, state, "plugin", pluginID)
-			return
-		}
+		// 版本管理路由已移除，业务配置已废弃
 		if req.Method == http.MethodDelete {
 			handlePluginDelete(w, req, state, strings.Trim(name, "/"))
 			return
