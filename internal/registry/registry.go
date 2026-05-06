@@ -37,6 +37,7 @@ type Registry struct {
 	Tools     map[string]*Tool
 	Workflows map[string]*Workflow
 	GlobalEnv config.Values
+	Warnings  []plugin.Warning
 }
 
 func Load(baseDir string) (*Registry, error) {
@@ -100,6 +101,16 @@ func (r *Registry) Workflow(id string) (*Workflow, error) {
 	return wf, nil
 }
 
+func (r *Registry) PluginWarnings(pluginID string) []plugin.Warning {
+	warnings := []plugin.Warning{}
+	for _, warning := range r.Warnings {
+		if warning.PluginID == pluginID {
+			warnings = append(warnings, warning)
+		}
+	}
+	return warnings
+}
+
 func (r *Registry) loadTools() error {
 	return r.loadToolsWithVersion("")
 }
@@ -137,16 +148,19 @@ func (r *Registry) loadPluginContributionsWithVersion(version string) error {
 	if err != nil {
 		return err
 	}
-	for _, warning := range result.Warnings {
-		fmt.Fprintf(os.Stderr, "插件加载警告: %s\n", warning)
-	}
+	r.Warnings = append(r.Warnings, result.Warnings...)
 	for _, pkg := range result.Packages {
 		categories, tools, workflows, err := r.buildPluginPackageWithVersion(pkg, version)
 		if err != nil {
 			if r.Root.Plugins.Strict {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "插件加载警告: %s\n", err)
+			r.Warnings = append(r.Warnings, plugin.Warning{
+				Code:       "PLUGIN_LOAD_SKIPPED",
+				PluginID:   pkg.Manifest.ID,
+				Message:    err.Error(),
+				Suggestion: "请修正插件配置、workflow 或工具声明后重新 validate。",
+			})
 			continue
 		}
 		for _, category := range categories {

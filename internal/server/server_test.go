@@ -496,6 +496,30 @@ func TestPluginUploadInstallsNewPluginAndRefreshesCatalog(t *testing.T) {
 	}
 }
 
+func TestPluginUploadReturnsWarningsAndCatalogIncludesWarnings(t *testing.T) {
+	reg := testRegistry(t)
+	req := pluginUploadRequest(t, pluginZipWithMissingConfig(t, "vendor.warnupload", "1.0.0"), false)
+	res := httptest.NewRecorder()
+	handler := NewHandler(reg)
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", res.Code, res.Body.String())
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, `"warnings"`) || !strings.Contains(body, "CONFIG_FILE_MISSING") {
+		t.Fatalf("上传响应缺少 warnings: %s", body)
+	}
+
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	catalogBody := catalogRes.Body.String()
+	if !strings.Contains(catalogBody, `"warnings"`) || !strings.Contains(catalogBody, "vendor.warnupload") || !strings.Contains(catalogBody, "CONFIG_FILE_MISSING") {
+		t.Fatalf("catalog 缺少插件 warnings: %s", catalogBody)
+	}
+}
+
 func TestPluginUploadAcceptsSinglePluginDirectoryEntry(t *testing.T) {
 	reg := testRegistry(t)
 	req := pluginUploadRequest(t, pluginZipWithDirs(t, "vendor.dir", "1.0.0"), false)
@@ -1596,6 +1620,20 @@ func pluginZip(t *testing.T, id, version string, renamedTool bool) []byte {
 	var body bytes.Buffer
 	writer := zip.NewWriter(&body)
 	manifest, script := pluginFiles(id, version, renamedTool)
+	writeZipFile(t, writer, id+"/plugin.yaml", manifest)
+	writeZipFile(t, writer, id+"/scripts/run.sh", script)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return body.Bytes()
+}
+
+func pluginZipWithMissingConfig(t *testing.T, id, version string) []byte {
+	t.Helper()
+	var body bytes.Buffer
+	writer := zip.NewWriter(&body)
+	manifest, script := pluginFiles(id, version, false)
+	manifest = strings.Replace(manifest, "      workdir: .\n", "      workdir: .\n      config_files:\n        - config/missing.conf\n", 1)
 	writeZipFile(t, writer, id+"/plugin.yaml", manifest)
 	writeZipFile(t, writer, id+"/scripts/run.sh", script)
 	if err := writer.Close(); err != nil {

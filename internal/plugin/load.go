@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -49,6 +50,7 @@ func Load(baseDir string, cfg config.PluginsConfig) (LoadResult, error) {
 				continue
 			}
 			result.Packages = append(result.Packages, pkg)
+			result.Warnings = append(result.Warnings, PackageWarnings(pkg)...)
 		}
 	}
 	return result, nil
@@ -173,6 +175,89 @@ func validateWorkflow(pkg Package, workflow Workflow, seen map[string]bool) erro
 	return nil
 }
 
+func PackageWarnings(pkg Package) []Warning {
+	warnings := []Warning{}
+	pluginID := pkg.Manifest.ID
+	if _, err := os.Stat(filepath.Join(pkg.Dir, "README.md")); os.IsNotExist(err) {
+		warnings = append(warnings, Warning{
+			Code:       "PLUGIN_README_MISSING",
+			PluginID:   pluginID,
+			Field:      "README.md",
+			Message:    fmt.Sprintf("插件 %s 缺少 README.md", pluginID),
+			Suggestion: "请在插件目录增加 README.md，说明功能、输入、输出、风险、回滚方式和联系人。",
+		})
+	}
+	if strings.TrimSpace(pkg.Manifest.Description) == "" {
+		warnings = append(warnings, Warning{
+			Code:       "PLUGIN_DESCRIPTION_MISSING",
+			PluginID:   pluginID,
+			Field:      "description",
+			Message:    fmt.Sprintf("插件 %s 缺少 description", pluginID),
+			Suggestion: "请在 plugin.yaml 顶层 description 描述插件用途，便于接入方理解。",
+		})
+	}
+	for _, tool := range pkg.Manifest.Contributes.Tools {
+		warnings = append(warnings, toolWarnings(pkg, tool)...)
+	}
+	return warnings
+}
+
+func toolWarnings(pkg Package, tool Tool) []Warning {
+	warnings := []Warning{}
+	pluginID := pkg.Manifest.ID
+	toolID := tool.ID
+	if strings.TrimSpace(tool.Description) == "" {
+		warnings = append(warnings, Warning{
+			Code:       "TOOL_DESCRIPTION_MISSING",
+			PluginID:   pluginID,
+			ToolID:     toolID,
+			Field:      "contributes.tools[].description",
+			Message:    fmt.Sprintf("插件工具 %s 缺少 description", toolID),
+			Suggestion: "请为工具补充 description，说明工具用途、影响范围或典型使用场景。",
+		})
+	}
+	for _, parameter := range tool.Parameters {
+		if strings.TrimSpace(parameter.Description) != "" {
+			continue
+		}
+		warnings = append(warnings, Warning{
+			Code:       "PARAM_DESCRIPTION_MISSING",
+			PluginID:   pluginID,
+			ToolID:     toolID,
+			Field:      "parameters." + parameter.Name + ".description",
+			Message:    fmt.Sprintf("插件工具 %s 的参数 %s 缺少 description", toolID, parameter.Name),
+			Suggestion: "请说明参数含义、示例值和对脚本行为的影响，方便页面展示和自助填写。",
+		})
+	}
+	if tool.Confirm.Required && utf8.RuneCountInString(strings.TrimSpace(tool.Confirm.Message)) < 6 {
+		warnings = append(warnings, Warning{
+			Code:       "CONFIRM_MESSAGE_TOO_SHORT",
+			PluginID:   pluginID,
+			ToolID:     toolID,
+			Field:      "confirm.message",
+			Message:    fmt.Sprintf("插件工具 %s 需要确认但 confirm.message 为空或过短", toolID),
+			Suggestion: "请写清影响范围、目标环境和是否可回滚，例如：确认重启生产集群？请先核对变更窗口和回滚方案。",
+		})
+	}
+	for _, cf := range tool.ConfigFiles {
+		path, err := SafePath(pkg.Dir, cf)
+		if err != nil {
+			continue
+		}
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			warnings = append(warnings, Warning{
+				Code:       "CONFIG_FILE_MISSING",
+				PluginID:   pluginID,
+				ToolID:     toolID,
+				Field:      "config_files",
+				Message:    fmt.Sprintf("插件工具 %s 声明的配置文件 %s 不存在", toolID, cf),
+				Suggestion: "请把该配置文件放入插件目录，或从 config_files 中移除未交付的声明。",
+			})
+		}
+	}
+	return warnings
+}
+
 func validateTemplateOutput(output string) error {
 	if filepath.IsAbs(output) {
 		return fmt.Errorf("不允许绝对路径 %s", output)
@@ -219,6 +304,10 @@ func handleLoadError(result *LoadResult, strict bool, err error) error {
 	if strict {
 		return err
 	}
-	result.Warnings = append(result.Warnings, err.Error())
+	result.Warnings = append(result.Warnings, Warning{
+		Code:       "PLUGIN_LOAD_SKIPPED",
+		Message:    err.Error(),
+		Suggestion: "请修正插件清单、路径或脚本文件后重新 validate。",
+	})
 	return nil
 }

@@ -603,6 +603,7 @@ type catalogResponse struct {
 	Tools       []toolCatalogEntry     `json:"tools"`
 	Workflows   []workflowCatalogEntry `json:"workflows"`
 	Plugins     []pluginCatalogEntry   `json:"plugins"`
+	Warnings    []plugin.Warning       `json:"warnings,omitempty"`
 }
 
 type categoryCatalogEntry struct {
@@ -629,11 +630,12 @@ type workflowCatalogEntry struct {
 }
 
 type pluginCatalogEntry struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Version     string `json:"version"`
-	Description string `json:"description,omitempty"`
-	Disabled    bool   `json:"disabled"`
+	ID          string           `json:"id"`
+	Name        string           `json:"name"`
+	Version     string           `json:"version"`
+	Description string           `json:"description,omitempty"`
+	Disabled    bool             `json:"disabled"`
+	Warnings    []plugin.Warning `json:"warnings,omitempty"`
 }
 
 type runRequest struct {
@@ -1309,7 +1311,7 @@ func registerWeb(mux *http.ServeMux) {
 }
 
 func buildCatalog(reg *registry.Registry) catalogResponse {
-	out := catalogResponse{Name: reg.Root.DisplayName(), Description: reg.Root.DisplayDescription(), Categories: buildCatalogCategories(reg)}
+	out := catalogResponse{Name: reg.Root.DisplayName(), Description: reg.Root.DisplayDescription(), Categories: buildCatalogCategories(reg), Warnings: reg.Warnings}
 	for _, item := range catalogPluginEntries(reg) {
 		out.Plugins = append(out.Plugins, item)
 	}

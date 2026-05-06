@@ -27,11 +27,12 @@ const (
 )
 
 type pluginUploadResult struct {
-	PluginID        string `json:"plugin_id"`
-	Version         string `json:"version"`
-	Status          string `json:"status"`
-	Existing        bool   `json:"existing"`
-	ExistingVersion string `json:"existing_version,omitempty"`
+	PluginID        string           `json:"plugin_id"`
+	Version         string           `json:"version"`
+	Status          string           `json:"status"`
+	Existing        bool             `json:"existing"`
+	ExistingVersion string           `json:"existing_version,omitempty"`
+	Warnings        []plugin.Warning `json:"warnings,omitempty"`
 }
 
 func pluginUploadHandler(state *serverState) http.HandlerFunc {
@@ -328,7 +329,7 @@ func installUploadedPlugin(state *serverState, data []byte, replace bool) (plugi
 	if err != nil {
 		return pluginUploadResult{}, err
 	}
-	result := pluginUploadResult{PluginID: pkg.Manifest.ID, Version: pkg.Manifest.Version}
+	result := pluginUploadResult{PluginID: pkg.Manifest.ID, Version: pkg.Manifest.Version, Warnings: plugin.PackageWarnings(pkg)}
 	pluginsRoot := firstPluginRoot(reg)
 	installDir := filepath.Join(reg.BaseDir, filepath.FromSlash(pluginsRoot), pkg.Manifest.ID)
 	if existing, ok := existingPlugin(reg, pkg.Manifest.ID); ok {
@@ -631,7 +632,7 @@ func catalogPluginEntries(reg *registry.Registry) []pluginCatalogEntry {
 		if !registryKnowsPlugin(reg, pkg) {
 			continue
 		}
-		entries = append(entries, pluginCatalogEntry{ID: pkg.Manifest.ID, Name: pkg.Manifest.Name, Version: pkg.Manifest.Version, Description: pkg.Manifest.Description, Disabled: false})
+		entries = append(entries, pluginCatalogEntry{ID: pkg.Manifest.ID, Name: pkg.Manifest.Name, Version: pkg.Manifest.Version, Description: pkg.Manifest.Description, Disabled: false, Warnings: reg.PluginWarnings(pkg.Manifest.ID)})
 		seen[pkg.Manifest.ID] = true
 	}
 	for _, pkg := range installedAnyPluginPackages(reg) {

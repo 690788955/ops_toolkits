@@ -48,6 +48,53 @@ contributes:
 	}
 }
 
+func TestPackageWarningsReportsIntegrationQuality(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, "plugins", "warn")
+	if err := os.MkdirAll(filepath.Join(pluginDir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "scripts", "run.sh"), []byte("#!/usr/bin/env bash\necho warn\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pkg := writePlugin(t, dir, "warn", `id: vendor.warn
+name: Warn
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.warn.tool
+      name: Warning Tool
+      category: warn
+      command: scripts/run.sh
+      config_files:
+        - config/missing.conf
+      parameters:
+        - name: target
+          type: string
+          required: false
+      confirm:
+        required: true
+        message: 确认
+`)
+
+	if err := ValidatePackage(pkg); err != nil {
+		t.Fatalf("ValidatePackage returned error: %v", err)
+	}
+	warnings := PackageWarnings(pkg)
+	codes := map[string]bool{}
+	for _, warning := range warnings {
+		codes[warning.Code] = true
+		if warning.PluginID != "vendor.warn" {
+			t.Fatalf("warning plugin_id = %q, want vendor.warn", warning.PluginID)
+		}
+	}
+	for _, code := range []string{"PLUGIN_README_MISSING", "PLUGIN_DESCRIPTION_MISSING", "TOOL_DESCRIPTION_MISSING", "PARAM_DESCRIPTION_MISSING", "CONFIRM_MESSAGE_TOO_SHORT", "CONFIG_FILE_MISSING"} {
+		if !codes[code] {
+			t.Fatalf("warnings missing code %s: %#v", code, warnings)
+		}
+	}
+}
+
 func TestValidatePackageRejectsPathEscape(t *testing.T) {
 	dir := t.TempDir()
 	pkg := writePlugin(t, dir, "escape", `id: vendor.escape

@@ -25,13 +25,13 @@ type Contributes struct {
 }
 
 type Tool struct {
-	ID              string                  `yaml:"id" json:"id"`
-	Name            string                  `yaml:"name" json:"name"`
-	Description     string                  `yaml:"description" json:"description"`
-	Version         string                  `yaml:"version" json:"version"`
-	Category        string                  `yaml:"category" json:"category"`
-	Tags            []string                `yaml:"tags" json:"tags"`
-	Help            config.HelpConfig       `yaml:"help" json:"help"`
+	ID             string                 `yaml:"id" json:"id"`
+	Name           string                 `yaml:"name" json:"name"`
+	Description    string                 `yaml:"description" json:"description"`
+	Version        string                 `yaml:"version" json:"version"`
+	Category       string                 `yaml:"category" json:"category"`
+	Tags           []string               `yaml:"tags" json:"tags"`
+	Help           config.HelpConfig      `yaml:"help" json:"help"`
 	Command        string                 `yaml:"command" json:"command"`
 	Args           []string               `yaml:"args" json:"args"`
 	Workdir        string                 `yaml:"workdir" json:"workdir"`
@@ -55,7 +55,16 @@ type Package struct {
 	Path     string
 }
 
+type Warning struct {
+	Code       string `json:"code"`
+	PluginID   string `json:"plugin_id"`
+	ToolID     string `json:"tool_id,omitempty"`
+	Field      string `json:"field,omitempty"`
+	Message    string `json:"message"`
+	Suggestion string `json:"suggestion,omitempty"`
+}
+
 type LoadResult struct {
 	Packages []Package
-	Warnings []string
+	Warnings []Warning
 }

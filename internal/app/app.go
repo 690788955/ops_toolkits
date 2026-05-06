@@ -13,6 +13,7 @@ import (
 	"shell_ops/internal/config"
 	"shell_ops/internal/menu"
 	"shell_ops/internal/packagebuild"
+	"shell_ops/internal/plugin"
 	"shell_ops/internal/registry"
 	"shell_ops/internal/runner"
 	"shell_ops/internal/scaffold"
@@ -76,8 +77,33 @@ func validateCommand(opts *options) *cobra.Command {
 		fmt.Fprintf(cmd.OutOrStdout(), "  工具: %d\n", len(reg.Tools))
 		fmt.Fprintf(cmd.OutOrStdout(), "  工作流: %d\n", len(reg.Workflows))
 		fmt.Fprintf(cmd.OutOrStdout(), "  分类: %d\n", len(reg.Root.DisplayCategories()))
+		printWarnings(cmd.OutOrStdout(), reg.Warnings)
 		return nil
 	}}
+}
+
+func printWarnings(out io.Writer, warnings []plugin.Warning) {
+	if len(warnings) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "  Warning: %d\n", len(warnings))
+	for _, warning := range warnings {
+		scope := warning.PluginID
+		if warning.ToolID != "" {
+			scope = warning.ToolID
+		}
+		if scope == "" {
+			scope = warning.Code
+		}
+		fmt.Fprintf(out, "    [%s] %s", scope, warning.Message)
+		if warning.Field != "" {
+			fmt.Fprintf(out, " field=%s", warning.Field)
+		}
+		if warning.Suggestion != "" {
+			fmt.Fprintf(out, "；建议：%s", warning.Suggestion)
+		}
+		fmt.Fprintln(out)
+	}
 }
 
 func runCommand(opts *options) *cobra.Command {

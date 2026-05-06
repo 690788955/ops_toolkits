@@ -331,3 +331,93 @@ Why correct:
 - Plugin identity is validated as an ID before filesystem access.
 - Delete target is derived from installed plugin metadata/scans, not request path concatenation.
 - Disabled state is a backend-enforced precondition, and config cleanup happens only after successful deletion.
+
+---
+
+## Scenario: Plugin Integration Warnings
+
+### 1. Scope / Trigger
+
+- Trigger: adding or changing plugin integration quality checks, `opsctl validate` output, plugin upload response payloads, or catalog warning fields.
+- This is a cross-layer contract: plugin loader generates warnings, registry stores them, CLI/API expose them, and runtime tool/workflow execution must ignore them.
+
+### 2. Signatures
+
+- Warning JSON shape:
+  - `code: string`
+  - `plugin_id: string`
+  - `tool_id?: string`
+  - `field?: string`
+  - `message: string`
+  - `suggestion?: string`
+- CLI: `opsctl validate`
+  - Success still returns exit code `0` when only warnings exist.
+  - Output includes a `Warning: <count>` section after counts.
+- Upload API: `POST /api/plugins/upload`
+  - Success response `data.warnings?: Warning[]`.
+- Catalog API: `GET /api/catalog`
+  - Response `data.warnings?: Warning[]` for registry-level enabled-plugin warnings.
+  - Response `data.plugins[].warnings?: Warning[]` for each enabled plugin.
+
+### 3. Contracts
+
+- Warnings are non-blocking integration-quality findings; they must not reject plugin load, validate, upload, or tool/workflow execution.
+- `plugins.strict` only controls errors. It must not convert integration warnings into load failures.
+- First-version warning codes:
+  - `PLUGIN_README_MISSING`
+  - `PLUGIN_DESCRIPTION_MISSING`
+  - `TOOL_DESCRIPTION_MISSING`
+  - `PARAM_DESCRIPTION_MISSING`
+  - `CONFIRM_MESSAGE_TOO_SHORT`
+  - `CONFIG_FILE_MISSING`
+  - `PLUGIN_LOAD_SKIPPED` for non-strict skipped invalid plugins
+- Warning generation checks only plugin package contract and declared files; it must not inspect or constrain script business logic.
+- Disabled plugin contributions do not appear in runtime `tools`/`workflows`; catalog may list disabled plugin status, but disabled-package quality warnings should not make tests or UI treat disabled tools as active contributions.
+
+### 4. Validation & Error Matrix
+
+| Condition | Expected behavior |
+|---|---|
+| Valid plugin lacks `README.md` | warning, load succeeds |
+| Valid plugin or tool lacks `description` | warning, load succeeds |
+| Tool parameter lacks `description` | warning, load succeeds |
+| `confirm.required=true` and message is empty or too short | warning, load succeeds |
+| `config_files` path is declared but file is missing | warning, load/upload succeeds |
+| `config_files` path is unsafe or directory | error, follows `plugins.strict` behavior |
+| Only warnings during `opsctl validate` | exit code `0` |
+| Tool/workflow run after warnings exist | no warning prompt or warning output during run |
+
+### 5. Good/Base/Bad Cases
+
+- Good: plugin uploads successfully with `data.warnings` describing missing README and missing config file, then catalog exposes the same warnings for the installed enabled plugin.
+- Base: a warning-free plugin returns no `warnings` field or an empty warning list depending on JSON omitempty behavior.
+- Bad: making `plugins.strict: true` fail validation because README is missing.
+
+### 6. Tests Required
+
+- Plugin unit test asserts all first-version warning codes can be generated without `ValidatePackage` failure.
+- Upload API test asserts successful upload response includes structured warnings.
+- Catalog API test asserts installed enabled plugin warnings are exposed.
+- Full Go test suite must pass; build and validate commands must still succeed with only warnings.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+if len(plugin.PackageWarnings(pkg)) > 0 && cfg.Strict {
+    return fmt.Errorf("plugin warnings found")
+}
+```
+
+#### Correct
+
+```go
+result.Packages = append(result.Packages, pkg)
+result.Warnings = append(result.Warnings, plugin.PackageWarnings(pkg)...)
+```
+
+Why correct:
+- Warning collection is side-channel metadata.
+- Strict error policy remains reserved for invalid manifests, unsafe paths, and missing required runnable assets.
+- Runtime execution stays focused on parameters, confirmation, and script exit status.
