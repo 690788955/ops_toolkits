@@ -147,21 +147,26 @@ func runSelected(ctx context.Context, reg *registry.Registry, selected item, in 
 	if err != nil {
 		return err
 	}
-	params := config.MergeParams(defs, nil, nil)
-	if err := config.PromptMissing(defs, params, in, out); err != nil {
-		return err
-	}
 	r := runner.New(reg)
 	if selected.kind == "tool" {
 		tool, err := reg.Tool(selected.id)
 		if err != nil {
 			return err
 		}
+		promptParams := config.MergeParams(defs, nil, nil)
+		if err := config.PromptMissing(defs, promptParams, in, out); err != nil {
+			return err
+		}
+		params := valuesWithoutDefaults(defs, promptParams)
 		if err := config.PromptConfirmation(tool.Config.Confirm, in, out); err != nil {
 			return err
 		}
-		record, err := r.RunTool(ctx, selected.id, params, out, errOut)
+		record, err := r.RunToolValues(ctx, selected.id, params, out, errOut)
 		printRecord(out, record)
+		return err
+	}
+	params := config.MergeParams(defs, nil, nil)
+	if err := config.PromptMissing(defs, params, in, out); err != nil {
 		return err
 	}
 	wf, err := reg.Workflow(selected.id)
@@ -178,6 +183,24 @@ func runSelected(ctx context.Context, reg *registry.Registry, selected item, in 
 	record, err := r.RunWorkflowWithConfirmation(ctx, selected.id, params, confirmed, out, errOut)
 	printRecord(out, record)
 	return err
+}
+
+func valuesWithoutDefaults(defs []config.Parameter, params map[string]string) config.Values {
+	out := config.Values{}
+	for _, p := range defs {
+		value, ok := params[p.Name]
+		if !ok || isParameterDefault(p, value) {
+			continue
+		}
+		if err := config.SetPathValue(out, p.Name, value); err != nil {
+			out[p.Name] = value
+		}
+	}
+	return out
+}
+
+func isParameterDefault(param config.Parameter, value string) bool {
+	return param.Default != nil && fmt.Sprint(param.Default) == value
 }
 
 func confirmWorkflowTools(reg *registry.Registry, wf *config.WorkflowConfig, in io.Reader, out io.Writer) (bool, error) {

@@ -379,6 +379,65 @@ echo done
 	}
 }
 
+func TestRunToolMergesLayeredConfigWritesNestedParamFileTemplatesAndRedacts(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := writeTool(t, dir, "layered", `#!/usr/bin/env bash
+set -euo pipefail
+echo "param_file=${OPS_PARAM_FILE}"
+echo "native=${NATIVE_CONFIG}"
+test -f "${OPS_PARAM_FILE}"
+test -f "${NATIVE_CONFIG}"
+`)
+	if err := os.MkdirAll(filepath.Join(toolDir, "templates"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(toolDir, "templates", "native.tmpl"), []byte("host={{ .es.host }}\nport={{ .es.port }}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := toolConfig("plugin.layered.run")
+	cfg.Parameters = []config.Parameter{{Name: "runtime", Default: "param-default"}, {Name: "es.host", Default: "parameter"}, {Name: "es.password", Sensitive: true}}
+	cfg.PassMode = config.PassMode{Env: true, ParamFile: true, FileName: "params.yaml"}
+	cfg.ConfigDefaults = map[string]interface{}{"es": map[string]interface{}{"port": "tool", "items": []interface{}{"tool"}}}
+	cfg.ConfigFiles = []config.ConfigFile{{Name: "native.conf", Format: "text", PassVia: "env", Env: "NATIVE_CONFIG", DefaultContent: "test config"}}
+	cfg.PluginConfig = config.PluginToolConfig{
+		ID:                   "plugin.layered",
+		Dir:                  toolDir,
+		SharedConfig:         map[string]interface{}{"es": map[string]interface{}{"host": "shared", "port": "shared"}},
+		PackageDefaultConfig: map[string]interface{}{"es": map[string]interface{}{"host": "package", "nested": map[string]interface{}{"keep": "package"}}},
+		HostConfig:           map[string]interface{}{"es": map[string]interface{}{"host": "host", "port": "host", "password": "secret:env:ES_PASSWORD"}},
+		SensitivePaths:       []string{"es.password"},
+	}
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root: &config.RootConfig{
+			Paths:          config.PathsConfig{Logs: "runs/logs"},
+			ConfigDefaults: map[string]interface{}{"es": map[string]interface{}{"host": "global", "port": "global"}},
+		},
+		Tools: map[string]*registry.Tool{
+			"plugin.layered.run": {Entry: config.ToolEntry{ID: "plugin.layered.run", Category: "demo"}, Config: cfg, Dir: toolDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+
+	r := New(reg)
+	record, err := r.RunTool(context.Background(), "plugin.layered.run", map[string]string{"es.host": "runtime", "runtime": "override"}, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	paramsYAML := readFile(t, filepath.Join(r.RunsDir, record.ID, "params.yaml"))
+	if !strings.Contains(paramsYAML, "host: runtime") || !strings.Contains(paramsYAML, "port: host") || !strings.Contains(paramsYAML, "keep: package") {
+		t.Fatalf("params.yaml 未包含期望合并结果:\n%s", paramsYAML)
+	}
+	// 配置文件现在存储在 configs/ 目录
+	native := readFile(t, filepath.Join(r.RunsDir, record.ID, "configs", "native.conf"))
+	if !strings.Contains(native, "test config") {
+		t.Fatalf("native config 内容不符合预期: %s", native)
+	}
+	if record.Params["es.password"] != "******" || record.Config["es"].(config.Values)["password"] != "******" {
+		t.Fatalf("运行记录未脱敏: %#v", record)
+	}
+}
+
 func writeTool(t *testing.T, baseDir, name, script string) string {
 	t.Helper()
 	dir := filepath.Join(baseDir, "tools", "demo", name)

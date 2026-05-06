@@ -20,10 +20,11 @@ import (
 )
 
 type options struct {
-	baseDir    string
-	paramsFile string
-	setValues  []string
-	noPrompt   bool
+	baseDir       string
+	paramsFile    string
+	setValues     []string
+	noPrompt      bool
+	configVersion string
 }
 
 func NewRootCommand() *cobra.Command {
@@ -36,6 +37,7 @@ func NewRootCommand() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&opts.paramsFile, "params", "", "YAML 参数文件")
 	cmd.PersistentFlags().StringArrayVar(&opts.setValues, "set", nil, "参数覆盖项 key=value")
 	cmd.PersistentFlags().BoolVar(&opts.noPrompt, "no-prompt", false, "缺少必填参数时禁用交互提示")
+	cmd.PersistentFlags().StringVar(&opts.configVersion, "config-version", "", "配置版本名称")
 	cmd.SetHelpCommand(generatedHelpCommand(opts, "help"))
 
 	cmd.AddCommand(listCommand(opts), validateCommand(opts), runCommand(opts), helpAutoCommand(opts), startCommand(opts), menuCommand(opts), serveCommand(opts), newCommand(opts), packageCommand(opts))
@@ -89,14 +91,14 @@ func runCommand(opts *options) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		params, err := resolveParams(opts, tool.Config.Parameters)
+		params, err := resolveToolParams(opts, reg, tool)
 		if err != nil {
 			return err
 		}
 		if err := config.PromptConfirmation(tool.Config.Confirm, os.Stdin, cmd.OutOrStdout()); err != nil {
 			return err
 		}
-		record, err := runner.New(reg).RunTool(context.Background(), args[0], params, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		record, err := runner.New(reg).RunToolValues(context.Background(), args[0], params, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		if record != nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "\nrun_id=%s status=%s\n", record.ID, record.Status)
 		}
@@ -335,7 +337,7 @@ func workflowNodeType(node config.WorkflowNode) string {
 }
 
 func loadRegistry(opts *options) (*registry.Registry, error) {
-	return registry.Load(absBase(opts))
+	return loadRegistryWithVersion(opts)
 }
 
 func absBase(opts *options) string {
@@ -355,15 +357,100 @@ func resolveParams(opts *options, defs []config.Parameter) (map[string]string, e
 	if err != nil {
 		return nil, err
 	}
-	params := config.MergeParams(defs, fileParams, overrides)
+	provided := map[string]string{}
+	for k, v := range fileParams {
+		provided[k] = v
+	}
+	for k, v := range overrides {
+		provided[k] = v
+	}
 	if !opts.noPrompt {
-		if err := config.PromptMissing(defs, params, os.Stdin, os.Stdout); err != nil {
+		promptParams := config.MergeParams(defs, fileParams, overrides)
+		if err := config.PromptMissing(defs, promptParams, os.Stdin, os.Stdout); err != nil {
 			return nil, err
 		}
-		return params, nil
+		for k, v := range promptParams {
+			if _, exists := provided[k]; exists {
+				continue
+			}
+			if isParameterDefault(defs, k, v) {
+				continue
+			}
+			provided[k] = v
+		}
+		return provided, nil
 	}
-	if err := config.ValidateRequired(defs, params); err != nil {
+	validationParams := config.MergeParams(defs, fileParams, overrides)
+	if err := config.ValidateRequired(defs, validationParams); err != nil {
 		return nil, err
 	}
-	return params, nil
+	return provided, nil
+}
+
+func resolveToolParams(opts *options, reg *registry.Registry, tool *registry.Tool) (map[string]interface{}, error) {
+	fileParams, err := config.LoadParamsFileValues(opts.paramsFile)
+	if err != nil {
+		return nil, err
+	}
+	overrides, err := config.ParseSetValuesNested(opts.setValues)
+	if err != nil {
+		return nil, err
+	}
+	provided := config.MergeValues(fileParams, overrides)
+	allValues := config.MergeValues(toolConfigLayers(reg, tool), provided)
+	if !opts.noPrompt {
+		before := config.FlattenValues(allValues)
+		promptParams := config.FlattenValues(allValues)
+		if err := config.PromptMissing(tool.Config.Parameters, promptParams, os.Stdin, os.Stdout); err != nil {
+			return nil, err
+		}
+		for k, v := range promptParams {
+			if strings.TrimSpace(v) == "" {
+				continue
+			}
+			if existing, ok := before[k]; ok && strings.TrimSpace(existing) != "" {
+				continue
+			}
+			if isParameterDefault(tool.Config.Parameters, k, v) {
+				config.DeletePathValue(provided, k)
+				continue
+			}
+			if err := config.SetPathValue(provided, k, v); err != nil {
+				return nil, err
+			}
+		}
+		return provided, nil
+	}
+	if err := config.ValidateRequiredValues(tool.Config.Parameters, allValues); err != nil {
+		return nil, err
+	}
+	return provided, nil
+}
+
+func toolConfigLayers(reg *registry.Registry, tool *registry.Tool) config.Values {
+	return config.MergeValues(
+		config.MergeParameterDefaults(tool.Config.Parameters),
+		reg.GlobalEnv,
+		reg.Root.ConfigDefaults,
+		tool.Config.PluginConfig.SharedConfig,
+		tool.Config.PluginConfig.PackageDefaultConfig,
+		tool.Config.ConfigDefaults,
+		tool.Config.PluginConfig.HostConfig,
+	)
+}
+
+func loadRegistryWithVersion(opts *options) (*registry.Registry, error) {
+	if opts.configVersion == "" {
+		return registry.Load(absBase(opts))
+	}
+	return registry.LoadWithVersion(absBase(opts), opts.configVersion)
+}
+
+func isParameterDefault(defs []config.Parameter, name, value string) bool {
+	for _, p := range defs {
+		if p.Name == name && p.Default != nil && fmt.Sprint(p.Default) == value {
+			return true
+		}
+	}
+	return false
 }

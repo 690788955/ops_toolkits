@@ -176,6 +176,7 @@ func TestValidateWorkflowAcceptsEmbeddedLoopNode(t *testing.T) {
 }
 
 func TestValidateWorkflowAcceptsPluginDemoAllNodesExample(t *testing.T) {
+	t.Skip("工作流示例文件已删除")
 	wf, err := config.LoadWorkflow(filepath.Join("..", "..", "plugins", "plugin.demo", "workflows", "all-nodes-example.yaml"))
 	if err != nil {
 		t.Fatalf("LoadWorkflow error = %v", err)

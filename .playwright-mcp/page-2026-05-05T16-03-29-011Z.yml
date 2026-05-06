@@ -1,0 +1,155 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: OPS
+      - generic [ref=e7]:
+        - heading "Shell 运维框架" [level=1] [ref=e8]
+        - paragraph [ref=e9]: 演示用 YAML 驱动运维自动化框架
+    - generic [ref=e10]: 运维分类
+    - generic [ref=e11]:
+      - button "全局工作流 跨分类选择所有可见工具和工作流" [ref=e12] [cursor=pointer]:
+        - generic [ref=e13]: 全局工作流
+        - generic [ref=e14]: 跨分类选择所有可见工具和工作流
+      - button "ES 备份恢复 Elasticsearch Snapshot 备份、查询与恢复工具" [ref=e15] [cursor=pointer]:
+        - generic [ref=e16]: ES 备份恢复
+        - generic [ref=e17]: Elasticsearch Snapshot 备份、查询与恢复工具
+      - button "插件演示 通过插件机制接入的示例工具" [ref=e18] [cursor=pointer]:
+        - generic [ref=e19]: 插件演示
+        - generic [ref=e20]: 通过插件机制接入的示例工具
+    - button "+" [ref=e21] [cursor=pointer]
+  - main [ref=e22]:
+    - generic [ref=e23]:
+      - generic [ref=e24]:
+        - heading "全局工作流" [level=2] [ref=e25]
+        - paragraph [ref=e26]: 跨分类选择工具、工作流或打开编排器
+      - generic [ref=e27]: 可视化工作流编排
+    - generic [ref=e28]:
+      - button "工具" [ref=e29] [cursor=pointer]
+      - button "工作流" [ref=e30] [cursor=pointer]
+      - button "编排器" [ref=e31] [cursor=pointer]
+    - generic [ref=e32]:
+      - generic [ref=e33]:
+        - generic [ref=e34]:
+          - heading "工具列表" [level=3] [ref=e35]
+          - generic [ref=e36]: 5 / 5 项
+        - generic [ref=e37]:
+          - textbox "搜索名称、描述、ID 或标签" [ref=e38]
+          - generic [ref=e39]:
+            - button "全部" [ref=e40] [cursor=pointer]
+            - button "backup" [ref=e41] [cursor=pointer]
+            - button "confirm" [ref=e42] [cursor=pointer]
+            - button "demo" [ref=e43] [cursor=pointer]
+            - button "elasticsearch" [ref=e44] [cursor=pointer]
+            - button "plugin" [ref=e45] [cursor=pointer]
+            - button "query" [ref=e46] [cursor=pointer]
+            - button "restore" [ref=e47] [cursor=pointer]
+            - button "shell" [ref=e48] [cursor=pointer]
+            - button "snapshot" [ref=e49] [cursor=pointer]
+        - generic [ref=e50]:
+          - button "ES Snapshot 备份查询 列出可恢复备份或查看指定日期快照详情 lzyh.es_backup.list elasticsearch snapshot query" [ref=e51] [cursor=pointer]:
+            - strong [ref=e52]: ES Snapshot 备份查询
+            - generic [ref=e53]: 列出可恢复备份或查看指定日期快照详情
+            - emphasis [ref=e54]: lzyh.es_backup.list
+            - generic [ref=e55]:
+              - generic [ref=e56]: elasticsearch
+              - generic [ref=e57]: snapshot
+              - generic [ref=e58]: query
+          - button "插件问候演示 使用外部插件脚本输出问候信息 plugin.demo.greet plugin demo shell" [ref=e59] [cursor=pointer]:
+            - strong [ref=e60]: 插件问候演示
+            - generic [ref=e61]: 使用外部插件脚本输出问候信息
+            - emphasis [ref=e62]: plugin.demo.greet
+            - generic [ref=e63]:
+              - generic [ref=e64]: plugin
+              - generic [ref=e65]: demo
+              - generic [ref=e66]: shell
+          - button "插件确认演示 演示高风险插件工具执行前确认 plugin.demo.confirmed plugin demo confirm" [ref=e67] [cursor=pointer]:
+            - strong [ref=e68]: 插件确认演示
+            - generic [ref=e69]: 演示高风险插件工具执行前确认
+            - emphasis [ref=e70]: plugin.demo.confirmed
+            - generic [ref=e71]:
+              - generic [ref=e72]: plugin
+              - generic [ref=e73]: demo
+              - generic [ref=e74]: confirm
+          - button "ES Snapshot 恢复 将指定日期的 ES Snapshot 恢复到目标集群，可选索引重命名 lzyh.es_backup.restore elasticsearch snapshot restore" [ref=e75] [cursor=pointer]:
+            - strong [ref=e76]: ES Snapshot 恢复
+            - generic [ref=e77]: 将指定日期的 ES Snapshot 恢复到目标集群，可选索引重命名
+            - emphasis [ref=e78]: lzyh.es_backup.restore
+            - generic [ref=e79]:
+              - generic [ref=e80]: elasticsearch
+              - generic [ref=e81]: snapshot
+              - generic [ref=e82]: restore
+          - button "ES Snapshot 备份 按日期目录创建 ES Snapshot，支持同名快照策略与旧备份清理 lzyh.es_backup.create elasticsearch snapshot backup" [ref=e83] [cursor=pointer]:
+            - strong [ref=e84]: ES Snapshot 备份
+            - generic [ref=e85]: 按日期目录创建 ES Snapshot，支持同名快照策略与旧备份清理
+            - emphasis [ref=e86]: lzyh.es_backup.create
+            - generic [ref=e87]:
+              - generic [ref=e88]: elasticsearch
+              - generic [ref=e89]: snapshot
+              - generic [ref=e90]: backup
+      - generic [ref=e91]:
+        - heading "执行配置" [level=3] [ref=e93]
+        - generic [ref=e94]: 请先选择一个工具或工作流。
+    - generic [ref=e95]:
+      - heading "执行结果" [level=3] [ref=e97]
+      - generic [ref=e98]: 等待执行...
+  - generic [ref=e99]:
+    - generic [ref=e100]:
+      - generic [ref=e101]:
+        - generic [ref=e102]:
+          - heading "插件管理" [level=3] [ref=e103]
+          - paragraph [ref=e104]: 下载插件模板、上传插件 ZIP，或按“先禁用、再删除”的流程管理已安装插件。
+        - button "×" [ref=e105] [cursor=pointer]
+      - generic [ref=e106]:
+        - link "下载插件模板" [ref=e107] [cursor=pointer]:
+          - /url: /api/dev/toolkit.zip
+        - generic [ref=e108]:
+          - generic [ref=e109]: 上传插件 ZIP
+          - button "上传插件 ZIP" [ref=e110]
+        - button "上传插件 ZIP" [disabled] [ref=e112]
+        - generic [ref=e113]:
+          - generic [ref=e114]:
+            - strong [ref=e115]: 其他选项
+            - generic [ref=e116]: 导出用户工作流插件，或将已安装插件打包为可再次上传的 ZIP。
+          - link "导出用户工作流插件" [ref=e117] [cursor=pointer]:
+            - /url: /api/plugins/user-workflows.zip
+          - button "导出已安装插件" [ref=e118] [cursor=pointer]
+        - generic [ref=e119]:
+          - generic [ref=e120]:
+            - strong [ref=e121]: 已安装插件
+            - generic [ref=e122]: 启用插件需先禁用；禁用后可执行删除。
+          - generic [ref=e123]:
+            - generic [ref=e124]:
+              - generic [ref=e125]:
+                - strong [ref=e126]: 柳州银行 ES Snapshot 备份恢复
+                - generic [ref=e127]: lzyh.es_backup@1.0.0
+                - generic [ref=e128]: 状态：启用中
+                - generic [ref=e129]: 将 Elasticsearch Snapshot 备份、查询和恢复脚本封装为 opsctl 插件工具
+              - generic [ref=e130]:
+                - button "配置" [active] [ref=e131] [cursor=pointer]
+                - button "禁用" [ref=e132] [cursor=pointer]
+            - generic [ref=e133]:
+              - generic [ref=e134]:
+                - strong [ref=e135]: 插件接入演示
+                - generic [ref=e136]: plugin.demo@1.0.0
+                - generic [ref=e137]: 状态：启用中
+                - generic [ref=e138]: 演示外部工具如何通过 plugin.yaml 快速接入菜单、Web UI 和工作流
+              - generic [ref=e139]:
+                - button "配置" [ref=e140] [cursor=pointer]
+                - button "禁用" [ref=e141] [cursor=pointer]
+      - generic [ref=e142]: 请选择插件 ZIP 包。
+    - generic [ref=e144]:
+      - generic [ref=e145]:
+        - generic [ref=e146]:
+          - heading "维护插件配置" [level=3] [ref=e147]
+          - paragraph [ref=e148]: 柳州银行 ES Snapshot 备份恢复 的宿主配置文件：configs/plugins/lzyh.es_backup.yaml
+        - button "×" [ref=e149] [cursor=pointer]
+      - generic [ref=e150]:
+        - generic [ref=e151]: 无配置文件时可从空 YAML 开始，保存后创建文件。
+        - generic [ref=e152]:
+          - text: YAML 内容
+          - textbox "YAML 内容" [ref=e153]:
+            - /placeholder: "例如：\nendpoint: http://127.0.0.1:9200\ntimeout: 30s"
+        - generic [ref=e154]:
+          - button "保存配置" [ref=e155] [cursor=pointer]
+          - button "关闭" [ref=e156] [cursor=pointer]
+        - generic [ref=e157]: 当前还没有宿主配置文件，保存后会创建。

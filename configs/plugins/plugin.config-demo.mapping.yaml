@@ -1,0 +1,22 @@
+# 配置映射规则示例
+# 用于覆盖插件工具的配置模板定义
+
+tools:
+  # 为备份工具自定义配置模板
+  plugin.config-demo.backup:
+    config_templates:
+      - name: db_config
+        # 使用自定义的模板路径（如果需要）
+        template: configs/templates/database.conf.tmpl
+        # 自定义输出文件名
+        output: backup-database.conf
+        # 自定义命令行参数名
+        arg: --db-config
+
+  # 恢复工具使用默认配置（不需要映射规则）
+  # plugin.config-demo.restore:
+  #   config_templates:
+  #     - name: db_config
+  #       template: configs/templates/database.conf.tmpl
+  #       output: database.conf
+  #       arg: --config

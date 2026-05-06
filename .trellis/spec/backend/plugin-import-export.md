@@ -142,6 +142,41 @@ Why correct:
 
 ---
 
+## Design Decision: Runtime-Only Fields Must Not Persist to Disk Config
+
+**Context**: The registry merges built-in categories with plugin-contributed categories at runtime. When `SaveRoot` writes `configs/ops.yaml`, it must exclude runtime-only fields to prevent plugin-contributed categories from persisting to disk config after plugin deletion.
+
+**Problem**: Without exclusion, deleting a plugin leaves its contributed categories in `configs/ops.yaml menu.categories`, causing stale category residue.
+
+**Solution**: Mark runtime-only fields with `yaml:"-"` struct tags and clear them before YAML encoding.
+
+**Implementation Pattern**:
+
+```go
+// RootConfig includes runtime-only fields marked with yaml:"-"
+type RootConfig struct {
+    Menu              MenuConfig `yaml:"menu"`
+    RuntimeCategories []Category `yaml:"-" json:"-"`  // Runtime-only, never persisted
+    // ... other fields
+}
+
+// SaveRoot clears runtime-only fields before encoding
+func SaveRoot(path string, cfg *RootConfig) error {
+    disk := *cfg
+    disk.RuntimeCategories = nil  // Clear runtime-only field
+    return encodeYAML(path, &disk)
+}
+```
+
+**Why This Works**:
+- `yaml:"-"` tag tells the YAML encoder to skip the field during marshaling
+- Explicit `nil` assignment before encoding provides defense-in-depth
+- Struct copy (`disk := *cfg`) prevents mutating the live registry config
+
+**Related**: This pattern applies to any registry-computed field that must not persist (e.g., merged tool lists, computed workflow graphs).
+
+---
+
 ## Scenario: Disable and Delete an Installed Plugin
 
 ### 1. Scope / Trigger

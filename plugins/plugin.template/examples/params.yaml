@@ -1,3 +1,22 @@
-target: demo
-action: apply
-dry_run: true
+# 参数示例文件
+# 用于本地测试工具执行
+
+# 简单工具参数
+message: "Hello from example!"
+
+# 配置文件工具参数
+action: check
+
+# 插件业务配置（用于配置模板渲染）
+service:
+  name: MyService
+  endpoint: https://api.mycompany.com
+  timeout: 60s
+
+auth:
+  username: testuser
+  password: testpass123
+
+options:
+  debug: true
+  retry: 5

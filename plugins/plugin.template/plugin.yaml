@@ -1,83 +1,69 @@
 id: plugin.template
-name: 规范插件模板
+name: 插件开发模板
 version: 1.0.0
-description: 可复制的规范插件模板，展示清单、脚本、参数、确认和工作流写法
-author: your-team
-compatibility:
-  opsctl: ">=0.1.0"
+description: 插件开发模板，包含配置文件使用示例和最佳实践
+author: ops-team
+
 contributes:
   categories:
-    - id: plugin-template
-      name: 插件模板
-      description: 插件模板示例分类
+    - id: example
+      name: 示例分类
+      description: 插件开发示例和模板
+
   tools:
-    - id: plugin.template.inspect
-      name: 目标检查
-      description: 普通只读工具示例，检查目标状态并输出摘要
-      category: plugin-template
-      tags: [plugin, template, readonly]
-      command: scripts/run.sh
+    - id: plugin.template.simple
+      name: 简单工具示例
+      category: example
+      description: 不使用配置文件的简单工具示例
+      tags: [example, template]
+      command: scripts/simple.sh
       args:
-        - --target
-        - '{{ .target }}'
-        - --action
-        - inspect
-        - --dry-run
-        - '{{ .dry_run }}'
+        - --message
+        - "{{ .message }}"
       workdir: .
-      timeout: 1m
+      timeout: 30s
       parameters:
-        - name: target
+        - name: message
           type: string
-          description: 目标标识，例如主机组、实例名或环境名
+          description: 要显示的消息
           required: true
-          default: demo
-        - name: action
-          type: string
-          description: 执行动作，普通工具固定为 inspect
-          required: false
-          default: inspect
-        - name: dry_run
-          type: bool
-          description: 是否仅预览动作，不修改外部系统
-          required: false
-          default: true
+          default: Hello World
       confirm:
         required: false
-        message: ""
-    - id: plugin.template.apply
-      name: 变更执行
-      description: 高风险工具示例，展示 confirm.required 和 dry-run 保护
-      category: plugin-template
-      tags: [plugin, template, change, high-risk]
-      command: scripts/run.sh
-      args:
-        - --target
-        - '{{ .target }}'
-        - --action
-        - '{{ .action }}'
-        - --dry-run
-        - '{{ .dry_run }}'
+
+    - id: plugin.template.with-config
+      name: 配置文件工具示例
+      category: example
+      description: 使用配置文件的工具示例，演示如何使用配置文件
+      tags: [example, template, config]
+      command: scripts/with-config.sh
       workdir: .
-      timeout: 5m
+      timeout: 30s
       parameters:
-        - name: target
-          type: string
-          description: 目标标识，例如主机组、实例名或环境名
-          required: true
-          default: demo
         - name: action
           type: string
-          description: 执行动作，示例支持 apply 或 inspect
+          description: 要执行的操作
           required: true
-          default: apply
-        - name: dry_run
-          type: bool
-          description: 是否仅预览动作；生产变更建议先保持 true
+          default: check
+      config_files:
+        - name: example.conf
+          format: ini
+          description: 示例配置文件
           required: false
-          default: true
+          pass_via: arg
+          arg: --config
+          default_content: |
+            [service]
+            name = ExampleService
+            endpoint = https://api.example.com
+            timeout = 30s
+
+            [auth]
+            username = admin
+            password = changeme
+
+            [options]
+            debug = false
+            retry = 3
       confirm:
-        required: true
-        message: 确认对目标执行变更示例？请确认目标、动作和回滚方案已核对。
-  workflows:
-    - path: workflows/maintenance-flow.yaml
+        required: false

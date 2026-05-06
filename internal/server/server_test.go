@@ -605,6 +605,191 @@ func TestPluginExportRejectsUnsafePluginIDRequest(t *testing.T) {
 	}
 }
 
+func TestPluginHostConfigGetMissingReturnsEmpty(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.config", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.config/config", nil))
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Data pluginHostConfigResult `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("响应 JSON 解析失败: %v", err)
+	}
+	if body.Data.PluginID != "vendor.config" || body.Data.Exists || body.Data.Content != "" || body.Data.Path != "configs/plugins/vendor.config.yaml" {
+		t.Fatalf("GET 不存在配置结果异常: %#v", body.Data)
+	}
+}
+
+func TestPluginHostConfigPutCreatesAndReloads(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.configput", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	handler := NewHandler(reg)
+	payload := `{"content":"nested:\n  value: created\n"}`
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configput/config", strings.NewReader(payload)))
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	path := filepath.Join(reg.BaseDir, "configs", "plugins", "vendor.configput.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("配置文件未创建: %v", err)
+	}
+	if !strings.Contains(string(data), "created") {
+		t.Fatalf("配置文件内容未写入: %s", data)
+	}
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if !strings.Contains(catalogRes.Body.String(), "vendor.configput.tool") {
+		t.Fatalf("保存配置后 registry/catalog 未保持可用: %s", catalogRes.Body.String())
+	}
+}
+
+func TestPluginHostConfigPutRejectsInvalidYAMLWithoutWriting(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.configbad", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configbad/config", strings.NewReader(`{"content":"bad: [\n"}`)))
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want bad request; body = %s", res.Code, res.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "configs", "plugins", "vendor.configbad.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("YAML 错误不应写入配置文件，stat err = %v", err)
+	}
+}
+
+func TestPluginHostConfigRejectsUnsafeUnknownAndNonPutGet(t *testing.T) {
+	reg := testRegistry(t)
+	cases := []struct {
+		method string
+		path   string
+		want   int
+		text   string
+	}{
+		{http.MethodGet, "/api/plugins/vendor%2Fevil/config", http.StatusBadRequest, "不安全路径字符"},
+		{http.MethodPut, "/api/plugins/vendor.missing/config", http.StatusNotFound, "vendor.missing"},
+		{http.MethodPost, "/api/plugins/vendor.method/config", http.StatusMethodNotAllowed, "method not allowed"},
+	}
+	for _, tc := range cases {
+		res := httptest.NewRecorder()
+		body := strings.NewReader(`{"content":"ok: true\n"}`)
+		NewHandler(reg).ServeHTTP(res, httptest.NewRequest(tc.method, tc.path, body))
+		if res.Code != tc.want {
+			t.Fatalf("%s %s status = %d, want %d; body = %s", tc.method, tc.path, res.Code, tc.want, res.Body.String())
+		}
+		if tc.text != "" && !strings.Contains(res.Body.String(), tc.text) {
+			t.Fatalf("%s %s 响应缺少 %q: %s", tc.method, tc.path, tc.text, res.Body.String())
+		}
+	}
+}
+
+func TestPluginHostConfigRejectsUnsafeUnknownBeforeYAMLValidation(t *testing.T) {
+	reg := testRegistry(t)
+	cases := []struct {
+		path string
+		want int
+		text string
+	}{
+		{"/api/plugins/vendor%2Fevil/config", http.StatusBadRequest, "不安全路径字符"},
+		{"/api/plugins/vendor.missing/config", http.StatusNotFound, "vendor.missing"},
+	}
+	for _, tc := range cases {
+		res := httptest.NewRecorder()
+		NewHandler(reg).ServeHTTP(res, httptest.NewRequest(http.MethodPut, tc.path, strings.NewReader(`{"content":"bad: [\n"}`)))
+		if res.Code != tc.want {
+			t.Fatalf("%s status = %d, want %d; body = %s", tc.path, res.Code, tc.want, res.Body.String())
+		}
+		if !strings.Contains(res.Body.String(), tc.text) {
+			t.Fatalf("%s 响应缺少 %q: %s", tc.path, tc.text, res.Body.String())
+		}
+		if strings.Contains(res.Body.String(), "YAML 语法错误") {
+			t.Fatalf("%s 应先校验插件 ID/存在性，不能先暴露 YAML 错误: %s", tc.path, res.Body.String())
+		}
+	}
+}
+
+func TestPluginHostConfigPutRollsBackOnReloadFailure(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.configrollback", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	configPath := filepath.Join(reg.BaseDir, "configs", "plugins", "vendor.configrollback.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("old: value\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installTestPlugin(t, reg.BaseDir, "vendor.configreloadbad", "1.0.0")
+	if err := os.WriteFile(filepath.Join(reg.BaseDir, "plugins", "vendor.configreloadbad", "plugin.yaml"), []byte("id: ../bad\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configrollback/config", strings.NewReader(`{"content":"new: value\n"}`)))
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want bad request; body = %s", res.Code, res.Body.String())
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "old: value\n" {
+		t.Fatalf("刷新失败应回滚旧配置，got: %s", data)
+	}
+}
+
+func TestPluginHostConfigAllowsDisabledPlugin(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPlugin(t, baseReg.BaseDir, "vendor.configdisabled", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	handler := NewHandler(reg)
+	disableRes := httptest.NewRecorder()
+	handler.ServeHTTP(disableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.configdisabled/disable", nil))
+	if disableRes.Code != http.StatusOK {
+		t.Fatalf("disable status = %d, body = %s", disableRes.Code, disableRes.Body.String())
+	}
+	putRes := httptest.NewRecorder()
+
+	handler.ServeHTTP(putRes, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configdisabled/config", strings.NewReader(`{"content":"disabled: true\n"}`)))
+
+	if putRes.Code != http.StatusOK {
+		t.Fatalf("disabled plugin config status = %d, body = %s", putRes.Code, putRes.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "configs", "plugins", "vendor.configdisabled.yaml")); err != nil {
+		t.Fatalf("禁用插件配置未写入: %v", err)
+	}
+}
+
+
 func TestPluginDisableAddsConfigAndRefreshesCatalog(t *testing.T) {
 	baseReg := testRegistry(t)
 	installTestPlugin(t, baseReg.BaseDir, "vendor.disable", "1.0.0")
@@ -1084,6 +1269,11 @@ func TestPluginRoutesPreserveUploadUserWorkflowActionsDeleteAndExport(t *testing
 	}
 	if contentType := exportRes.Header().Get("Content-Type"); contentType != "application/zip" {
 		t.Fatalf("export Content-Type = %q, want application/zip", contentType)
+	}
+	configRes := httptest.NewRecorder()
+	handler.ServeHTTP(configRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.route/config", nil))
+	if configRes.Code != http.StatusOK {
+		t.Fatalf("config status = %d, body = %s", configRes.Code, configRes.Body.String())
 	}
 	disableRes := httptest.NewRecorder()
 	handler.ServeHTTP(disableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.route/disable", nil))
@@ -1665,6 +1855,16 @@ contributes:
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(pluginDir, "scripts", "run.sh"), []byte("#!/usr/bin/env bash\necho demo\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

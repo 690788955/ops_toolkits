@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -28,6 +29,45 @@ func TestParseSetValues(t *testing.T) {
 	}
 	if got["a"] != "b" || got["c"] != "d=e" {
 		t.Fatalf("解析结果不符合预期: %#v", got)
+	}
+}
+
+func TestNestedValuesDeepMergeSetPathAndRedaction(t *testing.T) {
+	base := Values{
+		"es": Values{
+			"host":  "dev",
+			"ports": []interface{}{9200},
+			"auth":  Values{"user": "elastic", "password": "secret:env:ES_PASSWORD"},
+		},
+	}
+	override := Values{
+		"es": Values{
+			"host":  "prod",
+			"ports": []interface{}{9243},
+		},
+	}
+	merged := MergeValues(base, override)
+	if merged["es"].(Values)["host"] != "prod" {
+		t.Fatalf("host 未按高优先级覆盖: %#v", merged)
+	}
+	ports := merged["es"].(Values)["ports"].([]interface{})
+	if len(ports) != 1 || ports[0] != 9243 {
+		t.Fatalf("数组应整体覆盖: %#v", merged)
+	}
+	if merged["es"].(Values)["auth"].(Values)["user"] != "elastic" {
+		t.Fatalf("map 应递归保留低优先级字段: %#v", merged)
+	}
+	sets, err := ParseSetValuesNested([]string{"es.host=cli", "flat=value"})
+	if err != nil {
+		t.Fatalf("ParseSetValuesNested 返回错误: %v", err)
+	}
+	merged = MergeValues(merged, sets)
+	if merged["es"].(Values)["host"] != "cli" || merged["flat"] != "value" {
+		t.Fatalf("点路径覆盖失败: %#v", merged)
+	}
+	redacted := RedactSensitive(merged, []string{"es.auth.password"})
+	if redacted["es"].(Values)["auth"].(Values)["password"] != "******" {
+		t.Fatalf("敏感字段未脱敏: %#v", redacted)
 	}
 }
 
@@ -113,6 +153,36 @@ func TestLoadRootDoesNotDefaultLegacyPaths(t *testing.T) {
 	}
 	if len(cfg.Paths.Tools) != 0 || len(cfg.Paths.Workflows) != 0 {
 		t.Fatalf("legacy paths 不应被默认值覆盖: %#v", cfg.Paths)
+	}
+}
+
+func TestSaveRootPreservesDiskFieldsAndOmitsRuntimeCategories(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ops.yaml")
+	cfg := &RootConfig{
+		Name:        "legacy-name",
+		Description: "legacy-desc",
+		Categories:  []Category{{ID: "legacy", Name: "Legacy"}},
+		Plugins:     PluginsConfig{Paths: []string{"plugins"}, Disabled: []string{"vendor.disabled"}},
+		RuntimeCategories: []Category{
+			{ID: "runtime", Name: "Runtime"},
+		},
+	}
+	if err := SaveRoot(path, cfg); err != nil {
+		t.Fatalf("SaveRoot 返回错误: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{"name: legacy-name", "description: legacy-desc", "id: legacy", "vendor.disabled"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("SaveRoot 未保留 %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "runtime") {
+		t.Fatalf("SaveRoot 不应写入运行期分类: %s", text)
 	}
 }
 

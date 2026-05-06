@@ -1,0 +1,32 @@
+id: plugin.system-check
+name: 系统资源检查
+version: 1.0.0
+description: 跨发行版的系统资源检查工具，支持检查系统版本、CPU、内存、磁盘等信息
+author: ops-team
+
+contributes:
+  categories:
+    - id: system
+      name: 系统管理
+      description: 系统资源检查和管理工具
+
+  tools:
+    - id: plugin.system-check.info
+      name: 系统资源检查
+      category: system
+      description: 检查系统版本、CPU、内存、磁盘等资源信息（跨发行版兼容）
+      tags: [system, check, resource, cross-platform]
+      command: scripts/check.sh
+      args:
+        - --format
+        - "{{ .format }}"
+      workdir: .
+      timeout: 30s
+      parameters:
+        - name: format
+          type: string
+          description: 输出格式（text 或 json）
+          required: false
+          default: text
+      confirm:
+        required: false

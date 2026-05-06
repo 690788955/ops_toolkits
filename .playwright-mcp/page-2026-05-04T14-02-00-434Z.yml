@@ -1,0 +1,100 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: OPS
+      - generic [ref=e7]:
+        - heading "Shell 运维框架" [level=1] [ref=e8]
+        - paragraph [ref=e9]: 演示用 YAML 驱动运维自动化框架
+    - generic [ref=e10]: 运维分类
+    - generic [ref=e11]:
+      - button "全局工作流 跨分类选择所有可见工具和工作流" [ref=e12] [cursor=pointer]:
+        - generic [ref=e13]: 全局工作流
+        - generic [ref=e14]: 跨分类选择所有可见工具和工作流
+      - button "插件演示 通过插件机制接入的示例工具" [ref=e15] [cursor=pointer]:
+        - generic [ref=e16]: 插件演示
+        - generic [ref=e17]: 通过插件机制接入的示例工具
+      - button "巡检演示 通过插件机制接入的巡检示例工具" [ref=e18] [cursor=pointer]:
+        - generic [ref=e19]: 巡检演示
+        - generic [ref=e20]: 通过插件机制接入的巡检示例工具
+      - button "插件模板 插件模板示例分类" [ref=e21] [cursor=pointer]:
+        - generic [ref=e22]: 插件模板
+        - generic [ref=e23]: 插件模板示例分类
+    - button "+" [ref=e24] [cursor=pointer]
+  - main [ref=e25]:
+    - generic [ref=e26]:
+      - generic [ref=e27]:
+        - heading "全局工作流" [level=2] [ref=e28]
+        - paragraph [ref=e29]: 跨分类选择工具、工作流或打开编排器
+      - generic [ref=e30]: 可视化工作流编排
+    - generic [ref=e31]:
+      - button "工具" [ref=e32] [cursor=pointer]
+      - button "工作流" [ref=e33] [cursor=pointer]
+      - button "编排器" [ref=e34] [cursor=pointer]
+    - generic [ref=e35]:
+      - generic [ref=e36]:
+        - generic [ref=e37]:
+          - heading "工具列表" [level=3] [ref=e38]
+          - generic [ref=e39]: 5 / 5 项
+        - generic [ref=e40]:
+          - textbox "搜索名称、描述、ID 或标签" [ref=e41]
+          - generic [ref=e42]:
+            - button "全部" [ref=e43] [cursor=pointer]
+            - button "change" [ref=e44] [cursor=pointer]
+            - button "check" [ref=e45] [cursor=pointer]
+            - button "confirm" [ref=e46] [cursor=pointer]
+            - button "demo" [ref=e47] [cursor=pointer]
+            - button "high-risk" [ref=e48] [cursor=pointer]
+            - button "inspect" [ref=e49] [cursor=pointer]
+            - button "plugin" [ref=e50] [cursor=pointer]
+            - button "readonly" [ref=e51] [cursor=pointer]
+            - button "shell" [ref=e52] [cursor=pointer]
+            - button "template" [ref=e53] [cursor=pointer]
+        - generic [ref=e54]:
+          - button "插件确认演示 演示高风险插件工具执行前确认 plugin.demo.confirmed plugin demo confirm" [ref=e55] [cursor=pointer]:
+            - strong [ref=e56]: 插件确认演示
+            - generic [ref=e57]: 演示高风险插件工具执行前确认
+            - emphasis [ref=e58]: plugin.demo.confirmed
+            - generic [ref=e59]:
+              - generic [ref=e60]: plugin
+              - generic [ref=e61]: demo
+              - generic [ref=e62]: confirm
+          - button "插件巡检演示 模拟输出目标、CPU、磁盘和服务状态巡检结果 plugin.inspect.check plugin demo inspect check" [ref=e63] [cursor=pointer]:
+            - strong [ref=e64]: 插件巡检演示
+            - generic [ref=e65]: 模拟输出目标、CPU、磁盘和服务状态巡检结果
+            - emphasis [ref=e66]: plugin.inspect.check
+            - generic [ref=e67]:
+              - generic [ref=e68]: plugin
+              - generic [ref=e69]: demo
+              - generic [ref=e70]: inspect
+              - generic [ref=e71]: check
+          - button "目标检查 普通只读工具示例，检查目标状态并输出摘要 plugin.template.inspect plugin template readonly" [ref=e72] [cursor=pointer]:
+            - strong [ref=e73]: 目标检查
+            - generic [ref=e74]: 普通只读工具示例，检查目标状态并输出摘要
+            - emphasis [ref=e75]: plugin.template.inspect
+            - generic [ref=e76]:
+              - generic [ref=e77]: plugin
+              - generic [ref=e78]: template
+              - generic [ref=e79]: readonly
+          - button "变更执行 高风险工具示例，展示 confirm.required 和 dry-run 保护 plugin.template.apply plugin template change high-risk" [ref=e80] [cursor=pointer]:
+            - strong [ref=e81]: 变更执行
+            - generic [ref=e82]: 高风险工具示例，展示 confirm.required 和 dry-run 保护
+            - emphasis [ref=e83]: plugin.template.apply
+            - generic [ref=e84]:
+              - generic [ref=e85]: plugin
+              - generic [ref=e86]: template
+              - generic [ref=e87]: change
+              - generic [ref=e88]: high-risk
+          - button "插件问候演示 使用外部插件脚本输出问候信息 plugin.demo.greet plugin demo shell" [ref=e89] [cursor=pointer]:
+            - strong [ref=e90]: 插件问候演示
+            - generic [ref=e91]: 使用外部插件脚本输出问候信息
+            - emphasis [ref=e92]: plugin.demo.greet
+            - generic [ref=e93]:
+              - generic [ref=e94]: plugin
+              - generic [ref=e95]: demo
+              - generic [ref=e96]: shell
+      - generic [ref=e97]:
+        - heading "执行配置" [level=3] [ref=e99]
+        - generic [ref=e100]: 请先选择一个工具或工作流。
+    - generic [ref=e101]:
+      - heading "执行结果" [level=3] [ref=e103]
+      - generic [ref=e104]: 等待执行...

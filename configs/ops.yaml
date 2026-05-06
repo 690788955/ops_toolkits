@@ -1,28 +1,34 @@
 app:
   name: Shell 运维框架
-  description: 演示用 YAML 驱动运维自动化框架
+  description: 运维自动化框架
   version: 0.1.0
-
 paths:
   tools: []
   workflows: []
   runs: runs
   logs: runs/logs
-
 server:
   enabled: true
   host: 0.0.0.0
   port: 8080
-
 menu:
   categories: []
-
+registry:
+  include_tools: []
+  include_workflows: []
 plugins:
   paths:
     - plugins
   strict: false
   disabled: []
-
 ui:
   enabled: true
   title: 运维工作流控制台
+config_defaults: {}
+name: ""
+description: ""
+categories: []
+tools: []
+workflows: []
+http:
+  addr: ""

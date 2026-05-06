@@ -25,15 +25,16 @@ type Runner struct {
 }
 
 type RunRecord struct {
-	ID        string            `json:"id"`
-	Kind      string            `json:"kind"`
-	Target    string            `json:"target"`
-	Status    string            `json:"status"`
-	StartedAt time.Time         `json:"started_at"`
-	EndedAt   time.Time         `json:"ended_at"`
-	Params    map[string]string `json:"params"`
-	Steps     []StepRecord      `json:"steps,omitempty"`
-	Error     string            `json:"error,omitempty"`
+	ID        string                 `json:"id"`
+	Kind      string                 `json:"kind"`
+	Target    string                 `json:"target"`
+	Status    string                 `json:"status"`
+	StartedAt time.Time              `json:"started_at"`
+	EndedAt   time.Time              `json:"ended_at"`
+	Params    map[string]string      `json:"params"`
+	Config    map[string]interface{} `json:"config,omitempty"`
+	Steps     []StepRecord           `json:"steps,omitempty"`
+	Error     string                 `json:"error,omitempty"`
 }
 
 type StepRecord struct {
@@ -56,20 +57,24 @@ func New(reg *registry.Registry) *Runner {
 }
 
 func (r *Runner) RunTool(ctx context.Context, id string, params map[string]string, out, errOut io.Writer) (*RunRecord, error) {
+	return r.RunToolValues(ctx, id, config.StringMapToValues(params), out, errOut)
+}
+
+func (r *Runner) RunToolValues(ctx context.Context, id string, params map[string]interface{}, out, errOut io.Writer) (*RunRecord, error) {
 	tool, err := r.Registry.Tool(id)
 	if err != nil {
 		return nil, err
 	}
-	finalParams := config.MergeParams(tool.Config.Parameters, nil, params)
-	if err := config.ValidateRequired(tool.Config.Parameters, finalParams); err != nil {
+	finalValues, finalParams, sensitivePaths, err := r.resolveToolValues(tool, params)
+	if err != nil {
 		return nil, err
 	}
-	record := newRecord("tool", id, finalParams)
+	record := newRecord("tool", id, config.RedactSensitive(finalValues, sensitivePaths))
 	runDir, err := r.prepareRun(record.ID)
 	if err != nil {
 		return record, err
 	}
-	err = r.executeTool(ctx, tool, finalParams, runDir, out, errOut)
+	err = r.executeTool(ctx, tool, finalValues, finalParams, runDir, out, errOut)
 	finishRecord(record, err)
 	if saveErr := r.saveRecord(runDir, record); saveErr != nil && err == nil {
 		err = saveErr
@@ -98,7 +103,7 @@ func (r *Runner) RunWorkflowConfigWithConfirmation(ctx context.Context, wf *conf
 	if err := config.ValidateRequired(wf.Parameters, finalParams); err != nil {
 		return nil, err
 	}
-	record := newRecord("workflow", wf.ID, finalParams)
+	record := newRecord("workflow", wf.ID, config.StringMapToValues(finalParams))
 	runDir, err := r.prepareRun(record.ID)
 	if err != nil {
 		return nil, err
@@ -194,7 +199,13 @@ func (r *Runner) RunWorkflowConfigWithConfirmation(ctx context.Context, wf *conf
 		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Tool: node.Tool, Status: "running", StartedAt: time.Now()}
 		stepRunDir := filepath.Join(runDir, node.ID)
 		if toolErr == nil {
-			toolErr = r.executeTool(ctx, tool, stepParams, stepRunDir, out, errOut)
+			stepValues, stepFlat, _, resolveErr := r.resolveToolValues(tool, config.StringMapToValues(stepParams))
+			if resolveErr != nil {
+				toolErr = resolveErr
+			} else {
+				stepParams = stepFlat
+				toolErr = r.executeTool(ctx, tool, stepValues, stepFlat, stepRunDir, out, errOut)
+			}
 		}
 		stepRecord.EndedAt = time.Now()
 		if toolErr != nil {
@@ -345,7 +356,12 @@ func (r *Runner) executeLoop(ctx context.Context, node config.WorkflowNode, node
 	for iteration := 1; iteration <= node.Loop.MaxIterations; iteration++ {
 		stepParams := resolveStepParams(finalParams, workflowContext, loopParams)
 		stepRunDir := filepath.Join(runDir, node.ID, fmt.Sprintf("%d", iteration))
-		if err := r.executeTool(ctx, tool, stepParams, stepRunDir, out, errOut); err != nil {
+		stepValues, stepFlat, _, resolveErr := r.resolveToolValues(tool, config.StringMapToValues(stepParams))
+		if resolveErr != nil {
+			return fmt.Errorf("循环节点 %s 第 %d 次解析工具 %s 配置失败: %w", node.ID, iteration, toolID, resolveErr)
+		}
+		stepParams = stepFlat
+		if err := r.executeTool(ctx, tool, stepValues, stepFlat, stepRunDir, out, errOut); err != nil {
 			return fmt.Errorf("循环节点 %s 第 %d 次执行工具 %s 失败: %w", node.ID, iteration, toolID, err)
 		}
 		addStepContext(workflowContext, fmt.Sprintf("%s.%d", node.ID, iteration), stepParams, stepRunDir)
@@ -391,7 +407,7 @@ func readLoopText(runDir, nodeID, fileName string, maxIterations int) string {
 	return strings.Join(parts, "\n")
 }
 
-func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, params map[string]string, runDir string, out, errOut io.Writer) error {
+func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values map[string]interface{}, params map[string]string, runDir string, out, errOut io.Writer) error {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return err
 	}
@@ -399,16 +415,25 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, params ma
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	paramFile, err := writeParamFile(runDir, tool.Config.PassMode, params)
+	paramFile, err := writeParamFile(runDir, tool.Config.PassMode, values)
+	if err != nil {
+		return err
+	}
+	configEnv, configArgs, err := r.passConfigFiles(tool, runDir)
 	if err != nil {
 		return err
 	}
 	entry := filepath.Join(tool.Dir, filepath.FromSlash(tool.Config.Execution.Entry))
-	cmd := buildCommand(execCtx, entry, *tool.Config, params, paramFile)
+	cmd := buildCommand(execCtx, entry, *tool.Config, params, paramFile, configArgs)
 	cmd.Dir = resolveWorkdir(tool.Dir, tool.Config.Execution.Workdir)
 	cmd.Env = append(os.Environ(), encodeEnv(params)...)
+	cmd.Env = append(cmd.Env, configEnv...)
 	if paramFile != "" {
 		cmd.Env = append(cmd.Env, "OPS_PARAM_FILE="+paramFile)
+	}
+	globalEnvPath := config.GlobalEnvPath(r.Registry.BaseDir)
+	if absPath, err := filepath.Abs(globalEnvPath); err == nil {
+		cmd.Env = append(cmd.Env, "OPS_GLOBAL_ENV_FILE="+absPath)
 	}
 	for k, v := range tool.Config.Env {
 		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
@@ -432,8 +457,9 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, params ma
 	return nil
 }
 
-func buildCommand(ctx context.Context, entry string, tool config.ToolConfig, params map[string]string, paramFile string) *exec.Cmd {
+func buildCommand(ctx context.Context, entry string, tool config.ToolConfig, params map[string]string, paramFile string, extraArgs []string) *exec.Cmd {
 	args := renderArgs(tool.Execution.Args, params)
+	args = append(args, extraArgs...)
 	if len(args) == 0 && tool.PassMode.Args {
 		for _, k := range sortedKeys(params) {
 			args = append(args, "--"+k, params[k])
@@ -476,7 +502,7 @@ func resolveWorkdir(toolDir, workdir string) string {
 	return filepath.Join(toolDir, filepath.FromSlash(workdir))
 }
 
-func writeParamFile(runDir string, mode config.PassMode, params map[string]string) (string, error) {
+func writeParamFile(runDir string, mode config.PassMode, params map[string]interface{}) (string, error) {
 	if !mode.ParamFile {
 		return "", nil
 	}
@@ -485,10 +511,103 @@ func writeParamFile(runDir string, mode config.PassMode, params map[string]strin
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+func (r *Runner) resolveToolValues(tool *registry.Tool, runtimeParams map[string]interface{}) (config.Values, map[string]string, []string, error) {
+	values := config.MergeValues(
+		config.MergeParameterDefaults(tool.Config.Parameters),
+		r.Registry.Root.ConfigDefaults,
+		tool.Config.PluginConfig.SharedConfig,
+		tool.Config.PluginConfig.PackageDefaultConfig,
+		tool.Config.ConfigDefaults,
+		tool.Config.PluginConfig.HostConfig,
+		config.InterfaceMapToValues(runtimeParams),
+	)
+	if err := config.ValidateRequiredValues(tool.Config.Parameters, values); err != nil {
+		return nil, nil, nil, err
+	}
+	sensitivePaths := append([]string{}, tool.Config.PluginConfig.SensitivePaths...)
+	sensitivePaths = append(sensitivePaths, tool.Config.SensitivePaths...)
+	sensitivePaths = append(sensitivePaths, config.SensitivePathsFromParams(tool.Config.Parameters)...)
+	return values, config.FlattenValues(values), sensitivePaths, nil
+}
+
+func (r *Runner) passConfigFiles(tool *registry.Tool, runDir string) ([]string, []string, error) {
+	// 合并配置文件：plugin.yaml 中的 + mapping.yaml 中的
+	configFiles := append([]config.ConfigFile{}, tool.Config.ConfigFiles...)
+
+	// 从 mapping.yaml 读取额外的绑定
+	if tool.Config.PluginConfig.ID != "" {
+		mappingPath, err := config.PluginConfigMappingPath(r.Registry.BaseDir, tool.Config.PluginConfig.ID)
+		if err == nil {
+			mapping, exists, err := config.LoadOptionalPluginConfigMapping(mappingPath)
+			if err == nil && exists {
+				if toolMapping, ok := mapping.Tools[tool.Config.ID]; ok {
+					configFiles = append(configFiles, toolMapping.ConfigFiles...)
+				}
+			}
+		}
+	}
+
+	if len(configFiles) == 0 {
+		return nil, nil, nil
+	}
+
+	configsDir := filepath.Join(runDir, "configs")
+	if err := os.MkdirAll(configsDir, 0o755); err != nil {
+		return nil, nil, err
+	}
+	env := []string{}
+	args := []string{}
+
+	for _, cf := range configFiles {
+		// 读取配置文件内容（从存储位置或使用默认内容）
+		content, err := config.LoadPluginConfigFile(r.Registry.BaseDir, tool.Config.PluginConfig.ID, cf.Name)
+		if err != nil {
+			return nil, nil, fmt.Errorf("读取配置文件 %s 失败: %w", cf.Name, err)
+		}
+		if content == "" && cf.DefaultContent != "" {
+			content = cf.DefaultContent
+		}
+		if content == "" && cf.Required {
+			return nil, nil, fmt.Errorf("配置文件 %s 必填但内容为空", cf.Name)
+		}
+
+		// 根据传递方式处理
+		switch cf.PassVia {
+		case "arg":
+			// 写入到 configs 目录并通过参数传递路径
+			filePath := filepath.Join(configsDir, cf.Name)
+			if err := os.WriteFile(filePath, []byte(content), 0o600); err != nil {
+				return nil, nil, fmt.Errorf("写入配置文件 %s 失败: %w", cf.Name, err)
+			}
+			args = append(args, cf.Arg, filePath)
+
+		case "env":
+			// 写入到 configs 目录并通过环境变量传递路径
+			filePath := filepath.Join(configsDir, cf.Name)
+			if err := os.WriteFile(filePath, []byte(content), 0o600); err != nil {
+				return nil, nil, fmt.Errorf("写入配置文件 %s 失败: %w", cf.Name, err)
+			}
+			env = append(env, cf.Env+"="+filePath)
+
+		case "copy":
+			// 复制到工具工作目录
+			workdir := tool.Dir
+			if tool.Config.Execution.Workdir != "" {
+				workdir = filepath.Join(tool.Dir, tool.Config.Execution.Workdir)
+			}
+			filePath := filepath.Join(workdir, cf.Name)
+			if err := os.WriteFile(filePath, []byte(content), 0o600); err != nil {
+				return nil, nil, fmt.Errorf("复制配置文件 %s 到工作目录失败: %w", cf.Name, err)
+			}
+		}
+	}
+	return env, args, nil
 }
 
 func encodeEnv(params map[string]string) []string {
@@ -501,11 +620,38 @@ func encodeEnv(params map[string]string) []string {
 }
 
 func resolveStepParams(global, templateContext map[string]string, step map[string]interface{}) map[string]string {
-	out := copyParams(global)
+	base := config.StringMapToValues(global)
+	resolved := config.Values{}
 	for k, v := range step {
-		out[k] = renderTemplate(fmt.Sprint(v), templateContext)
+		mergeStepParam(resolved, k, v, templateContext)
 	}
-	return out
+	return config.FlattenValues(config.MergeValues(base, resolved))
+}
+
+func mergeStepParam(out map[string]interface{}, prefix string, value interface{}, templateContext map[string]string) {
+	if nested, ok := value.(map[string]interface{}); ok {
+		branch := config.Values{}
+		for k, v := range nested {
+			mergeStepParam(branch, k, v, templateContext)
+		}
+		if err := config.SetPathValue(out, prefix, branch); err != nil {
+			out[prefix] = branch
+		}
+		return
+	}
+	if nested, ok := value.(map[interface{}]interface{}); ok {
+		branch := config.Values{}
+		for k, v := range nested {
+			mergeStepParam(branch, fmt.Sprint(k), v, templateContext)
+		}
+		if err := config.SetPathValue(out, prefix, branch); err != nil {
+			out[prefix] = branch
+		}
+		return
+	}
+	if err := config.SetPathValue(out, prefix, renderTemplate(fmt.Sprint(value), templateContext)); err != nil {
+		out[prefix] = renderTemplate(fmt.Sprint(value), templateContext)
+	}
 }
 
 func addStepContext(context map[string]string, nodeID string, params map[string]string, runDir string) {
@@ -546,8 +692,9 @@ func (r *Runner) saveRecord(dir string, record *RunRecord) error {
 	return os.WriteFile(filepath.Join(dir, "result.json"), data, 0o644)
 }
 
-func newRecord(kind, target string, params map[string]string) *RunRecord {
-	return &RunRecord{ID: fmt.Sprintf("%s-%d", kind, time.Now().UnixNano()), Kind: kind, Target: target, Status: "running", StartedAt: time.Now(), Params: copyParams(params)}
+func newRecord(kind, target string, params map[string]interface{}) *RunRecord {
+	flat := config.FlattenValues(params)
+	return &RunRecord{ID: fmt.Sprintf("%s-%d", kind, time.Now().UnixNano()), Kind: kind, Target: target, Status: "running", StartedAt: time.Now(), Params: flat, Config: config.CopyValues(params)}
 }
 
 func finishRecord(record *RunRecord, err error) {

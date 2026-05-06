@@ -138,6 +138,31 @@ func validateTool(pkg Package, tool Tool, seen map[string]bool) error {
 			return fmt.Errorf("插件工具 %s 的 workdir 不安全: %w", tool.ID, err)
 		}
 	}
+	for _, cf := range tool.ConfigFiles {
+		if strings.TrimSpace(cf.Name) == "" {
+			return fmt.Errorf("插件工具 %s 的 config_files.name 必填", tool.ID)
+		}
+		if strings.TrimSpace(cf.Format) == "" {
+			return fmt.Errorf("插件工具 %s 的 config_files.format 必填", tool.ID)
+		}
+		validFormats := map[string]bool{"ini": true, "env": true, "yaml": true, "json": true, "toml": true, "text": true}
+		if !validFormats[cf.Format] {
+			return fmt.Errorf("插件工具 %s 的 config_files.format 必须是 ini/env/yaml/json/toml/text 之一", tool.ID)
+		}
+		if strings.TrimSpace(cf.PassVia) == "" {
+			return fmt.Errorf("插件工具 %s 的 config_files.pass_via 必填", tool.ID)
+		}
+		validPassVia := map[string]bool{"arg": true, "env": true, "copy": true}
+		if !validPassVia[cf.PassVia] {
+			return fmt.Errorf("插件工具 %s 的 config_files.pass_via 必须是 arg/env/copy 之一", tool.ID)
+		}
+		if cf.PassVia == "arg" && strings.TrimSpace(cf.Arg) == "" {
+			return fmt.Errorf("插件工具 %s 的 config_files.arg 必填（当 pass_via=arg 时）", tool.ID)
+		}
+		if cf.PassVia == "env" && strings.TrimSpace(cf.Env) == "" {
+			return fmt.Errorf("插件工具 %s 的 config_files.env 必填（当 pass_via=env 时）", tool.ID)
+		}
+	}
 	return nil
 }
 
@@ -157,6 +182,22 @@ func validateWorkflow(pkg Package, workflow Workflow, seen map[string]bool) erro
 		return fmt.Errorf("插件 %s 的 workflow 不存在: %w", pkg.Manifest.ID, err)
 	} else if info.IsDir() {
 		return fmt.Errorf("插件 %s 的 workflow 不能是目录", pkg.Manifest.ID)
+	}
+	return nil
+}
+
+func validateTemplateOutput(output string) error {
+	if filepath.IsAbs(output) {
+		return fmt.Errorf("不允许绝对路径 %s", output)
+	}
+	clean := filepath.Clean(filepath.FromSlash(output))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("路径逃逸 generated 目录 %s", output)
+	}
+	for _, part := range strings.FieldsFunc(output, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("包含不安全路径片段 %s", output)
+		}
 	}
 	return nil
 }

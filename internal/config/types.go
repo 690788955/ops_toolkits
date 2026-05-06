@@ -6,20 +6,21 @@ import (
 )
 
 type RootConfig struct {
-	App               AppConfig      `yaml:"app" json:"app"`
-	Paths             PathsConfig    `yaml:"paths" json:"paths"`
-	Server            ServerConfig   `yaml:"server" json:"server"`
-	Menu              MenuConfig     `yaml:"menu" json:"menu"`
-	Registry          RegistryConfig `yaml:"registry" json:"registry"`
-	Plugins           PluginsConfig  `yaml:"plugins" json:"plugins"`
-	UI                UIConfig       `yaml:"ui" json:"ui"`
-	Name              string         `yaml:"name" json:"-"`
-	Description       string         `yaml:"description" json:"-"`
-	Categories        []Category     `yaml:"categories" json:"-"`
-	Tools             []ToolEntry    `yaml:"tools" json:"-"`
-	Workflows         []WorkflowRef  `yaml:"workflows" json:"-"`
-	HTTP              HTTPConfig     `yaml:"http" json:"-"`
-	RuntimeCategories []Category     `yaml:"-" json:"-"`
+	App               AppConfig              `yaml:"app" json:"app"`
+	Paths             PathsConfig            `yaml:"paths" json:"paths"`
+	Server            ServerConfig           `yaml:"server" json:"server"`
+	Menu              MenuConfig             `yaml:"menu" json:"menu"`
+	Registry          RegistryConfig         `yaml:"registry" json:"registry"`
+	Plugins           PluginsConfig          `yaml:"plugins" json:"plugins"`
+	UI                UIConfig               `yaml:"ui" json:"ui"`
+	ConfigDefaults    map[string]interface{} `yaml:"config_defaults" json:"config_defaults"`
+	RuntimeCategories []Category             `yaml:"-" json:"-"`
+	Name              string                 `yaml:"name" json:"-"`
+	Description       string                 `yaml:"description" json:"-"`
+	Categories        []Category             `yaml:"categories" json:"-"`
+	Tools             []ToolEntry            `yaml:"tools" json:"-"`
+	Workflows         []WorkflowRef          `yaml:"workflows" json:"-"`
+	HTTP              HTTPConfig             `yaml:"http" json:"-"`
 }
 
 type AppConfig struct {
@@ -89,21 +90,25 @@ type WorkflowRef struct {
 }
 
 type ToolConfig struct {
-	ID           string            `yaml:"id" json:"id"`
-	Name         string            `yaml:"name" json:"name"`
-	Description  string            `yaml:"description" json:"description"`
-	Version      string            `yaml:"version" json:"version"`
-	Category     string            `yaml:"category" json:"category"`
-	Tags         []string          `yaml:"tags" json:"tags"`
-	Help         HelpConfig        `yaml:"help" json:"help"`
-	Entry        string            `yaml:"entry" json:"entry"`
-	Execution    ExecutionConfig   `yaml:"execution" json:"execution"`
-	Parameters   []Parameter       `yaml:"parameters" json:"parameters"`
-	PassMode     PassMode          `yaml:"pass_mode" json:"pass_mode"`
-	Timeout      string            `yaml:"timeout" json:"timeout"`
-	Confirm      Confirmation      `yaml:"confirm" json:"confirm"`
-	Confirmation Confirmation      `yaml:"confirmation" json:"-"`
-	Env          map[string]string `yaml:"env" json:"env"`
+	ID              string                 `yaml:"id" json:"id"`
+	Name            string                 `yaml:"name" json:"name"`
+	Description     string                 `yaml:"description" json:"description"`
+	Version         string                 `yaml:"version" json:"version"`
+	Category        string                 `yaml:"category" json:"category"`
+	Tags            []string               `yaml:"tags" json:"tags"`
+	Help            HelpConfig             `yaml:"help" json:"help"`
+	Entry           string                 `yaml:"entry" json:"entry"`
+	Execution       ExecutionConfig        `yaml:"execution" json:"execution"`
+	Parameters      []Parameter            `yaml:"parameters" json:"parameters"`
+	PassMode        PassMode               `yaml:"pass_mode" json:"pass_mode"`
+	Timeout         string                 `yaml:"timeout" json:"timeout"`
+	Confirm         Confirmation           `yaml:"confirm" json:"confirm"`
+	Confirmation    Confirmation           `yaml:"confirmation" json:"-"`
+	Env             map[string]string      `yaml:"env" json:"env"`
+	ConfigDefaults  map[string]interface{} `yaml:"config_defaults" json:"config_defaults"`
+	PluginConfig    PluginToolConfig       `yaml:"-" json:"-"`
+	ConfigFiles     []ConfigFile           `yaml:"config_files" json:"config_files"`
+	SensitivePaths  []string               `yaml:"sensitive_paths" json:"sensitive_paths"`
 }
 
 type HelpConfig struct {
@@ -117,6 +122,34 @@ type ExecutionConfig struct {
 	Args    []string `yaml:"args" json:"args"`
 	Timeout string   `yaml:"timeout" json:"timeout"`
 	Workdir string   `yaml:"workdir" json:"workdir"`
+}
+
+type ConfigFile struct {
+	Name           string `yaml:"name" json:"name"`
+	Format         string `yaml:"format" json:"format"`                   // ini/env/yaml/json/toml/text
+	Description    string `yaml:"description" json:"description"`
+	Required       bool   `yaml:"required" json:"required"`
+	PassVia        string `yaml:"pass_via" json:"pass_via"`               // arg/env/copy
+	Arg            string `yaml:"arg,omitempty" json:"arg,omitempty"`
+	Env            string `yaml:"env,omitempty" json:"env,omitempty"`
+	DefaultContent string `yaml:"default_content,omitempty" json:"default_content,omitempty"`
+}
+
+type PluginConfigMapping struct {
+	Tools map[string]PluginToolConfigMapping `yaml:"tools" json:"tools"`
+}
+
+type PluginToolConfigMapping struct {
+	ConfigFiles []ConfigFile `yaml:"config_files" json:"config_files"`
+}
+
+type PluginToolConfig struct {
+	ID                   string                 `yaml:"-" json:"-"`
+	Dir                  string                 `yaml:"-" json:"-"`
+	SharedConfig         map[string]interface{} `yaml:"-" json:"-"`
+	PackageDefaultConfig map[string]interface{} `yaml:"-" json:"-"`
+	HostConfig           map[string]interface{} `yaml:"-" json:"-"`
+	SensitivePaths       []string               `yaml:"-" json:"-"`
 }
 
 type PassMode struct {
@@ -137,6 +170,7 @@ type Parameter struct {
 	Description string      `yaml:"description" json:"description"`
 	Required    bool        `yaml:"required" json:"required"`
 	Default     interface{} `yaml:"default" json:"default"`
+	Sensitive   bool        `yaml:"sensitive" json:"sensitive"`
 }
 
 type WorkflowConfig struct {

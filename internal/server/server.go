@@ -585,9 +585,10 @@ type pluginCatalogEntry struct {
 }
 
 type runRequest struct {
-	Params   map[string]string      `json:"params"`
-	Confirm  bool                   `json:"confirm"`
-	Workflow *config.WorkflowConfig `json:"workflow,omitempty"`
+	Params        map[string]interface{} `json:"params"`
+	Confirm       bool                   `json:"confirm"`
+	Workflow      *config.WorkflowConfig `json:"workflow,omitempty"`
+	ConfigVersion string                 `json:"config_version,omitempty"`
 }
 
 type workflowSaveRequest struct {
@@ -647,6 +648,29 @@ func NewHandler(reg *registry.Registry) http.Handler {
 	mux := http.NewServeMux()
 	registerWeb(mux)
 	mux.HandleFunc("/api/catalog", catalogHandler(state))
+	mux.HandleFunc("/api/config/global", globalConfigHandler(state))
+	mux.HandleFunc("/api/config/global-env", globalEnvConfigHandler(state))
+	mux.HandleFunc("/api/config/templates/", configTemplatesHandler(state))
+	mux.HandleFunc("/api/config/global/versions/", func(w http.ResponseWriter, req *http.Request) {
+		path := strings.TrimPrefix(req.URL.Path, "/api/config/global/versions/")
+		if path == "" {
+			// /api/config/global/versions
+			handleConfigVersions(w, req, state, "global", "ops")
+			return
+		}
+		parts := strings.Split(path, "/")
+		if len(parts) == 2 && parts[1] == "default" {
+			// /api/config/global/versions/{version}/default
+			handleSetDefaultVersion(w, req, state, "global", "ops", parts[0])
+			return
+		}
+		if len(parts) == 1 {
+			// /api/config/global/versions/{version}
+			handleConfigVersion(w, req, state, "global", "ops", parts[0])
+			return
+		}
+		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
+	})
 	mux.HandleFunc("/api/dev/toolkit.zip", toolDevKitHandler())
 	mux.HandleFunc("/api/plugins/user-workflows.zip", userWorkflowPluginExportHandler(state))
 	mux.HandleFunc("/api/plugins/upload", pluginUploadHandler(state))
@@ -665,6 +689,160 @@ func catalogHandler(state *serverState) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, response{Data: buildCatalog(state.registry())})
 	}
+}
+
+func globalConfigHandler(state *serverState) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		reg := state.registry()
+		if req.Method == http.MethodGet {
+			handleGlobalConfigGet(w, reg)
+			return
+		}
+		if req.Method == http.MethodPut {
+			handleGlobalConfigPut(w, req, state)
+			return
+		}
+		methodNotAllowed(w)
+	}
+}
+
+func handleGlobalConfigGet(w http.ResponseWriter, reg *registry.Registry) {
+	path := config.RootPath(reg.BaseDir)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusNotFound, response{Error: "全局配置文件不存在"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{
+		"content": string(content),
+		"path":    relativePath(reg.BaseDir, path),
+	}})
+}
+
+func handleGlobalConfigPut(w http.ResponseWriter, req *http.Request, state *serverState) {
+	defer req.Body.Close()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	reg := state.reg
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+
+	// 先验证 YAML 是否有效
+	var testRoot config.RootConfig
+	if err := yaml.Unmarshal([]byte(body.Content), &testRoot); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: fmt.Sprintf("YAML 格式无效: %v", err)})
+		return
+	}
+
+	path := config.RootPath(reg.BaseDir)
+	oldContent, readErr := os.ReadFile(path)
+	existed := readErr == nil
+	if readErr != nil && !os.IsNotExist(readErr) {
+		writeJSON(w, http.StatusInternalServerError, response{Error: readErr.Error()})
+		return
+	}
+	if err := os.WriteFile(path, []byte(body.Content), 0o644); err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+		return
+	}
+	newReg, err := registry.Load(reg.BaseDir)
+	if err != nil {
+		if existed {
+			_ = os.WriteFile(path, oldContent, 0o644)
+		} else {
+			_ = os.Remove(path)
+		}
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("重新加载注册表失败，已回滚配置文件: %v", err)})
+		return
+	}
+	state.reg = newReg
+	writeJSON(w, http.StatusOK, response{Status: "saved", Data: map[string]string{"message": "全局配置已保存"}})
+}
+
+func globalEnvConfigHandler(state *serverState) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		reg := state.registry()
+		if req.Method == http.MethodGet {
+			handleGlobalEnvConfigGet(w, reg)
+			return
+		}
+		if req.Method == http.MethodPut {
+			handleGlobalEnvConfigPut(w, req, state)
+			return
+		}
+		methodNotAllowed(w)
+	}
+}
+
+func handleGlobalEnvConfigGet(w http.ResponseWriter, reg *registry.Registry) {
+	path := config.GlobalEnvPath(reg.BaseDir)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{
+				"content": "",
+				"path":    relativePath(reg.BaseDir, path),
+			}})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{
+		"content": string(content),
+		"path":    relativePath(reg.BaseDir, path),
+	}})
+}
+
+func handleGlobalEnvConfigPut(w http.ResponseWriter, req *http.Request, state *serverState) {
+	defer req.Body.Close()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	reg := state.reg
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+
+	path := config.GlobalEnvPath(reg.BaseDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+		return
+	}
+	oldContent, readErr := os.ReadFile(path)
+	existed := readErr == nil
+	if readErr != nil && !os.IsNotExist(readErr) {
+		writeJSON(w, http.StatusInternalServerError, response{Error: readErr.Error()})
+		return
+	}
+	if err := os.WriteFile(path, []byte(body.Content), 0o644); err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+		return
+	}
+	newReg, err := registry.Load(reg.BaseDir)
+	if err != nil {
+		if existed {
+			_ = os.WriteFile(path, oldContent, 0o644)
+		} else {
+			_ = os.Remove(path)
+		}
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("重新加载注册表失败，已回滚配置文件: %v", err)})
+		return
+	}
+	state.reg = newReg
+	writeJSON(w, http.StatusOK, response{Status: "saved", Data: map[string]string{"message": "全局环境配置已保存"}})
 }
 
 func toolsHandler(state *serverState) http.HandlerFunc {
@@ -705,7 +883,7 @@ func toolsHandler(state *serverState) http.HandlerFunc {
 			writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
 			return
 		}
-		params := config.MergeParams(tool.Config.Parameters, nil, reqBody.Params)
+		params := config.ValuesToStringMap(config.MergeParamsValues(tool.Config.Parameters, nil, config.InterfaceMapToValues(reqBody.Params)))
 		if err := config.ValidateRequired(tool.Config.Parameters, params); err != nil {
 			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 			return
@@ -714,7 +892,7 @@ func toolsHandler(state *serverState) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, response{Error: "该工具需要确认后执行"})
 			return
 		}
-		record, err := r.RunTool(context.Background(), id, params, io.Discard, io.Discard)
+		record, err := r.RunToolValues(context.Background(), id, config.InterfaceMapToValues(reqBody.Params), io.Discard, io.Discard)
 		writeRunResponse(w, record, err)
 	}
 }
@@ -781,7 +959,7 @@ func handleWorkflowRun(w http.ResponseWriter, req *http.Request, reg *registry.R
 		}
 		workflowConfig = wf.Config
 	}
-	params := config.MergeParams(workflowConfig.Parameters, nil, reqBody.Params)
+	params := config.ValuesToStringMap(config.MergeParamsValues(workflowConfig.Parameters, nil, config.InterfaceMapToValues(reqBody.Params)))
 	if err := config.ValidateRequired(workflowConfig.Parameters, params); err != nil {
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 		return
@@ -922,12 +1100,56 @@ func userWorkflowPluginExportHandler(state *serverState) http.HandlerFunc {
 func pluginDownloadHandler(state *serverState) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		name := strings.TrimPrefix(req.URL.Path, "/api/plugins/")
-		if strings.HasSuffix(name, "/disable") {
-			handlePluginDisable(w, req, state, strings.TrimSuffix(name, "/disable"))
+
+		// 配置文件路由：/api/plugins/{id}/files
+		if strings.HasSuffix(name, "/files") || strings.Contains(name, "/files/") {
+			parts := strings.Split(strings.Trim(name, "/"), "/")
+			if len(parts) >= 2 && parts[1] == "files" {
+				pluginID := parts[0]
+				if len(parts) == 2 {
+					// /api/plugins/{id}/files - 列出配置文件
+					handlePluginConfigFiles(w, req, state, pluginID)
+				} else {
+					// /api/plugins/{id}/files/{filename} - 读取/保存/删除配置文件
+					fileName := strings.Join(parts[2:], "/")
+					handlePluginConfigFile(w, req, state, pluginID, fileName)
+				}
+				return
+			}
+		}
+
+		if pluginID, ok := strings.CutSuffix(name, "/disable"); ok {
+			handlePluginDisable(w, req, state, pluginID)
 			return
 		}
-		if strings.HasSuffix(name, "/enable") {
-			handlePluginEnable(w, req, state, strings.TrimSuffix(name, "/enable"))
+		if pluginID, ok := strings.CutSuffix(name, "/enable"); ok {
+			handlePluginEnable(w, req, state, pluginID)
+			return
+		}
+		if pluginID, ok := strings.CutSuffix(name, "/config"); ok {
+			handlePluginConfig(w, req, state, pluginID)
+			return
+		}
+		// 版本管理路由
+		if parts := strings.Split(strings.Trim(name, "/"), "/"); len(parts) >= 2 && parts[len(parts)-2] == "versions" {
+			// /api/plugins/{id}/config/versions/{version}/default
+			if len(parts) >= 4 && parts[len(parts)-1] == "default" {
+				pluginID := strings.Join(parts[:len(parts)-4], "/")
+				version := parts[len(parts)-2]
+				handleSetDefaultVersion(w, req, state, "plugin", pluginID, version)
+				return
+			}
+			// /api/plugins/{id}/config/versions/{version}
+			if len(parts) >= 3 {
+				pluginID := strings.Join(parts[:len(parts)-3], "/")
+				version := parts[len(parts)-1]
+				handleConfigVersion(w, req, state, "plugin", pluginID, version)
+				return
+			}
+		}
+		if pluginID, ok := strings.CutSuffix(name, "/config/versions"); ok {
+			// /api/plugins/{id}/config/versions
+			handleConfigVersions(w, req, state, "plugin", pluginID)
 			return
 		}
 		if req.Method == http.MethodDelete {
@@ -1056,7 +1278,7 @@ func registerWeb(mux *http.ServeMux) {
 }
 
 func buildCatalog(reg *registry.Registry) catalogResponse {
-	out := catalogResponse{Name: reg.Root.DisplayName(), Description: reg.Root.DisplayDescription(), Categories: catalogCategoryEntries(reg)}
+	out := catalogResponse{Name: reg.Root.DisplayName(), Description: reg.Root.DisplayDescription(), Categories: buildCatalogCategories(reg)}
 	for _, item := range catalogPluginEntries(reg) {
 		out.Plugins = append(out.Plugins, item)
 	}
@@ -1069,63 +1291,51 @@ func buildCatalog(reg *registry.Registry) catalogResponse {
 	return out
 }
 
-func catalogCategoryEntries(reg *registry.Registry) []categoryCatalogEntry {
-	entries := []categoryCatalogEntry{}
+func buildCatalogCategories(reg *registry.Registry) []categoryCatalogEntry {
+	active := activeCategoryIDs(reg)
+	out := make([]categoryCatalogEntry, 0, len(reg.Root.DisplayCategories()))
 	seen := map[string]bool{}
-	activeCategories := map[string]bool{}
-	for _, tool := range reg.Tools {
-		if tool.Entry.Category != "" {
-			activeCategories[tool.Entry.Category] = true
+	for _, category := range reg.Root.DisplayCategories() {
+		entry := categoryCatalogEntry{Category: category}
+		if !active[category.ID] {
+			if source, ok := disabledCategorySource(reg, category.ID); ok {
+				entry.Disabled = true
+				entry.Source = &source
+			}
+		}
+		out = append(out, entry)
+		if category.ID != "" {
+			seen[category.ID] = true
 		}
 	}
-	for _, wf := range reg.Workflows {
-		if wf.Entry.Category != "" {
-			activeCategories[wf.Entry.Category] = true
-		}
-	}
-	disabledCategories := map[string]config.Category{}
-	disabledSources := map[string]registry.Source{}
-	disabledOrder := []string{}
 	for _, pkg := range installedAnyPluginPackages(reg) {
 		if !pluginDisabled(reg.Root.Plugins.Disabled, pkg) {
 			continue
 		}
 		source := registry.Source{Type: "plugin", PluginID: pkg.Manifest.ID, PluginName: pkg.Manifest.Name, PluginVersion: pkg.Manifest.Version}
 		for _, category := range pkg.Manifest.Contributes.Categories {
-			if category.ID == "" || activeCategories[category.ID] {
+			if category.ID == "" || seen[category.ID] || active[category.ID] {
 				continue
 			}
-			if _, exists := disabledCategories[category.ID]; !exists {
-				disabledOrder = append(disabledOrder, category.ID)
+			out = append(out, categoryCatalogEntry{Category: category, Disabled: true, Source: &source})
+			seen[category.ID] = true
+		}
+	}
+	return out
+}
+
+func disabledCategorySource(reg *registry.Registry, categoryID string) (registry.Source, bool) {
+	for _, pkg := range installedAnyPluginPackages(reg) {
+		if !pluginDisabled(reg.Root.Plugins.Disabled, pkg) {
+			continue
+		}
+		for _, category := range pkg.Manifest.Contributes.Categories {
+			if category.ID == categoryID {
+				return registry.Source{Type: "plugin", PluginID: pkg.Manifest.ID, PluginName: pkg.Manifest.Name, PluginVersion: pkg.Manifest.Version}, true
 			}
-			disabledCategories[category.ID] = category
-			disabledSources[category.ID] = source
 		}
 	}
-	for _, category := range reg.Root.DisplayCategories() {
-		if category.ID == "" || seen[category.ID] {
-			continue
-		}
-		entry := categoryCatalogEntry{Category: category}
-		if source, ok := disabledSources[category.ID]; ok && !activeCategories[category.ID] {
-			sourceCopy := source
-			entry.Disabled = true
-			entry.Source = &sourceCopy
-		}
-		entries = append(entries, entry)
-		seen[category.ID] = true
-	}
-	for _, id := range disabledOrder {
-		if seen[id] {
-			continue
-		}
-		category := disabledCategories[id]
-		source := disabledSources[id]
-		sourceCopy := source
-		entries = append(entries, categoryCatalogEntry{Category: category, Disabled: true, Source: &sourceCopy})
-		seen[id] = true
-	}
-	return entries
+	return registry.Source{}, false
 }
 
 func effectiveWorkflowConfirm(reg *registry.Registry, wf *config.WorkflowConfig) config.Confirmation {
@@ -1409,7 +1619,7 @@ func decodeRunRequest(req *http.Request) (*runRequest, error) {
 		return nil, err
 	}
 	if body.Params == nil {
-		body.Params = map[string]string{}
+		body.Params = map[string]interface{}{}
 	}
 	return &body, nil
 }
@@ -1429,4 +1639,286 @@ func errorText(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func configTemplatesHandler(state *serverState) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		path := strings.TrimPrefix(req.URL.Path, "/api/config/templates/")
+		if path == "" {
+			// GET /api/config/templates/ - 列出所有配置文件
+			if req.Method == http.MethodGet {
+				handleListTemplates(w, req, state)
+				return
+			}
+			// POST /api/config/templates/ - 新增配置文件
+			if req.Method == http.MethodPost {
+				handleCreateTemplate(w, req, state)
+				return
+			}
+			methodNotAllowed(w)
+			return
+		}
+		// GET /api/config/templates/{name} - 读取配置文件内容
+		if req.Method == http.MethodGet {
+			handleGetTemplate(w, req, state, path)
+			return
+		}
+		// PUT /api/config/templates/{name} - 保存配置文件内容
+		if req.Method == http.MethodPut {
+			handlePutTemplate(w, req, state, path)
+			return
+		}
+		// DELETE /api/config/templates/{name} - 删除配置文件
+		if req.Method == http.MethodDelete {
+			handleDeleteTemplate(w, req, state, path)
+			return
+		}
+		methodNotAllowed(w)
+	}
+}
+
+func handleListTemplates(w http.ResponseWriter, req *http.Request, state *serverState) {
+	baseDir := state.registry().BaseDir
+	templatesDir := filepath.Join(baseDir, "configs", "templates")
+
+	// 确保目录存在
+	if err := os.MkdirAll(templatesDir, 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("创建模板目录失败: %v", err)})
+		return
+	}
+
+	entries, err := os.ReadDir(templatesDir)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("读取模板目录失败: %v", err)})
+		return
+	}
+
+	templates := []map[string]interface{}{}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tmpl") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		templates = append(templates, map[string]interface{}{
+			"name":        entry.Name(),
+			"size":        info.Size(),
+			"modified_at": info.ModTime().Format("2006-01-02T15:04:05Z07:00"),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"templates": templates}})
+}
+
+func handleGetTemplate(w http.ResponseWriter, req *http.Request, state *serverState, name string) {
+	// 安全检查：防止路径穿越
+	if strings.Contains(name, "..") || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		writeJSON(w, http.StatusBadRequest, response{Error: "无效的模板名称"})
+		return
+	}
+
+	baseDir := state.registry().BaseDir
+	templatePath := filepath.Join(baseDir, "configs", "templates", name)
+
+	content, err := os.ReadFile(filepath.Clean(templatePath))
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusNotFound, response{Error: "模板文件不存在"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("读取模板失败: %v", err)})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{
+		"name":    name,
+		"content": string(content),
+		"path":    filepath.ToSlash(filepath.Join("configs", "templates", name)),
+	}})
+}
+
+func handlePutTemplate(w http.ResponseWriter, req *http.Request, state *serverState, name string) {
+	// 安全检查
+	if strings.Contains(name, "..") || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		writeJSON(w, http.StatusBadRequest, response{Error: "无效的模板名称"})
+		return
+	}
+
+	defer req.Body.Close()
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: "请求格式错误"})
+		return
+	}
+
+	baseDir := state.registry().BaseDir
+	templatesDir := filepath.Join(baseDir, "configs", "templates")
+
+	// 确保目录存在
+	if err := os.MkdirAll(templatesDir, 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("创建模板目录失败: %v", err)})
+		return
+	}
+
+	templatePath := filepath.Join(templatesDir, name)
+	if err := os.WriteFile(filepath.Clean(templatePath), []byte(body.Content), 0o644); err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("保存模板失败: %v", err)})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{
+		"name": name,
+		"path": filepath.ToSlash(filepath.Join("configs", "templates", name)),
+	}})
+}
+
+func handleCreateTemplate(w http.ResponseWriter, req *http.Request, state *serverState) {
+	defer req.Body.Close()
+	var body struct {
+		Name    string `json:"name"`
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: "请求格式错误"})
+		return
+	}
+
+	// 安全检查
+	if body.Name == "" || strings.Contains(body.Name, "..") || strings.Contains(body.Name, "/") || strings.Contains(body.Name, "\\") {
+		writeJSON(w, http.StatusBadRequest, response{Error: "无效的模板名称"})
+		return
+	}
+
+	// 确保文件名以 .tmpl 结尾
+	if !strings.HasSuffix(body.Name, ".tmpl") {
+		body.Name += ".tmpl"
+	}
+
+	baseDir := state.registry().BaseDir
+	templatesDir := filepath.Join(baseDir, "configs", "templates")
+
+	// 确保目录存在
+	if err := os.MkdirAll(templatesDir, 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("创建模板目录失败: %v", err)})
+		return
+	}
+
+	templatePath := filepath.Join(templatesDir, body.Name)
+
+	// 检查文件是否已存在
+	if _, err := os.Stat(templatePath); err == nil {
+		writeJSON(w, http.StatusConflict, response{Error: "模板文件已存在"})
+		return
+	}
+
+	if err := os.WriteFile(filepath.Clean(templatePath), []byte(body.Content), 0o644); err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("创建模板失败: %v", err)})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, response{Data: map[string]interface{}{
+		"name": body.Name,
+		"path": filepath.ToSlash(filepath.Join("configs", "templates", body.Name)),
+	}})
+}
+
+func handleDeleteTemplate(w http.ResponseWriter, req *http.Request, state *serverState, name string) {
+	// 安全检查
+	if strings.Contains(name, "..") || strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		writeJSON(w, http.StatusBadRequest, response{Error: "无效的模板名称"})
+		return
+	}
+
+	baseDir := state.registry().BaseDir
+	templatePath := filepath.Join(baseDir, "configs", "templates", name)
+
+	if err := os.Remove(filepath.Clean(templatePath)); err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, http.StatusNotFound, response{Error: "模板文件不存在"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("删除模板失败: %v", err)})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"name": name}})
+}
+
+func handlePluginConfigFiles(w http.ResponseWriter, req *http.Request, state *serverState, pluginID string) {
+	if req.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+
+	baseDir := state.registry().BaseDir
+	files, err := config.ListPluginConfigFiles(baseDir, pluginID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("列出配置文件失败: %v", err)})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"files": files}})
+}
+
+func handlePluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileName string) {
+	switch req.Method {
+	case http.MethodGet:
+		handleGetPluginConfigFile(w, req, state, pluginID, fileName)
+	case http.MethodPut:
+		handleSavePluginConfigFile(w, req, state, pluginID, fileName)
+	case http.MethodDelete:
+		handleDeletePluginConfigFile(w, req, state, pluginID, fileName)
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func handleGetPluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileName string) {
+	baseDir := state.registry().BaseDir
+	content, err := config.LoadPluginConfigFile(baseDir, pluginID, fileName)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("读取配置文件失败: %v", err)})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"content": content}})
+}
+
+func handleSavePluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileName string) {
+	defer req.Body.Close()
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: "请求格式错误"})
+		return
+	}
+
+	baseDir := state.registry().BaseDir
+	if err := config.SavePluginConfigFile(baseDir, pluginID, fileName, body.Content); err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("保存配置文件失败: %v", err)})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"message": "配置文件已保存"}})
+}
+
+func handleDeletePluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileName string) {
+	baseDir := state.registry().BaseDir
+	filePath, err := config.PluginConfigFilePath(baseDir, pluginID, fileName)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+
+	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("删除配置文件失败: %v", err)})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"message": "配置文件已删除"}})
 }

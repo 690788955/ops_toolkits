@@ -1,0 +1,136 @@
+id: lzyh.es_backup
+name: 柳州银行 ES Snapshot 备份恢复
+version: 1.0.0
+description: 将 Elasticsearch Snapshot 备份、查询和恢复脚本封装为 opsctl 插件工具
+author: 柳州银行运维
+
+contributes:
+  categories:
+    - id: es-backup
+      name: ES 备份恢复
+      description: Elasticsearch Snapshot 备份、查询与恢复工具
+
+  tools:
+    - id: lzyh.es_backup.create
+      name: ES Snapshot 备份
+      category: es-backup
+      description: 按日期目录创建 ES Snapshot，支持同名快照策略与旧备份清理
+      tags: [elasticsearch, snapshot, backup]
+      command: scripts/run_backup.sh
+      args:
+        - --config
+        - "{{ .config }}"
+        - --on-exist
+        - "{{ .on_exist }}"
+        - --dry-run
+        - "{{ .dry_run }}"
+        - --yes
+        - "{{ .yes }}"
+      workdir: .
+      timeout: 2h
+      parameters:
+        - name: config
+          type: string
+          description: 配置文件路径；默认使用插件内 scripts/backup.conf
+          required: false
+          default: scripts/backup.conf
+        - name: on_exist
+          type: string
+          description: 当天同名快照已存在时的处理策略：ask、skip、overwrite、fail
+          required: false
+          default: skip
+        - name: dry_run
+          type: string
+          description: 是否仅演练清理旧备份目录，不实际删除；true 或 false
+          required: false
+          default: "false"
+        - name: yes
+          type: string
+          description: 是否使用非交互确认模式；定时/接口调用建议 true
+          required: false
+          default: "true"
+      confirm:
+        required: true
+        message: 将对 ES 集群创建快照，并可能按保留策略清理旧备份目录，确认继续？
+
+    - id: lzyh.es_backup.list
+      name: ES Snapshot 备份查询
+      category: es-backup
+      description: 列出可恢复备份或查看指定日期快照详情
+      tags: [elasticsearch, snapshot, query]
+      command: scripts/run_restore_query.sh
+      args:
+        - --action
+        - "{{ .action }}"
+        - --date
+        - "{{ .date }}"
+        - --config
+        - "{{ .config }}"
+      workdir: .
+      timeout: 10m
+      parameters:
+        - name: action
+          type: string
+          description: 查询动作：list 列出备份；info 查看指定日期详情
+          required: false
+          default: list
+        - name: date
+          type: string
+          description: 备份日期，action=info 时必填，格式 YYYY-MM-DD
+          required: false
+          default: ""
+        - name: config
+          type: string
+          description: 配置文件路径；默认使用插件内 scripts/backup.conf
+          required: false
+          default: scripts/backup.conf
+      confirm:
+        required: false
+
+    - id: lzyh.es_backup.restore
+      name: ES Snapshot 恢复
+      category: es-backup
+      description: 将指定日期的 ES Snapshot 恢复到目标集群，可选索引重命名
+      tags: [elasticsearch, snapshot, restore]
+      command: scripts/run_restore.sh
+      args:
+        - --date
+        - "{{ .date }}"
+        - --config
+        - "{{ .config }}"
+        - --rename-pattern
+        - "{{ .rename_pattern }}"
+        - --rename-to
+        - "{{ .rename_to }}"
+        - --yes
+        - "{{ .yes }}"
+      workdir: .
+      timeout: 2h
+      parameters:
+        - name: date
+          type: string
+          description: 要恢复的备份日期，格式 YYYY-MM-DD
+          required: true
+        - name: config
+          type: string
+          description: 配置文件路径；默认使用插件内 scripts/backup.conf
+          required: false
+          default: scripts/backup.conf
+        - name: rename_pattern
+          type: string
+          description: 可选索引重命名匹配表达式，例如 (.+)
+          required: false
+          default: ""
+        - name: rename_to
+          type: string
+          description: 可选索引重命名目标表达式，例如 restored_$1
+          required: false
+          default: ""
+        - name: yes
+          type: string
+          description: 是否使用非交互确认模式；默认 false，建议人工确认恢复影响后再设为 true
+          required: false
+          default: "false"
+      confirm:
+        required: true
+        message: 将向目标 ES 集群提交快照恢复请求，可能影响现有索引数据，确认继续？

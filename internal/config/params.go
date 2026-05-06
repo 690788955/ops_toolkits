@@ -8,19 +8,12 @@ import (
 )
 
 func MergeParams(defs []Parameter, fileParams, overrides map[string]string) map[string]string {
-	merged := map[string]string{}
-	for _, p := range defs {
-		if p.Default != nil {
-			merged[p.Name] = fmt.Sprint(p.Default)
-		}
-	}
-	for k, v := range fileParams {
-		merged[k] = v
-	}
-	for k, v := range overrides {
-		merged[k] = v
-	}
-	return merged
+	merged := MergeParamsValues(defs, StringMapToValues(fileParams), StringMapToValues(overrides))
+	return ValuesToStringMap(merged)
+}
+
+func MergeParamsValues(defs []Parameter, fileParams, overrides map[string]interface{}) Values {
+	return MergeValues(MergeParameterDefaults(defs), fileParams, overrides)
 }
 
 func PromptMissing(defs []Parameter, params map[string]string, reader io.Reader, writer io.Writer) error {
@@ -52,22 +45,13 @@ func PromptMissing(defs []Parameter, params map[string]string, reader io.Reader,
 }
 
 func ValidateRequired(defs []Parameter, params map[string]string) error {
-	for _, p := range defs {
-		if p.Required && strings.TrimSpace(params[p.Name]) == "" {
-			return fmt.Errorf("缺少必填参数 %s", p.Name)
-		}
-	}
-	return nil
+	return ValidateRequiredValues(defs, StringMapToValues(params))
 }
 
 func ParseSetValues(values []string) (map[string]string, error) {
-	out := map[string]string{}
-	for _, item := range values {
-		parts := strings.SplitN(item, "=", 2)
-		if len(parts) != 2 || parts[0] == "" {
-			return nil, fmt.Errorf("无效的 --set 值 %q，预期格式为 key=value", item)
-		}
-		out[parts[0]] = parts[1]
+	out, err := ParseSetValuesNested(values)
+	if err != nil {
+		return nil, err
 	}
-	return out, nil
+	return ValuesToStringMap(out), nil
 }
