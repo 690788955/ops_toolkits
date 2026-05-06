@@ -1197,6 +1197,7 @@ function GlobalEnvConfigPanel({onBack, onSaved}) {
 }
 
 function PluginConfigPanel({plugin, onBack, onSaved}) {
+  const [activeTab, setActiveTab] = useState('config') // 'config' or 'files'
   const [content, setContent] = useState('')
   const [path, setPath] = useState('')
   const [exists, setExists] = useState(false)
@@ -1252,19 +1253,157 @@ function PluginConfigPanel({plugin, onBack, onSaved}) {
             <p>{plugin.name || pluginID}：业务配置 {path || `configs/plugins/${pluginID}.yaml`}</p>
           </div>
         </div>
-        <div className="pluginConfigEditor">
-          <div className="empty small">{exists ? '正在编辑已有业务配置文件。' : '无配置文件时可从空 YAML 开始，保存后创建。'}</div>
-          <label>
-            <span>YAML 内容</span>
-            <textarea value={content} disabled={loading || saving} placeholder="例如：&#10;service:&#10;  name: demo-service&#10;  endpoint: http://127.0.0.1:9200" onChange={event => setContent(event.target.value)} />
-          </label>
-          <div className="buttonRow">
-            <button className="primary" disabled={loading || saving} onClick={saveConfig}>保存业务配置</button>
-            <button className="secondary" disabled={saving} onClick={onBack}>返回列表</button>
-          </div>
-          <pre className="modalResult">{message}</pre>
+        <div className="pluginConfigTabs">
+          <button
+            className={activeTab === 'config' ? 'active' : ''}
+            onClick={() => setActiveTab('config')}
+          >
+            业务配置
+          </button>
+          <button
+            className={activeTab === 'files' ? 'active' : ''}
+            onClick={() => setActiveTab('files')}
+          >
+            配置文件
+          </button>
         </div>
+        {activeTab === 'config' ? (
+          <div className="pluginConfigEditor">
+            <div className="empty small">{exists ? '正在编辑已有业务配置文件。' : '无配置文件时可从空 YAML 开始，保存后创建。'}</div>
+            <label>
+              <span>YAML 内容</span>
+              <textarea value={content} disabled={loading || saving} placeholder="例如：&#10;service:&#10;  name: demo-service&#10;  endpoint: http://127.0.0.1:9200" onChange={event => setContent(event.target.value)} />
+            </label>
+            <div className="buttonRow">
+              <button className="primary" disabled={loading || saving} onClick={saveConfig}>保存业务配置</button>
+              <button className="secondary" disabled={saving} onClick={onBack}>返回列表</button>
+            </div>
+            <pre className="modalResult">{message}</pre>
+          </div>
+        ) : (
+          <PluginConfigFilesPanel pluginID={pluginID} onBack={onBack} />
+        )}
       </section>
+    </div>
+  )
+}
+
+function PluginConfigFilesPanel({pluginID, onBack}) {
+  const [files, setFiles] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [message, setMessage] = useState('正在加载配置文件列表...')
+  const [editingFile, setEditingFile] = useState(null)
+
+  useEffect(() => {
+    loadFiles()
+  }, [pluginID])
+
+  async function loadFiles() {
+    setLoading(true)
+    setMessage('正在加载配置文件列表...')
+    try {
+      const body = await fetchJSON(`/api/plugins/${encodeURIComponent(pluginID)}/files`)
+      setFiles(body.data?.files || [])
+      setMessage(body.data?.files?.length > 0 ? `已加载 ${body.data.files.length} 个配置文件。` : '当前没有配置文件。')
+    } catch (err) {
+      setMessage(readableAPIError(err, '加载配置文件列表失败。'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  if (editingFile) {
+    return (
+      <PluginConfigFileEditor
+        pluginID={pluginID}
+        fileName={editingFile}
+        onBack={() => {
+          setEditingFile(null)
+          loadFiles()
+        }}
+      />
+    )
+  }
+
+  return (
+    <div className="pluginConfigFilesPanel">
+      <div className="empty small">配置文件由工具声明，用户可以编辑文件内容。工具执行时框架会将配置文件传递给插件脚本。</div>
+      <div className="configFilesList">
+        {files.map(file => (
+          <div className="configFileItem" key={file}>
+            <div>
+              <strong>{file}</strong>
+              <span>configs/plugins/{pluginID}/files/{file}</span>
+            </div>
+            <button className="secondary" onClick={() => setEditingFile(file)}>编辑</button>
+          </div>
+        ))}
+        {files.length === 0 && !loading && (
+          <div className="empty">当前没有配置文件。配置文件由插件工具在 plugin.yaml 中声明。</div>
+        )}
+      </div>
+      <div className="buttonRow">
+        <button className="secondary" onClick={onBack}>返回列表</button>
+      </div>
+      <pre className="modalResult">{message}</pre>
+    </div>
+  )
+}
+
+function PluginConfigFileEditor({pluginID, fileName, onBack}) {
+  const [content, setContent] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState('正在读取配置文件...')
+
+  useEffect(() => {
+    loadFile()
+  }, [pluginID, fileName])
+
+  async function loadFile() {
+    setLoading(true)
+    setMessage('正在读取配置文件...')
+    try {
+      const body = await fetchJSON(`/api/plugins/${encodeURIComponent(pluginID)}/files/${encodeURIComponent(fileName)}`)
+      setContent(body.data?.content || '')
+      setMessage('已加载配置文件。')
+    } catch (err) {
+      setMessage(readableAPIError(err, '读取配置文件失败。'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function saveFile() {
+    setSaving(true)
+    setMessage('正在保存配置文件...')
+    try {
+      await putJSON(`/api/plugins/${encodeURIComponent(pluginID)}/files/${encodeURIComponent(fileName)}`, {content})
+      setMessage('配置文件已保存。')
+    } catch (err) {
+      setMessage(readableAPIError(err, '保存配置文件失败。'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="pluginConfigEditor">
+      <div className="empty small">编辑配置文件：{fileName}</div>
+      <label>
+        <span>文件内容</span>
+        <textarea
+          value={content}
+          disabled={loading || saving}
+          placeholder="输入配置文件内容..."
+          onChange={event => setContent(event.target.value)}
+        />
+      </label>
+      <div className="buttonRow">
+        <button className="primary" disabled={loading || saving} onClick={saveFile}>保存配置文件</button>
+        <button className="secondary" disabled={saving} onClick={onBack}>返回列表</button>
+      </div>
+      <pre className="modalResult">{message}</pre>
     </div>
   )
 }

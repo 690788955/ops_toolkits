@@ -1461,3 +1461,78 @@ fieldset legend {
   .topbar h2 { font-size: 38px; }
   .buttonRow { flex-direction: column; }
 }
+
+/* 插件配置标签页 */
+.pluginConfigTabs {
+  display: flex;
+  gap: 8px;
+  padding: 0 32px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.pluginConfigTabs button {
+  padding: 12px 20px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--color-muted);
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.pluginConfigTabs button:hover {
+  color: var(--color-text);
+}
+
+.pluginConfigTabs button.active {
+  color: var(--color-text);
+  border-bottom-color: var(--color-black);
+}
+
+/* 配置文件面板 */
+.pluginConfigFilesPanel {
+  display: grid;
+  gap: 24px;
+  padding: 32px;
+}
+
+.configFilesList {
+  display: grid;
+  gap: 12px;
+}
+
+.configFileItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  transition: all 0.2s;
+}
+
+.configFileItem:hover {
+  background: var(--color-surface);
+  box-shadow: var(--shadow-whisper);
+}
+
+.configFileItem > div {
+  display: grid;
+  gap: 4px;
+}
+
+.configFileItem strong {
+  color: var(--color-text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.configFileItem span {
+  color: var(--color-muted);
+  font-size: 13px;
+}
+
+.configFileItem button {
+  flex-shrink: 0;
+}
