@@ -18,10 +18,8 @@ plugin.template/
 ├── README.md               # 插件说明文档
 ├── scripts/                # 工具脚本目录
 │   └── example.sh         # 示例工具脚本
-├── configs/               # 配置文件目录（可选）
-│   ├── default.yaml       # 插件默认配置
-│   └── templates/         # 配置模板目录
-│       └── example.conf.tmpl  # 示例配置模板
+├── config/                # 配置文件目录（可选）
+│   └── example.conf       # 示例配置文件
 └── examples/              # 示例文件目录（可选）
     └── params.yaml        # 参数示例
 ```
@@ -84,62 +82,34 @@ contributes:
 
 ### 如何使用配置文件？
 
-**1. 在 plugin.yaml 中声明配置文件**
+**1. 在插件目录内放置配置文件**
+
+例如：
+
+```text
+plugins/plugin.mycompany.mytool/
+├── plugin.yaml
+├── config/
+│   └── example.conf
+└── scripts/
+    └── run.sh
+```
+
+**2. 在 plugin.yaml 中声明插件内相对路径**
 
 ```yaml
 tools:
   - id: plugin.mycompany.mytool.action
     name: 执行操作
+    command: scripts/run.sh
+    args:
+      - --config
+      - config/example.conf
     config_files:
-      - name: example.conf
-        format: ini  # ini/env/yaml/json/toml/text
-        description: 示例配置文件
-        required: false
-        pass_via: arg  # arg/env/copy
-        arg: --config
-        default_content: |
-          [service]
-          name = MyService
-          endpoint = https://api.example.com
+      - config/example.conf
 ```
 
-**配置文件字段说明**：
-- `name`：配置文件名称（必填）
-- `format`：文件格式（必填）- `ini`/`env`/`yaml`/`json`/`toml`/`text`
-- `description`：配置文件描述
-- `required`：是否必填
-- `pass_via`：传递方式（必填）- `arg`/`env`/`copy`
-- `arg`：命令行参数名（当 `pass_via=arg` 时必填）
-- `env`：环境变量名（当 `pass_via=env` 时必填）
-- `default_content`：默认内容（用户未创建配置文件时使用）
-
-**2. 配置文件传递方式**
-
-**方式 1：通过命令行参数传递路径**
-```yaml
-config_files:
-  - name: backup.conf
-    format: ini
-    pass_via: arg
-    arg: --config  # 生成: --config /path/to/backup.conf
-```
-
-**方式 2：通过环境变量传递路径**
-```yaml
-config_files:
-  - name: backup.conf
-    format: ini
-    pass_via: env
-    env: BACKUP_CONFIG_FILE  # 设置: BACKUP_CONFIG_FILE=/path/to/backup.conf
-```
-
-**方式 3：复制到工具工作目录**
-```yaml
-config_files:
-  - name: backup.conf
-    format: ini
-    pass_via: copy  # 框架复制到工作目录，工具直接读取 ./backup.conf
-```
+`config_files` 只声明页面可以编辑哪些插件内文件。框架不会自动传参、复制或生成配置文件；工具脚本应按自己的逻辑读取这些文件。
 
 **3. 在脚本中使用配置文件**
 
@@ -147,8 +117,8 @@ config_files:
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 通过参数接收配置文件路径
-CONFIG_FILE=""
+CONFIG_FILE="config/example.conf"
+
 while [[ $# -gt 0 ]]; do
   case $1 in
     --config)
@@ -162,7 +132,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# 使用配置文件
 if [[ -f "$CONFIG_FILE" ]]; then
   echo "使用配置文件: $CONFIG_FILE"
   # 读取配置...
@@ -171,24 +140,12 @@ fi
 
 **4. 用户如何编辑配置文件**
 
-用户通过 Web UI 或 API 直接编辑配置文件内容：
-- 配置文件存储在：`configs/plugins/{plugin-id}/files/{file-name}`
-- 用户看到的就是工具实际使用的配置文件内容
-- 支持语法高亮（根据 `format` 字段）
+用户通过 Web UI 或 API 直接编辑插件目录内声明路径对应的文件：
+- 声明 `config/example.conf` 时，页面编辑 `plugins/{plugin-id}/config/example.conf`
+- 声明 `config/database.yaml` 时，页面编辑 `plugins/{plugin-id}/config/database.yaml`
+- 路径必须留在插件目录内，不能使用绝对路径或 `..` 逃逸
 
-### 配置文件存储位置
-
-配置文件按插件存储：
-```
-configs/
-└── plugins/
-    └── {plugin-id}/
-        └── files/
-            ├── example.conf
-            └── database.conf
-```
-
-同一插件的多个工具可以共享配置文件。
+同一插件的多个工具可以共享同一个配置文件声明。
 
 ## 参数定义
 
@@ -326,7 +283,7 @@ exit 0
 - [ ] `plugin.yaml` 信息完整
 - [ ] 工具脚本可执行
 - [ ] 参数定义正确
-- [ ] 配置模板语法正确
+- [ ] 插件内配置文件路径已在 `config_files` 中声明
 - [ ] README.md 文档完善
 - [ ] 示例文件齐全
 
@@ -371,22 +328,17 @@ done < "$OPS_GLOBAL_ENV_FILE"
 
 ### Q: 如何在工具间共享配置？
 
-A: 使用全局配置文件库（`configs/templates/`），多个工具可以绑定同一个配置文件。
+A: 将共享配置文件放在插件目录内，例如 `config/common.yaml`，多个工具在 `config_files` 中声明同一个相对路径，并在脚本参数或脚本默认值中读取同一个文件。
 
-### Q: 配置模板支持哪些语法？
+### Q: `config_files` 会不会自动传给工具？
 
-A: 使用 Go template 语法：
-- 变量：`{{ .var }}`
-- 条件：`{{ if .condition }}...{{ end }}`
-- 循环：`{{ range .items }}...{{ end }}`
-- 函数：`{{ .var | default "value" }}`
+A: 不会。`config_files` 只用于 Web 配置页面展示和编辑插件内文件。工具是否通过 `--config config/example.conf`、固定路径、环境变量或其他方式读取配置，由插件脚本自己决定。
 
-### Q: 如何调试配置模板？
+### Q: 如何调试配置文件读取？
 
-A: 运行工具后，生成的配置文件在 `runs/logs/{run_id}/generated/` 目录。
+A: 直接检查插件目录内声明的文件内容，例如 `plugins/{plugin-id}/config/example.conf`；工具运行日志仍在 `runs/logs/{run_id}/`。
 
 ## 参考资源
 
 - [系统资源检查插件](../plugin.system-check/) - 完整的插件示例
 - [框架文档](../../README.md) - 框架使用说明
-- [Go Template 语法](https://pkg.go.dev/text/template) - 配置模板语法参考

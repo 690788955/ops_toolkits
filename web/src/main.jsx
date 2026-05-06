@@ -191,8 +191,7 @@ function App() {
   const [pluginUploadState, setPluginUploadState] = useState({message: '请选择插件 ZIP 包。'})
   const [configSelectedPlugin, setConfigSelectedPlugin] = useState(null)
   const [platformSettingsOpen, setPlatformSettingsOpen] = useState(false)
-  const [templateLibraryOpen, setTemplateLibraryOpen] = useState(false)
-  const [templateEditing, setTemplateEditing] = useState(null)
+  const [globalEnvOpen, setGlobalEnvOpen] = useState(false)
 
   async function refreshCatalog(options = {}) {
     const body = await fetchJSON('/api/catalog')
@@ -226,6 +225,11 @@ function App() {
   }, [catalog, activeCategory])
 
   const categoryDisabled = Boolean(category?.disabled)
+
+  const hasConfigTab = useMemo(() => {
+    const tools = catalog?.tools || []
+    return tools.some(tool => tool.config_files && tool.config_files.length > 0)
+  }, [catalog])
 
   const sourceEntries = useMemo(() => {
     if (!catalog || categoryDisabled) return []
@@ -325,7 +329,7 @@ function App() {
           </div>
           <div className="topbarActions">
             <div className="hint">可视化工作流编排</div>
-            <button className="settingsButton" type="button" title="配置文件库" aria-label="配置文件库" onClick={() => setTemplateLibraryOpen(true)}>📁</button>
+            <button className="settingsButton" type="button" title="全局环境" aria-label="全局环境" onClick={() => setGlobalEnvOpen(true)}>🌐</button>
             <button className="settingsButton" type="button" title="平台设置" aria-label="平台设置" onClick={() => setPlatformSettingsOpen(true)}>⚙️</button>
           </div>
         </header>
@@ -334,23 +338,25 @@ function App() {
           <button className={activeTab === 'tools' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('tools'); setSelected(null); setActiveTag(''); resetResult() }}>工具</button>
           <button className={activeTab === 'workflows' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('workflows'); setSelected(null); setActiveTag(''); resetResult() }}>工作流</button>
           <button className={activeTab === 'editor' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('editor'); setSelected(null); setActiveTag(''); resetResult() }}>编排器</button>
-          <button className={activeTab === 'config' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('config'); setSelected(null); setActiveTag(''); setConfigSelectedPlugin(null); resetResult() }}>配置</button>
+          {hasConfigTab && <button className={activeTab === 'config' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('config'); setSelected(null); setActiveTag(''); setConfigSelectedPlugin(null); resetResult() }}>配置</button>}
         </div>
 
         {activeTab === 'editor' ? (
           <WorkflowEditor catalog={catalog} activeCategory={activeCategory} setResult={setResult} refreshCatalog={refreshCatalog} />
-        ) : activeTab === 'config' ? (
+        ) : (activeTab === 'config' && hasConfigTab) ? (
           <ConfigPanel catalog={catalog} activeCategory={activeCategory} configSelectedPlugin={configSelectedPlugin} setConfigSelectedPlugin={setConfigSelectedPlugin} refreshCatalog={refreshCatalog} />
         ) : (
           <RunPanel activeTab={activeTab} entries={entries} totalEntries={sourceEntries.length} selected={selected} params={params} setParams={setParams} selectEntry={selectEntry} runSelected={runSelected} searchText={searchText} setSearchText={setSearchText} activeTag={activeTag} setActiveTag={setActiveTag} availableTags={availableTags} />
         )}
 
-        <section className="card resultCard">
-          <div className="cardHeader">
-            <h3>执行结果</h3>
-          </div>
-          <ResultView result={result} />
-        </section>
+        {activeTab !== 'config' && (
+          <section className="card resultCard">
+            <div className="cardHeader">
+              <h3>执行结果</h3>
+            </div>
+            <ResultView result={result} />
+          </section>
+        )}
       </main>
       {pluginModalOpen && (
         <PluginManagerModal
@@ -378,17 +384,14 @@ function App() {
           }}
         />
       )}
-      {templateLibraryOpen && !templateEditing && (
-        <ConfigTemplateLibraryModal
-          onClose={() => setTemplateLibraryOpen(false)}
-          onEdit={template => setTemplateEditing(template)}
-        />
-      )}
-      {templateEditing && (
-        <ConfigTemplateEditorModal
-          template={templateEditing}
-          onClose={() => setTemplateEditing(null)}
-          onSaved={() => setTemplateEditing(null)}
+      {globalEnvOpen && (
+        <GlobalEnvModal
+          onClose={() => setGlobalEnvOpen(false)}
+          onSaved={async body => {
+            await refreshCatalog()
+            setGlobalEnvOpen(false)
+            setResult({message: summarizeAPIResponse(body, '全局环境已保存。'), response: body})
+          }}
         />
       )}
     </div>
@@ -399,16 +402,6 @@ function ConfigPanel({catalog, activeCategory, configSelectedPlugin, setConfigSe
   const configItems = useMemo(() => buildConfigItems(catalog, activeCategory), [catalog, activeCategory])
 
   if (configSelectedPlugin) {
-    if (configSelectedPlugin.type === 'global-env') {
-      return (
-        <GlobalEnvConfigPanel
-          onBack={() => setConfigSelectedPlugin(null)}
-          onSaved={async () => {
-            await refreshCatalog()
-          }}
-        />
-      )
-    }
     return (
       <PluginConfigPanel
         plugin={configSelectedPlugin}
@@ -436,24 +429,29 @@ function ConfigPanel({catalog, activeCategory, configSelectedPlugin, setConfigSe
 function buildConfigItems(catalog, activeCategory) {
   const items = []
 
-  // 全局环境配置始终显示
-  items.push({
-    type: 'global-env',
-    id: 'global-env',
-    name: '全局环境',
-    typeLabel: '环境',
-    description: '全局环境配置文件，存储可被所有工具插件调用的全局参数（数据库连接、API密钥等）',
-    files: [{path: 'configs/global-env.conf', label: ''}],
-    disabled: false
-  })
-
-  // 插件配置
   const plugins = catalog?.plugins || []
   const tools = catalog?.tools || []
   const workflows = catalog?.workflows || []
 
   plugins.forEach(plugin => {
-    // 提取插件相关的分类
+    const configFiles = []
+    const seenFiles = new Set()
+    tools.forEach(tool => {
+      if (tool.source?.plugin_id !== plugin.id) {
+        return
+      }
+      ;(tool.config_files || []).forEach(file => {
+        if (file && !seenFiles.has(file)) {
+          seenFiles.add(file)
+          configFiles.push(file)
+        }
+      })
+    })
+
+    if (configFiles.length === 0) {
+      return
+    }
+
     const relatedCategories = new Set()
     tools.forEach(tool => {
       if (tool.source?.plugin_id === plugin.id && tool.category) {
@@ -466,20 +464,19 @@ function buildConfigItems(catalog, activeCategory) {
       }
     })
 
-    // 分类过滤：如果有选中分类，只显示贡献了该分类的插件
     if (activeCategory && !relatedCategories.has(activeCategory)) {
       return
     }
+
+    configFiles.sort()
 
     items.push({
       type: 'plugin',
       id: plugin.id,
       name: plugin.name || plugin.id,
       typeLabel: '插件',
-      description: plugin.description || `插件 ${plugin.id} 的业务配置`,
-      files: [
-        {path: `configs/plugins/${plugin.id}.yaml`, label: '业务配置'}
-      ],
+      description: plugin.description || `插件 ${plugin.id} 声明的配置文件`,
+      files: configFiles.map(file => ({path: `plugins/${plugin.id}/${file}`, label: '配置文件'})),
       disabled: plugin.disabled,
       version: plugin.version,
       relatedCategories: Array.from(relatedCategories)
@@ -488,6 +485,7 @@ function buildConfigItems(catalog, activeCategory) {
 
   return items
 }
+
 
 function ConfigItemsList({items, onSelect}) {
   return (
@@ -515,56 +513,6 @@ function ConfigItemsList({items, onSelect}) {
         </button>
       ))}
       {items.length === 0 && <div className="empty">当前没有可配置项。</div>}
-    </div>
-  )
-}
-
-function NewTemplateModal({onClose, onCreated}) {
-  const [name, setName] = useState('')
-  const [content, setContent] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState('')
-
-  async function createTemplate() {
-    if (!name.trim()) {
-      setMessage('请输入配置文件名称')
-      return
-    }
-    setSaving(true)
-    setMessage('正在创建配置文件...')
-    try {
-      await postJSON('/api/config/templates/', {name: name.trim(), content})
-      setMessage('配置文件已创建')
-      await onCreated()
-    } catch (err) {
-      setMessage(readableAPIError(err, '创建配置文件失败'))
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="modalBackdrop" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
-        <div className="modalHeader">
-          <h3>新增配置文件</h3>
-          <button className="modalClose" onClick={onClose}>×</button>
-        </div>
-        <div className="modalBody">
-          <label>
-            <span>文件名称（自动添加 .tmpl 后缀）</span>
-            <input type="text" value={name} placeholder="例如：database.conf" onChange={e => setName(e.target.value)} disabled={saving} />
-          </label>
-          <label>
-            <span>模板内容</span>
-            <textarea value={content} placeholder="例如：&#10;[database]&#10;host = {{ .db.host }}&#10;port = {{ .db.port }}" onChange={e => setContent(e.target.value)} disabled={saving} />
-          </label>
-        </div>
-        <div className="buttonRow">
-          <button className="primary" disabled={saving} onClick={createTemplate}>创建</button>
-          <button className="secondary" onClick={onClose}>取消</button>
-        </div>
-        {message && <pre className="modalResult">{message}</pre>}
-      </div>
     </div>
   )
 }
@@ -730,151 +678,18 @@ function PlatformSettingsModal({onClose, onSaved}) {
   )
 }
 
-function ConfigTemplateLibraryModal({onClose, onEdit}) {
-  const [templates, setTemplates] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [message, setMessage] = useState('正在加载配置文件库...')
-  const [showNewModal, setShowNewModal] = useState(false)
-
-  useEffect(() => {
-    loadTemplates()
-  }, [])
-
-  async function loadTemplates() {
-    setLoading(true)
-    setMessage('正在加载配置文件库...')
-    try {
-      const body = await fetchJSON('/api/config/templates/')
-      setTemplates(body.data?.templates || [])
-      setMessage('')
-    } catch (err) {
-      setMessage(readableAPIError(err, '加载配置文件库失败'))
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function deleteTemplate(name) {
-    if (!confirm(`确定要删除配置文件 "${name}" 吗？`)) return
-    setMessage(`正在删除 ${name}...`)
-    try {
-      await deleteJSON(`/api/config/templates/${encodeURIComponent(name)}`)
-      setMessage(`配置文件 ${name} 已删除`)
-      await loadTemplates()
-    } catch (err) {
-      setMessage(readableAPIError(err, '删除配置文件失败'))
-    }
-  }
-
+function GlobalEnvModal({onClose, onSaved}) {
   return (
     <div className="modalBackdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-      <div className="modal platformSettingsModal" role="dialog" aria-modal="true">
+      <div className="modal platformSettingsModal" role="dialog" aria-modal="true" aria-labelledby="global-env-title">
         <div className="modalHeader">
           <div>
-            <h3>配置文件库</h3>
-            <p>管理全局配置模板文件，可被多个工具共享使用</p>
+            <h3 id="global-env-title">全局环境</h3>
+            <p>编辑全局环境配置文件（.env 格式），插件脚本可通过 $OPS_GLOBAL_ENV_FILE 访问</p>
           </div>
           <button className="modalClose" type="button" onClick={onClose} aria-label="关闭">×</button>
         </div>
-        <div className="platformSettingsContent">
-          <div className="list">
-            <div className="listHeader">
-              <span>{templates.length} 个配置文件</span>
-              <button className="secondary small" onClick={() => setShowNewModal(true)}>新增配置文件</button>
-            </div>
-            {templates.map(template => (
-              <div className="listItem" key={template.name}>
-                <div>
-                  <strong>{template.name}</strong>
-                  <small>大小：{(template.size / 1024).toFixed(2)} KB</small>
-                  <small>修改时间：{new Date(template.modified_at).toLocaleString()}</small>
-                </div>
-                <div className="listItemActions">
-                  <button className="secondary small" onClick={() => { onEdit({name: template.name}); onClose(); }}>编辑</button>
-                  <button className="secondary small danger" onClick={() => deleteTemplate(template.name)}>删除</button>
-                </div>
-              </div>
-            ))}
-            {templates.length === 0 && !loading && <div className="empty">配置文件库为空，点击"新增配置文件"创建第一个模板。</div>}
-            {message && <pre className="modalResult">{message}</pre>}
-          </div>
-        </div>
-      </div>
-      {showNewModal && (
-        <NewTemplateModal
-          onClose={() => setShowNewModal(false)}
-          onCreated={() => {
-            setShowNewModal(false)
-            loadTemplates()
-          }}
-        />
-      )}
-    </div>
-  )
-}
-
-function ConfigTemplateEditorModal({template, onClose, onSaved}) {
-  const [content, setContent] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState('正在加载模板...')
-
-  useEffect(() => {
-    loadTemplate()
-  }, [template.name])
-
-  async function loadTemplate() {
-    setLoading(true)
-    setMessage('正在加载模板...')
-    try {
-      const body = await fetchJSON(`/api/config/templates/${encodeURIComponent(template.name)}`)
-      setContent(body.data?.content || '')
-      setMessage('模板已加载')
-    } catch (err) {
-      setMessage(readableAPIError(err, '加载模板失败'))
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function saveTemplate() {
-    setSaving(true)
-    setMessage('正在保存模板...')
-    try {
-      await putJSON(`/api/config/templates/${encodeURIComponent(template.name)}`, {content})
-      setMessage('模板已保存')
-      await onSaved()
-    } catch (err) {
-      setMessage(readableAPIError(err, '保存模板失败'))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <div className="modalBackdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-      <div className="modal platformSettingsModal" role="dialog" aria-modal="true">
-        <div className="modalHeader">
-          <div>
-            <h3>编辑配置文件</h3>
-            <p>{template.name}</p>
-          </div>
-          <button className="modalClose" type="button" onClick={onClose} aria-label="关闭">×</button>
-        </div>
-        <div className="platformSettingsContent">
-          <div className="pluginConfigEditor">
-            <div className="empty small">配置文件路径：configs/templates/{template.name}</div>
-            <label>
-              <span>模板内容（Go template 语法）</span>
-              <textarea value={content} disabled={loading || saving} placeholder="例如：&#10;[database]&#10;host = {{ .db.host }}&#10;port = {{ .db.port }}" onChange={e => setContent(e.target.value)} />
-            </label>
-            <div className="buttonRow">
-              <button className="primary" disabled={loading || saving} onClick={saveTemplate}>保存模板</button>
-              <button className="secondary" disabled={saving} onClick={onClose}>关闭</button>
-            </div>
-            <pre className="modalResult">{message}</pre>
-          </div>
-        </div>
+        <GlobalEnvConfigPanel modalMode onBack={onClose} onSaved={onSaved} />
       </div>
     </div>
   )
@@ -1128,7 +943,7 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
   )
 }
 
-function GlobalEnvConfigPanel({onBack, onSaved}) {
+function GlobalEnvConfigPanel({onBack, onSaved, modalMode = false}) {
   const [content, setContent] = useState('')
   const [path, setPath] = useState('')
   const [loading, setLoading] = useState(true)
@@ -1171,14 +986,16 @@ function GlobalEnvConfigPanel({onBack, onSaved}) {
   }
 
   return (
-    <div className="grid">
-      <section className="card pluginConfigCard">
-        <div className="cardHeader">
-          <div>
-            <h3>全局环境</h3>
-            <p>{path} - 存储可被所有工具插件调用的全局参数（数据库连接、API密钥等）</p>
+    <div className={modalMode ? 'platformSettingsPanel' : 'grid'}>
+      <section className={modalMode ? 'platformSettingsContent' : 'card pluginConfigCard'}>
+        {!modalMode && (
+          <div className="cardHeader">
+            <div>
+              <h3>全局环境</h3>
+              <p>{path} - 存储可被所有工具插件调用的全局参数（数据库连接、API密钥等）</p>
+            </div>
           </div>
-        </div>
+        )}
         <div className="pluginConfigEditor">
           <div className="empty small">编辑全局环境配置文件（.env 格式），保存后会重新加载运行时配置。插件脚本可通过 $OPS_GLOBAL_ENV_FILE 环境变量访问此文件。</div>
           <label>
@@ -1187,7 +1004,7 @@ function GlobalEnvConfigPanel({onBack, onSaved}) {
           </label>
           <div className="buttonRow">
             <button className="primary" disabled={loading || saving} onClick={saveConfig}>保存全局环境配置</button>
-            <button className="secondary" disabled={saving} onClick={onBack}>返回列表</button>
+            {!modalMode && <button className="secondary" disabled={saving} onClick={onBack}>返回列表</button>}
           </div>
           <pre className="modalResult">{message}</pre>
         </div>
@@ -1253,13 +1070,13 @@ function PluginConfigFilesPanel({pluginID, onBack}) {
 
   return (
     <div className="pluginConfigFilesPanel">
-      <div className="empty small">配置文件由工具声明，用户可以编辑文件内容。工具执行时框架会将配置文件传递给插件脚本。</div>
+      <div className="empty small">配置文件由工具声明，页面会直接读取和保存插件目录内对应路径的文件。</div>
       <div className="configFilesList">
         {files.map(file => (
           <div className="configFileItem" key={file}>
             <div>
               <strong>{file}</strong>
-              <span>configs/plugins/{pluginID}/files/{file}</span>
+              <span>plugins/{pluginID}/{file}</span>
             </div>
             <button className="secondary" onClick={() => setEditingFile(file)}>编辑</button>
           </div>

@@ -5,18 +5,5 @@
 message: "Hello from example!"
 
 # 配置文件工具参数
+# 配置文件内容请在插件目录内维护，例如 config/example.conf
 action: check
-
-# 插件业务配置（用于配置模板渲染）
-service:
-  name: MyService
-  endpoint: https://api.mycompany.com
-  timeout: 60s
-
-auth:
-  username: testuser
-  password: testpass123
-
-options:
-  debug: true
-  retry: 5

@@ -37,6 +37,11 @@ contributes:
       description: 使用配置文件的工具示例，演示如何使用配置文件
       tags: [example, template, config]
       command: scripts/with-config.sh
+      args:
+        - --action
+        - "{{ .action }}"
+        - --config
+        - config/example.conf
       workdir: .
       timeout: 30s
       parameters:
@@ -46,24 +51,6 @@ contributes:
           required: true
           default: check
       config_files:
-        - name: example.conf
-          format: ini
-          description: 示例配置文件
-          required: false
-          pass_via: arg
-          arg: --config
-          default_content: |
-            [service]
-            name = ExampleService
-            endpoint = https://api.example.com
-            timeout = 30s
-
-            [auth]
-            username = admin
-            password = changeme
-
-            [options]
-            debug = false
-            retry = 3
+        - config/example.conf
       confirm:
         required: false

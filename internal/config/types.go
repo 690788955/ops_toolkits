@@ -107,7 +107,7 @@ type ToolConfig struct {
 	Env             map[string]string      `yaml:"env" json:"env"`
 	ConfigDefaults  map[string]interface{} `yaml:"config_defaults" json:"config_defaults"`
 	PluginConfig    PluginToolConfig       `yaml:"-" json:"-"`
-	ConfigFiles     []ConfigFile           `yaml:"config_files" json:"config_files"`
+	ConfigFiles     []string               `yaml:"config_files" json:"config_files"`
 	SensitivePaths  []string               `yaml:"sensitive_paths" json:"sensitive_paths"`
 }
 
@@ -124,23 +124,12 @@ type ExecutionConfig struct {
 	Workdir string   `yaml:"workdir" json:"workdir"`
 }
 
-type ConfigFile struct {
-	Name           string `yaml:"name" json:"name"`
-	Format         string `yaml:"format" json:"format"`                   // ini/env/yaml/json/toml/text
-	Description    string `yaml:"description" json:"description"`
-	Required       bool   `yaml:"required" json:"required"`
-	PassVia        string `yaml:"pass_via" json:"pass_via"`               // arg/env/copy
-	Arg            string `yaml:"arg,omitempty" json:"arg,omitempty"`
-	Env            string `yaml:"env,omitempty" json:"env,omitempty"`
-	DefaultContent string `yaml:"default_content,omitempty" json:"default_content,omitempty"`
-}
-
 type PluginConfigMapping struct {
 	Tools map[string]PluginToolConfigMapping `yaml:"tools" json:"tools"`
 }
 
 type PluginToolConfigMapping struct {
-	ConfigFiles []ConfigFile `yaml:"config_files" json:"config_files"`
+	ConfigFiles []string `yaml:"config_files" json:"config_files"`
 }
 
 type PluginToolConfig struct {

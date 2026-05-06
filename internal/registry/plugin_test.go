@@ -256,29 +256,17 @@ contributes:
       category: mapping
       command: scripts/run.sh
       config_files:
-        - name: default.conf
-          format: text
-          pass_via: arg
-          arg: --default
-          default_content: "default"
+        - default.conf
     - id: vendor.mapping.other
       category: mapping
       command: scripts/run.sh
       config_files:
-        - name: other.conf
-          format: text
-          pass_via: arg
-          arg: --other
-          default_content: "other"
+        - other.conf
 `, 0o644)
 	writeFile(t, filepath.Join(dir, "configs", "plugins", "vendor.mapping.mapping.yaml"), `tools:
   vendor.mapping.run:
     config_files:
-      - name: host.conf
-        format: text
-        pass_via: arg
-        arg: --config
-        default_content: "host"
+      - host.conf
 `, 0o644)
 
 	reg, err := Load(dir)
@@ -289,14 +277,14 @@ contributes:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := runTool.Config.ConfigFiles; len(got) != 1 || got[0].Name != "host.conf" || got[0].Arg != "--config" {
+	if got := runTool.Config.ConfigFiles; len(got) != 1 || got[0] != "host.conf" {
 		t.Fatalf("mapping 未整体覆盖默认 config_files: %#v", got)
 	}
 	otherTool, err := reg.Tool("vendor.mapping.other")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := otherTool.Config.ConfigFiles; len(got) != 1 || got[0].Name != "other.conf" {
+	if got := otherTool.Config.ConfigFiles; len(got) != 1 || got[0] != "other.conf" {
 		t.Fatalf("未配置工具不应受 mapping 影响: %#v", got)
 	}
 }
@@ -310,28 +298,10 @@ func TestLoadRejectsPluginConfigMappingUnknownToolAndUnsafeFields(t *testing.T) 
   vendor.mapping.missing:
     config_files: []
 `},
-		{"invalid-format", `tools:
+		{"empty-name", `tools:
   vendor.mapping.run:
     config_files:
-      - name: demo.conf
-        format: invalid
-        pass_via: arg
-        arg: --config
-`},
-		{"invalid-pass-via", `tools:
-  vendor.mapping.run:
-    config_files:
-      - name: demo.conf
-        format: text
-        pass_via: invalid
-        arg: --config
-`},
-		{"missing-arg", `tools:
-  vendor.mapping.run:
-    config_files:
-      - name: demo.conf
-        format: text
-        pass_via: arg
+      - ""
 `},
 	}
 	for _, tc := range cases {

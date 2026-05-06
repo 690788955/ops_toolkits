@@ -139,28 +139,15 @@ func validateTool(pkg Package, tool Tool, seen map[string]bool) error {
 		}
 	}
 	for _, cf := range tool.ConfigFiles {
-		if strings.TrimSpace(cf.Name) == "" {
-			return fmt.Errorf("插件工具 %s 的 config_files.name 必填", tool.ID)
+		if strings.TrimSpace(cf) == "" {
+			return fmt.Errorf("插件工具 %s 的 config_files 包含空文件名", tool.ID)
 		}
-		if strings.TrimSpace(cf.Format) == "" {
-			return fmt.Errorf("插件工具 %s 的 config_files.format 必填", tool.ID)
+		path, err := SafePath(pkg.Dir, cf)
+		if err != nil {
+			return fmt.Errorf("插件工具 %s 的 config_files 路径不安全: %w", tool.ID, err)
 		}
-		validFormats := map[string]bool{"ini": true, "env": true, "yaml": true, "json": true, "toml": true, "text": true}
-		if !validFormats[cf.Format] {
-			return fmt.Errorf("插件工具 %s 的 config_files.format 必须是 ini/env/yaml/json/toml/text 之一", tool.ID)
-		}
-		if strings.TrimSpace(cf.PassVia) == "" {
-			return fmt.Errorf("插件工具 %s 的 config_files.pass_via 必填", tool.ID)
-		}
-		validPassVia := map[string]bool{"arg": true, "env": true, "copy": true}
-		if !validPassVia[cf.PassVia] {
-			return fmt.Errorf("插件工具 %s 的 config_files.pass_via 必须是 arg/env/copy 之一", tool.ID)
-		}
-		if cf.PassVia == "arg" && strings.TrimSpace(cf.Arg) == "" {
-			return fmt.Errorf("插件工具 %s 的 config_files.arg 必填（当 pass_via=arg 时）", tool.ID)
-		}
-		if cf.PassVia == "env" && strings.TrimSpace(cf.Env) == "" {
-			return fmt.Errorf("插件工具 %s 的 config_files.env 必填（当 pass_via=env 时）", tool.ID)
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return fmt.Errorf("插件工具 %s 的 config_files 不能是目录: %s", tool.ID, cf)
 		}
 	}
 	return nil

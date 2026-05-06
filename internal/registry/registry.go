@@ -199,7 +199,7 @@ func (r *Registry) buildPluginPackageWithVersion(pkg plugin.Package, version str
 			return nil, nil, nil, err
 		}
 		if rule, ok := mapping.Tools[contributed.ID]; ok {
-			toolCfg.ConfigFiles = append([]config.ConfigFile{}, rule.ConfigFiles...)
+			toolCfg.ConfigFiles = append([]string{}, rule.ConfigFiles...)
 		}
 		entry := normalizeToolEntry(config.ToolEntry{}, toolCfg)
 		if _, exists := r.Tools[entry.ID]; exists {

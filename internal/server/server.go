@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -54,6 +55,7 @@ const toolDevKitReadme = `# 插件开发包
 - plugins/plugin.template/plugin.yaml：插件清单，声明分类、普通工具、高风险工具、workflow、参数和确认策略。
 - plugins/plugin.template/scripts/run.sh：示例工具脚本，包含 usage、参数解析、未知参数拒绝、必填校验和错误返回。
 - plugins/plugin.template/workflows/maintenance-flow.yaml：插件内 workflow 示例，引用本插件工具并展示 depends_on 依赖。
+- plugins/plugin.template/config/example.conf：插件内配置文件示例，可由 config_files 声明并由脚本读取。
 - plugins/plugin.template/examples/params.yaml：本地验证参数示例。
 - plugins/plugin.template/README.md：插件开发者交付给使用方的说明模板。
 
@@ -123,6 +125,7 @@ const toolDevKitSpec = `# 插件开发规范
 - timeout 建议显式填写，例如 1m、30m，避免长时间挂起。
 - tags 建议填写，便于接入方理解工具用途和风险类别。
 - parameters 必须列出脚本需要的输入，并包含 type、description、required、default。
+- config_files 可选，只声明插件内可维护的配置文件相对路径，例如 config/example.conf；脚本是否读取该文件由 args 或脚本默认逻辑决定。
 - confirm.required=true 用于高风险工具；message 应写清楚影响范围、目标环境和是否可回滚。
 
 workflow 引用要求：
@@ -142,7 +145,18 @@ workflow 引用要求：
 
 脚本应当同时能处理环境变量和 args，至少要对必填参数做校验。校验失败时输出简短错误到 stderr，并返回非 0 退出码。
 
-## 4. 脚本可靠性
+## 4. 配置文件
+
+如果工具需要配置文件，推荐把文件放在插件目录内的 config/ 目录，并在 plugin.yaml 中声明：
+
+` + "```yaml" + `
+config_files:
+  - config/example.conf
+` + "```" + `
+
+config_files 只用于声明哪些插件内文件可被配置维护；宿主不会自动生成、复制或传参。工具脚本应通过 args、默认路径或自己的逻辑读取这些文件。配置文件路径必须留在插件目录内部。
+
+## 5. 脚本可靠性
 
 - 使用 set -euo pipefail，避免忽略失败。
 - 明确解析参数，遇到未知参数返回非 0。
@@ -154,7 +168,7 @@ workflow 引用要求：
 - 输出应聚焦执行进度和结果，方便通过运行日志排障。
 - 修改外部系统的工具必须在 README.md 写清楚影响范围和回滚方式。
 
-## 5. 验证、运行、打包、交付
+## 6. 验证、运行、打包、交付
 
 在本地验证环境中安装到 plugins/<plugin-id>/ 后验证：
 
@@ -173,7 +187,7 @@ workflow 引用要求：
 3. 记录预期的分类、工具、workflow、confirm 信息，便于接入方核对。
 4. 更新已存在插件时提升 version；同版本或更低版本通常应被拒绝更新。
 
-## 6. 常见问题
+## 7. 常见问题
 
 - validate 提示 command 不存在：确认 command 路径相对插件目录，且文件已打入 ZIP。
 - validate 提示路径不安全：不要使用绝对路径或 ../ 跳出插件目录。
@@ -211,6 +225,10 @@ contributes:
         - inspect
         - --dry-run
         - '{{ .dry_run }}'
+        - --config
+        - config/example.conf
+      config_files:
+        - config/example.conf
       workdir: .
       timeout: 1m
       parameters:
@@ -245,6 +263,10 @@ contributes:
         - '{{ .action }}'
         - --dry-run
         - '{{ .dry_run }}'
+        - --config
+        - config/example.conf
+      config_files:
+        - config/example.conf
       workdir: .
       timeout: 5m
       parameters:
@@ -276,15 +298,17 @@ set -euo pipefail
 target="${OPS_PARAM_TARGET:-}"
 action="${OPS_PARAM_ACTION:-inspect}"
 dry_run="${OPS_PARAM_DRY_RUN:-true}"
+config_file="config/example.conf"
 
 usage() {
   cat >&2 <<'EOF'
-用法: run.sh --target <target> [--action inspect|apply] [--dry-run true|false]
+用法: run.sh --target <target> [--action inspect|apply] [--dry-run true|false] [--config config/example.conf]
 
 参数:
   --target    必填。目标标识，例如主机组、实例名或环境名。
   --action    可选。inspect 只读检查；apply 表示执行变更示例。
   --dry-run   可选。true 仅预览；false 表示执行真实动作。
+  --config    可选。插件内配置文件路径，默认 config/example.conf。
 EOF
 }
 
@@ -337,6 +361,15 @@ while [[ $# -gt 0 ]]; do
       fi
       shift 2
       ;;
+    --config)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        error "--config 需要文件路径"
+        usage
+        exit 2
+      fi
+      config_file="$2"
+      shift 2
+      ;;
     --params-file)
       if [[ $# -lt 2 || -z "${2:-}" ]]; then
         error "--params-file 需要文件路径"
@@ -383,11 +416,17 @@ if [[ -n "${OPS_PARAM_FILE:-}" ]]; then
   info "已接收参数文件"
 fi
 
+if [[ ! -f "$config_file" ]]; then
+  error "配置文件不存在: $config_file"
+  exit 1
+fi
+
 # 不要输出密码、令牌、密钥、完整连接串等敏感信息。
 info "插件工具开始执行"
 info "目标: ${target}"
 info "动作: ${action}"
 info "dry-run: ${dry_run}"
+info "配置文件: ${config_file}"
 
 if [[ "$action" == "inspect" ]]; then
   info "检查完成: 示例状态正常"
@@ -463,6 +502,7 @@ const samplePluginReadme = `# 规范插件模板
 - plugin.yaml：声明插件元数据、分类、工具、workflow、参数和 confirm。
 - scripts/run.sh：工具脚本，演示 usage、参数解析、未知参数拒绝、必填校验、dry-run、错误返回和安全输出。
 - workflows/maintenance-flow.yaml：插件内 workflow 示例，引用本插件工具并使用 depends_on 表达依赖。
+- config/example.conf：插件内可编辑配置文件示例，路径在 plugin.yaml 的 config_files 中声明。
 - examples/params.yaml：本地运行参数示例。
 
 ## 输入
@@ -470,6 +510,7 @@ const samplePluginReadme = `# 规范插件模板
 - target：目标标识，必填。
 - action：执行动作，示例支持 inspect 或 apply。
 - dry_run：是否仅预览动作，默认 true。
+- config/example.conf：插件内配置文件示例，工具脚本通过 --config 读取。
 
 ## 输出
 
@@ -512,6 +553,16 @@ printf '确认\n确认\n' | ./bin/opsctl.exe run workflow plugin.template.mainte
 ## 回滚
 
 如果插件工具会修改系统状态，请在这里写清楚回滚步骤、影响范围和联系人。
+`
+
+const sampleConfigFile = `[service]
+name = TemplateService
+endpoint = https://api.example.com
+timeout = 30s
+
+[options]
+debug = false
+dry_run_default = true
 `
 
 const sampleParamsYAML = `target: demo
@@ -562,10 +613,11 @@ type categoryCatalogEntry struct {
 
 type toolCatalogEntry struct {
 	config.ToolEntry
-	Tags       []string            `json:"tags"`
-	Parameters []config.Parameter  `json:"parameters"`
-	Confirm    config.Confirmation `json:"confirm"`
-	Source     registry.Source     `json:"source"`
+	Tags        []string            `json:"tags"`
+	Parameters  []config.Parameter  `json:"parameters"`
+	ConfigFiles []string            `json:"config_files"`
+	Confirm     config.Confirmation `json:"confirm"`
+	Source      registry.Source     `json:"source"`
 }
 
 type workflowCatalogEntry struct {
@@ -650,7 +702,6 @@ func NewHandler(reg *registry.Registry) http.Handler {
 	mux.HandleFunc("/api/catalog", catalogHandler(state))
 	mux.HandleFunc("/api/config/global", globalConfigHandler(state))
 	mux.HandleFunc("/api/config/global-env", globalEnvConfigHandler(state))
-	mux.HandleFunc("/api/config/templates/", configTemplatesHandler(state))
 	mux.HandleFunc("/api/config/global/versions/", func(w http.ResponseWriter, req *http.Request) {
 		path := strings.TrimPrefix(req.URL.Path, "/api/config/global/versions/")
 		if path == "" {
@@ -711,7 +762,7 @@ func handleGlobalConfigGet(w http.ResponseWriter, reg *registry.Registry) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeJSON(w, http.StatusNotFound, response{Error: "全局配置文件不存在"})
+			writeJSON(w, http.StatusNotFound, response{Error: "框架设置文件不存在"})
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
@@ -765,7 +816,7 @@ func handleGlobalConfigPut(w http.ResponseWriter, req *http.Request, state *serv
 		return
 	}
 	state.reg = newReg
-	writeJSON(w, http.StatusOK, response{Status: "saved", Data: map[string]string{"message": "全局配置已保存"}})
+	writeJSON(w, http.StatusOK, response{Status: "saved", Data: map[string]string{"message": "框架设置已保存"}})
 }
 
 func globalEnvConfigHandler(state *serverState) http.HandlerFunc {
@@ -1111,7 +1162,11 @@ func pluginDownloadHandler(state *serverState) http.HandlerFunc {
 					handlePluginConfigFiles(w, req, state, pluginID)
 				} else {
 					// /api/plugins/{id}/files/{filename} - 读取/保存/删除配置文件
-					fileName := strings.Join(parts[2:], "/")
+					fileName, err := url.PathUnescape(strings.Join(parts[2:], "/"))
+					if err != nil {
+						writeJSON(w, http.StatusBadRequest, response{Error: "配置文件路径格式错误"})
+						return
+					}
 					handlePluginConfigFile(w, req, state, pluginID, fileName)
 				}
 				return
@@ -1207,6 +1262,7 @@ func buildToolDevKitZip() ([]byte, error) {
 		"plugins/plugin.template/scripts/run.sh": sampleRunScript,
 		"plugins/plugin.template/workflows/maintenance-flow.yaml": samplePluginWorkflowYAML,
 		"plugins/plugin.template/README.md":                       samplePluginReadme,
+		"plugins/plugin.template/config/example.conf":             sampleConfigFile,
 		"plugins/plugin.template/examples/params.yaml":            sampleParamsYAML,
 		"plugins/plugin.template/examples/README.md":              sampleExamplesReadme,
 	}
@@ -1258,7 +1314,7 @@ func buildCatalog(reg *registry.Registry) catalogResponse {
 		out.Plugins = append(out.Plugins, item)
 	}
 	for _, tool := range reg.Tools {
-		out.Tools = append(out.Tools, toolCatalogEntry{ToolEntry: tool.Entry, Tags: tool.Config.Tags, Parameters: tool.Config.Parameters, Confirm: tool.Config.Confirm, Source: tool.Source})
+		out.Tools = append(out.Tools, toolCatalogEntry{ToolEntry: tool.Entry, Tags: tool.Config.Tags, Parameters: tool.Config.Parameters, ConfigFiles: tool.Config.ConfigFiles, Confirm: tool.Config.Confirm, Source: tool.Source})
 	}
 	for _, wf := range reg.Workflows {
 		out.Workflows = append(out.Workflows, workflowCatalogEntry{WorkflowRef: wf.Entry, Tags: wf.Config.Tags, Parameters: wf.Config.Parameters, Confirm: effectiveWorkflowConfirm(reg, wf.Config), Source: wf.Source})
@@ -1616,225 +1672,27 @@ func errorText(err error) string {
 	return err.Error()
 }
 
-func configTemplatesHandler(state *serverState) http.HandlerFunc {
-	return func(w http.ResponseWriter, req *http.Request) {
-		path := strings.TrimPrefix(req.URL.Path, "/api/config/templates/")
-		if path == "" {
-			// GET /api/config/templates/ - 列出所有配置文件
-			if req.Method == http.MethodGet {
-				handleListTemplates(w, req, state)
-				return
-			}
-			// POST /api/config/templates/ - 新增配置文件
-			if req.Method == http.MethodPost {
-				handleCreateTemplate(w, req, state)
-				return
-			}
-			methodNotAllowed(w)
-			return
-		}
-		// GET /api/config/templates/{name} - 读取配置文件内容
-		if req.Method == http.MethodGet {
-			handleGetTemplate(w, req, state, path)
-			return
-		}
-		// PUT /api/config/templates/{name} - 保存配置文件内容
-		if req.Method == http.MethodPut {
-			handlePutTemplate(w, req, state, path)
-			return
-		}
-		// DELETE /api/config/templates/{name} - 删除配置文件
-		if req.Method == http.MethodDelete {
-			handleDeleteTemplate(w, req, state, path)
-			return
-		}
-		methodNotAllowed(w)
-	}
-}
-
-func handleListTemplates(w http.ResponseWriter, req *http.Request, state *serverState) {
-	baseDir := state.registry().BaseDir
-	templatesDir := filepath.Join(baseDir, "configs", "templates")
-
-	// 确保目录存在
-	if err := os.MkdirAll(templatesDir, 0o755); err != nil {
-		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("创建模板目录失败: %v", err)})
-		return
-	}
-
-	entries, err := os.ReadDir(templatesDir)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("读取模板目录失败: %v", err)})
-		return
-	}
-
-	templates := []map[string]interface{}{}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tmpl") {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		templates = append(templates, map[string]interface{}{
-			"name":        entry.Name(),
-			"size":        info.Size(),
-			"modified_at": info.ModTime().Format("2006-01-02T15:04:05Z07:00"),
-		})
-	}
-
-	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"templates": templates}})
-}
-
-func handleGetTemplate(w http.ResponseWriter, req *http.Request, state *serverState, name string) {
-	// 安全检查：防止路径穿越
-	if strings.Contains(name, "..") || strings.Contains(name, "/") || strings.Contains(name, "\\") {
-		writeJSON(w, http.StatusBadRequest, response{Error: "无效的模板名称"})
-		return
-	}
-
-	baseDir := state.registry().BaseDir
-	templatePath := filepath.Join(baseDir, "configs", "templates", name)
-
-	content, err := os.ReadFile(filepath.Clean(templatePath))
-	if err != nil {
-		if os.IsNotExist(err) {
-			writeJSON(w, http.StatusNotFound, response{Error: "模板文件不存在"})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("读取模板失败: %v", err)})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{
-		"name":    name,
-		"content": string(content),
-		"path":    filepath.ToSlash(filepath.Join("configs", "templates", name)),
-	}})
-}
-
-func handlePutTemplate(w http.ResponseWriter, req *http.Request, state *serverState, name string) {
-	// 安全检查
-	if strings.Contains(name, "..") || strings.Contains(name, "/") || strings.Contains(name, "\\") {
-		writeJSON(w, http.StatusBadRequest, response{Error: "无效的模板名称"})
-		return
-	}
-
-	defer req.Body.Close()
-	var body struct {
-		Content string `json:"content"`
-	}
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, response{Error: "请求格式错误"})
-		return
-	}
-
-	baseDir := state.registry().BaseDir
-	templatesDir := filepath.Join(baseDir, "configs", "templates")
-
-	// 确保目录存在
-	if err := os.MkdirAll(templatesDir, 0o755); err != nil {
-		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("创建模板目录失败: %v", err)})
-		return
-	}
-
-	templatePath := filepath.Join(templatesDir, name)
-	if err := os.WriteFile(filepath.Clean(templatePath), []byte(body.Content), 0o644); err != nil {
-		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("保存模板失败: %v", err)})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{
-		"name": name,
-		"path": filepath.ToSlash(filepath.Join("configs", "templates", name)),
-	}})
-}
-
-func handleCreateTemplate(w http.ResponseWriter, req *http.Request, state *serverState) {
-	defer req.Body.Close()
-	var body struct {
-		Name    string `json:"name"`
-		Content string `json:"content"`
-	}
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, response{Error: "请求格式错误"})
-		return
-	}
-
-	// 安全检查
-	if body.Name == "" || strings.Contains(body.Name, "..") || strings.Contains(body.Name, "/") || strings.Contains(body.Name, "\\") {
-		writeJSON(w, http.StatusBadRequest, response{Error: "无效的模板名称"})
-		return
-	}
-
-	// 确保文件名以 .tmpl 结尾
-	if !strings.HasSuffix(body.Name, ".tmpl") {
-		body.Name += ".tmpl"
-	}
-
-	baseDir := state.registry().BaseDir
-	templatesDir := filepath.Join(baseDir, "configs", "templates")
-
-	// 确保目录存在
-	if err := os.MkdirAll(templatesDir, 0o755); err != nil {
-		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("创建模板目录失败: %v", err)})
-		return
-	}
-
-	templatePath := filepath.Join(templatesDir, body.Name)
-
-	// 检查文件是否已存在
-	if _, err := os.Stat(templatePath); err == nil {
-		writeJSON(w, http.StatusConflict, response{Error: "模板文件已存在"})
-		return
-	}
-
-	if err := os.WriteFile(filepath.Clean(templatePath), []byte(body.Content), 0o644); err != nil {
-		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("创建模板失败: %v", err)})
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, response{Data: map[string]interface{}{
-		"name": body.Name,
-		"path": filepath.ToSlash(filepath.Join("configs", "templates", body.Name)),
-	}})
-}
-
-func handleDeleteTemplate(w http.ResponseWriter, req *http.Request, state *serverState, name string) {
-	// 安全检查
-	if strings.Contains(name, "..") || strings.Contains(name, "/") || strings.Contains(name, "\\") {
-		writeJSON(w, http.StatusBadRequest, response{Error: "无效的模板名称"})
-		return
-	}
-
-	baseDir := state.registry().BaseDir
-	templatePath := filepath.Join(baseDir, "configs", "templates", name)
-
-	if err := os.Remove(filepath.Clean(templatePath)); err != nil {
-		if os.IsNotExist(err) {
-			writeJSON(w, http.StatusNotFound, response{Error: "模板文件不存在"})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("删除模板失败: %v", err)})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"name": name}})
-}
-
 func handlePluginConfigFiles(w http.ResponseWriter, req *http.Request, state *serverState, pluginID string) {
 	if req.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
 	}
 
-	baseDir := state.registry().BaseDir
-	files, err := config.ListPluginConfigFiles(baseDir, pluginID)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("列出配置文件失败: %v", err)})
-		return
+	reg := state.registry()
+	seen := map[string]bool{}
+	var files []string
+	for _, tool := range reg.Tools {
+		if tool.Source.PluginID != pluginID {
+			continue
+		}
+		for _, cf := range tool.Config.ConfigFiles {
+			if cf != "" && !seen[cf] {
+				seen[cf] = true
+				files = append(files, cf)
+			}
+		}
 	}
+	sort.Strings(files)
 
 	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"files": files}})
 }
@@ -1853,14 +1711,22 @@ func handlePluginConfigFile(w http.ResponseWriter, req *http.Request, state *ser
 }
 
 func handleGetPluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileName string) {
-	baseDir := state.registry().BaseDir
-	content, err := config.LoadPluginConfigFile(baseDir, pluginID, fileName)
+	filePath, err := declaredPluginConfigFilePath(state.registry(), pluginID, fileName)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"content": ""}})
+		return
+	}
+	data, err := os.ReadFile(filePath)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("读取配置文件失败: %v", err)})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"content": content}})
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"content": string(data)}})
 }
 
 func handleSavePluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileName string) {
@@ -1873,8 +1739,16 @@ func handleSavePluginConfigFile(w http.ResponseWriter, req *http.Request, state 
 		return
 	}
 
-	baseDir := state.registry().BaseDir
-	if err := config.SavePluginConfigFile(baseDir, pluginID, fileName, body.Content); err != nil {
+	filePath, err := declaredPluginConfigFilePath(state.registry(), pluginID, fileName)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("创建配置目录失败: %v", err)})
+		return
+	}
+	if err := os.WriteFile(filePath, []byte(body.Content), 0o644); err != nil {
 		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("保存配置文件失败: %v", err)})
 		return
 	}
@@ -1883,8 +1757,7 @@ func handleSavePluginConfigFile(w http.ResponseWriter, req *http.Request, state 
 }
 
 func handleDeletePluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileName string) {
-	baseDir := state.registry().BaseDir
-	filePath, err := config.PluginConfigFilePath(baseDir, pluginID, fileName)
+	filePath, err := declaredPluginConfigFilePath(state.registry(), pluginID, fileName)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 		return
@@ -1896,4 +1769,23 @@ func handleDeletePluginConfigFile(w http.ResponseWriter, req *http.Request, stat
 	}
 
 	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"message": "配置文件已删除"}})
+}
+
+func declaredPluginConfigFilePath(reg *registry.Registry, pluginID, fileName string) (string, error) {
+	for _, tool := range reg.Tools {
+		if tool.Source.PluginID != pluginID {
+			continue
+		}
+		for _, declared := range tool.Config.ConfigFiles {
+			if declared != fileName {
+				continue
+			}
+			filePath, err := plugin.SafePath(tool.Config.PluginConfig.Dir, declared)
+			if err != nil {
+				return "", fmt.Errorf("配置文件路径不安全: %w", err)
+			}
+			return filePath, nil
+		}
+	}
+	return "", fmt.Errorf("配置文件 %s 未在插件 %s 中声明", fileName, pluginID)
 }

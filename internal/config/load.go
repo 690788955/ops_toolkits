@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -317,76 +316,4 @@ func stringifyMap(in map[string]interface{}) map[string]string {
 		out[k] = fmt.Sprint(v)
 	}
 	return out
-}
-
-// PluginConfigFilePath returns the path to a plugin's config file
-func PluginConfigFilePath(baseDir, pluginID, fileName string) (string, error) {
-	if !SafePluginConfigID(pluginID) {
-		return "", fmt.Errorf("插件 ID %s 包含不安全路径字符", pluginID)
-	}
-	if !SafeFileName(fileName) {
-		return "", fmt.Errorf("文件名 %s 包含不安全路径字符", fileName)
-	}
-	return filepath.Join(baseDir, "configs", "plugins", pluginID, "files", fileName), nil
-}
-
-// LoadPluginConfigFile loads a plugin's config file content
-func LoadPluginConfigFile(baseDir, pluginID, fileName string) (string, error) {
-	path, err := PluginConfigFilePath(baseDir, pluginID, fileName)
-	if err != nil {
-		return "", err
-	}
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return "", nil // File doesn't exist, return empty content
-	}
-	data, err := os.ReadFile(filepath.Clean(path))
-	if err != nil {
-		return "", fmt.Errorf("读取配置文件 %s 失败: %w", fileName, err)
-	}
-	return string(data), nil
-}
-
-// SavePluginConfigFile saves a plugin's config file content
-func SavePluginConfigFile(baseDir, pluginID, fileName, content string) error {
-	path, err := PluginConfigFilePath(baseDir, pluginID, fileName)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Clean(path), []byte(content), 0o644)
-}
-
-// ListPluginConfigFiles lists all config files for a plugin
-func ListPluginConfigFiles(baseDir, pluginID string) ([]string, error) {
-	if !SafePluginConfigID(pluginID) {
-		return nil, fmt.Errorf("插件 ID %s 包含不安全路径字符", pluginID)
-	}
-	dirPath := filepath.Join(baseDir, "configs", "plugins", pluginID, "files")
-	if _, err := os.Stat(dirPath); os.IsNotExist(err) {
-		return []string{}, nil
-	}
-	entries, err := os.ReadDir(dirPath)
-	if err != nil {
-		return nil, fmt.Errorf("读取配置文件目录失败: %w", err)
-	}
-	files := []string{}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			files = append(files, entry.Name())
-		}
-	}
-	return files, nil
-}
-
-// SafeFileName checks if a file name is safe (no path traversal)
-func SafeFileName(name string) bool {
-	if name == "" || name == "." || name == ".." {
-		return false
-	}
-	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
-		return false
-	}
-	return true
 }

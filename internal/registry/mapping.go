@@ -47,30 +47,13 @@ func ValidatePluginConfigMapping(pkg plugin.Package, mapping config.PluginConfig
 	return nil
 }
 
-func validateMappingConfigFile(pkg plugin.Package, toolID string, index int, cf config.ConfigFile) error {
+func validateMappingConfigFile(pkg plugin.Package, toolID string, index int, cf string) error {
 	prefix := fmt.Sprintf("插件 %s 工具 %s 映射项 %d", pkg.Manifest.ID, toolID, index+1)
-	if strings.TrimSpace(cf.Name) == "" {
-		return fmt.Errorf("%s 的 name 必填", prefix)
+	if strings.TrimSpace(cf) == "" {
+		return fmt.Errorf("%s 的文件名必填", prefix)
 	}
-	if strings.TrimSpace(cf.Format) == "" {
-		return fmt.Errorf("%s 的 format 必填", prefix)
-	}
-	validFormats := map[string]bool{"ini": true, "env": true, "yaml": true, "json": true, "toml": true, "text": true}
-	if !validFormats[cf.Format] {
-		return fmt.Errorf("%s 的 format 必须是 ini/env/yaml/json/toml/text 之一", prefix)
-	}
-	if strings.TrimSpace(cf.PassVia) == "" {
-		return fmt.Errorf("%s 的 pass_via 必填", prefix)
-	}
-	validPassVia := map[string]bool{"arg": true, "env": true, "copy": true}
-	if !validPassVia[cf.PassVia] {
-		return fmt.Errorf("%s 的 pass_via 必须是 arg/env/copy 之一", prefix)
-	}
-	if cf.PassVia == "arg" && strings.TrimSpace(cf.Arg) == "" {
-		return fmt.Errorf("%s 的 arg 必填（当 pass_via=arg 时）", prefix)
-	}
-	if cf.PassVia == "env" && strings.TrimSpace(cf.Env) == "" {
-		return fmt.Errorf("%s 的 env 必填（当 pass_via=env 时）", prefix)
+	if _, err := plugin.SafePath(pkg.Dir, cf); err != nil {
+		return fmt.Errorf("%s 的文件路径不安全: %w", prefix, err)
 	}
 	return nil
 }

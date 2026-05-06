@@ -419,15 +419,10 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 	if err != nil {
 		return err
 	}
-	configEnv, configArgs, err := r.passConfigFiles(tool, runDir)
-	if err != nil {
-		return err
-	}
 	entry := filepath.Join(tool.Dir, filepath.FromSlash(tool.Config.Execution.Entry))
-	cmd := buildCommand(execCtx, entry, *tool.Config, params, paramFile, configArgs)
+	cmd := buildCommand(execCtx, entry, *tool.Config, params, paramFile)
 	cmd.Dir = resolveWorkdir(tool.Dir, tool.Config.Execution.Workdir)
 	cmd.Env = append(os.Environ(), encodeEnv(params)...)
-	cmd.Env = append(cmd.Env, configEnv...)
 	if paramFile != "" {
 		cmd.Env = append(cmd.Env, "OPS_PARAM_FILE="+paramFile)
 	}
@@ -457,9 +452,8 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 	return nil
 }
 
-func buildCommand(ctx context.Context, entry string, tool config.ToolConfig, params map[string]string, paramFile string, extraArgs []string) *exec.Cmd {
+func buildCommand(ctx context.Context, entry string, tool config.ToolConfig, params map[string]string, paramFile string) *exec.Cmd {
 	args := renderArgs(tool.Execution.Args, params)
-	args = append(args, extraArgs...)
 	if len(args) == 0 && tool.PassMode.Args {
 		for _, k := range sortedKeys(params) {
 			args = append(args, "--"+k, params[k])
@@ -520,6 +514,7 @@ func writeParamFile(runDir string, mode config.PassMode, params map[string]inter
 func (r *Runner) resolveToolValues(tool *registry.Tool, runtimeParams map[string]interface{}) (config.Values, map[string]string, []string, error) {
 	values := config.MergeValues(
 		config.MergeParameterDefaults(tool.Config.Parameters),
+		r.Registry.GlobalEnv,
 		r.Registry.Root.ConfigDefaults,
 		tool.Config.PluginConfig.SharedConfig,
 		tool.Config.PluginConfig.PackageDefaultConfig,
@@ -534,80 +529,6 @@ func (r *Runner) resolveToolValues(tool *registry.Tool, runtimeParams map[string
 	sensitivePaths = append(sensitivePaths, tool.Config.SensitivePaths...)
 	sensitivePaths = append(sensitivePaths, config.SensitivePathsFromParams(tool.Config.Parameters)...)
 	return values, config.FlattenValues(values), sensitivePaths, nil
-}
-
-func (r *Runner) passConfigFiles(tool *registry.Tool, runDir string) ([]string, []string, error) {
-	// 合并配置文件：plugin.yaml 中的 + mapping.yaml 中的
-	configFiles := append([]config.ConfigFile{}, tool.Config.ConfigFiles...)
-
-	// 从 mapping.yaml 读取额外的绑定
-	if tool.Config.PluginConfig.ID != "" {
-		mappingPath, err := config.PluginConfigMappingPath(r.Registry.BaseDir, tool.Config.PluginConfig.ID)
-		if err == nil {
-			mapping, exists, err := config.LoadOptionalPluginConfigMapping(mappingPath)
-			if err == nil && exists {
-				if toolMapping, ok := mapping.Tools[tool.Config.ID]; ok {
-					configFiles = append(configFiles, toolMapping.ConfigFiles...)
-				}
-			}
-		}
-	}
-
-	if len(configFiles) == 0 {
-		return nil, nil, nil
-	}
-
-	configsDir := filepath.Join(runDir, "configs")
-	if err := os.MkdirAll(configsDir, 0o755); err != nil {
-		return nil, nil, err
-	}
-	env := []string{}
-	args := []string{}
-
-	for _, cf := range configFiles {
-		// 读取配置文件内容（从存储位置或使用默认内容）
-		content, err := config.LoadPluginConfigFile(r.Registry.BaseDir, tool.Config.PluginConfig.ID, cf.Name)
-		if err != nil {
-			return nil, nil, fmt.Errorf("读取配置文件 %s 失败: %w", cf.Name, err)
-		}
-		if content == "" && cf.DefaultContent != "" {
-			content = cf.DefaultContent
-		}
-		if content == "" && cf.Required {
-			return nil, nil, fmt.Errorf("配置文件 %s 必填但内容为空", cf.Name)
-		}
-
-		// 根据传递方式处理
-		switch cf.PassVia {
-		case "arg":
-			// 写入到 configs 目录并通过参数传递路径
-			filePath := filepath.Join(configsDir, cf.Name)
-			if err := os.WriteFile(filePath, []byte(content), 0o600); err != nil {
-				return nil, nil, fmt.Errorf("写入配置文件 %s 失败: %w", cf.Name, err)
-			}
-			args = append(args, cf.Arg, filePath)
-
-		case "env":
-			// 写入到 configs 目录并通过环境变量传递路径
-			filePath := filepath.Join(configsDir, cf.Name)
-			if err := os.WriteFile(filePath, []byte(content), 0o600); err != nil {
-				return nil, nil, fmt.Errorf("写入配置文件 %s 失败: %w", cf.Name, err)
-			}
-			env = append(env, cf.Env+"="+filePath)
-
-		case "copy":
-			// 复制到工具工作目录
-			workdir := tool.Dir
-			if tool.Config.Execution.Workdir != "" {
-				workdir = filepath.Join(tool.Dir, tool.Config.Execution.Workdir)
-			}
-			filePath := filepath.Join(workdir, cf.Name)
-			if err := os.WriteFile(filePath, []byte(content), 0o600); err != nil {
-				return nil, nil, fmt.Errorf("复制配置文件 %s 到工作目录失败: %w", cf.Name, err)
-			}
-		}
-	}
-	return env, args, nil
 }
 
 func encodeEnv(params map[string]string) []string {

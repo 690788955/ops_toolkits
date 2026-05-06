@@ -318,7 +318,7 @@ func TestToolDevKitDownloadAPI(t *testing.T) {
 		}
 		contents[file.Name] = content.String()
 	}
-	for _, name := range []string{"README.md", "SPEC.md", "plugins/plugin.template/plugin.yaml", "plugins/plugin.template/scripts/run.sh", "plugins/plugin.template/workflows/maintenance-flow.yaml", "plugins/plugin.template/README.md", "plugins/plugin.template/examples/params.yaml", "plugins/plugin.template/examples/README.md"} {
+	for _, name := range []string{"README.md", "SPEC.md", "plugins/plugin.template/plugin.yaml", "plugins/plugin.template/config/example.conf", "plugins/plugin.template/scripts/run.sh", "plugins/plugin.template/workflows/maintenance-flow.yaml", "plugins/plugin.template/README.md", "plugins/plugin.template/examples/params.yaml", "plugins/plugin.template/examples/README.md"} {
 		if !entries[name] {
 			t.Fatalf("开发包缺少文件 %s", name)
 		}
@@ -327,12 +327,13 @@ func TestToolDevKitDownloadAPI(t *testing.T) {
 		contents["README.md"],
 		contents["SPEC.md"],
 		contents["plugins/plugin.template/plugin.yaml"],
+		contents["plugins/plugin.template/config/example.conf"],
 		contents["plugins/plugin.template/scripts/run.sh"],
 		contents["plugins/plugin.template/workflows/maintenance-flow.yaml"],
 		contents["plugins/plugin.template/README.md"],
 		contents["plugins/plugin.template/examples/README.md"],
 	}, "\n")
-	for _, want := range []string{"插件开发包", "plugin.yaml", "规范插件模板", "可复制的规范模板", "id: plugin.template", "name: 规范插件模板", "version: 1.0.0", "description:", "author: your-team", "compatibility:", "contributes:", "categories:", "tools:", "workflows:", "plugin.template.inspect", "plugin.template.apply", "plugin.template.maintenance-flow", "confirm.required", "required: true", "default: demo", "type: bool", "timeout: 5m", "tags: [plugin, template, change, high-risk]", "command: scripts/run.sh", "workdir: .", "args:", "depends_on: [inspect]", "from: inspect", "to: apply", "usage()", "error()", "normalize_bool()", "未知参数", "缺少必填参数 target", "action 只支持 inspect 或 apply", "dry-run 只接受 true/false、yes/no、1/0、on/off", "dry-run", "不要在 stdout/stderr 输出密码", "./bin/opsctl.exe validate", "./bin/opsctl.exe run tool plugin.template.inspect", "./bin/opsctl.exe run workflow plugin.template.maintenance-flow", "./bin/opsctl.exe package build", "插件开发者交付清单", "更新已存在插件时提升 version", "不要假设交付或接入时会执行脚本", "宿主运行环境", "打包交付", "command、workdir、workflow path 都应留在插件目录内部"} {
+	for _, want := range []string{"插件开发包", "plugin.yaml", "规范插件模板", "可复制的规范模板", "id: plugin.template", "name: 规范插件模板", "version: 1.0.0", "description:", "author: your-team", "compatibility:", "contributes:", "categories:", "tools:", "workflows:", "plugin.template.inspect", "plugin.template.apply", "plugin.template.maintenance-flow", "confirm.required", "required: true", "default: demo", "type: bool", "timeout: 5m", "tags: [plugin, template, change, high-risk]", "command: scripts/run.sh", "workdir: .", "args:", "depends_on: [inspect]", "from: inspect", "to: apply", "usage()", "error()", "normalize_bool()", "未知参数", "缺少必填参数 target", "action 只支持 inspect 或 apply", "dry-run 只接受 true/false、yes/no、1/0、on/off", "dry-run", "config_files:", "config/example.conf", "配置文件", "不要在 stdout/stderr 输出密码", "./bin/opsctl.exe validate", "./bin/opsctl.exe run tool plugin.template.inspect", "./bin/opsctl.exe run workflow plugin.template.maintenance-flow", "./bin/opsctl.exe package build", "插件开发者交付清单", "更新已存在插件时提升 version", "不要假设交付或接入时会执行脚本", "宿主运行环境", "打包交付", "command、workdir、workflow path 都应留在插件目录内部"} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("开发包文案缺少关键内容 %q", want)
 		}
@@ -604,193 +605,6 @@ func TestPluginExportRejectsUnsafePluginIDRequest(t *testing.T) {
 		t.Fatalf("status = %d, want bad request; body = %s", res.Code, res.Body.String())
 	}
 }
-
-// 以下测试针对已废弃的业务配置机制，已注释
-/*
-func TestPluginHostConfigGetMissingReturnsEmpty(t *testing.T) {
-	baseReg := testRegistry(t)
-	installTestPlugin(t, baseReg.BaseDir, "vendor.config", "1.0.0")
-	reg, err := registry.Load(baseReg.BaseDir)
-	if err != nil {
-		t.Fatalf("加载测试注册表失败: %v", err)
-	}
-	res := httptest.NewRecorder()
-
-	NewHandler(reg).ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.config/config", nil))
-
-	if res.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
-	}
-	var body struct {
-		Data pluginHostConfigResult `json:"data"`
-	}
-	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
-		t.Fatalf("响应 JSON 解析失败: %v", err)
-	}
-	if body.Data.PluginID != "vendor.config" || body.Data.Exists || body.Data.Content != "" || body.Data.Path != "configs/plugins/vendor.config.yaml" {
-		t.Fatalf("GET 不存在配置结果异常: %#v", body.Data)
-	}
-}
-
-func TestPluginHostConfigPutCreatesAndReloads(t *testing.T) {
-	baseReg := testRegistry(t)
-	installTestPlugin(t, baseReg.BaseDir, "vendor.configput", "1.0.0")
-	reg, err := registry.Load(baseReg.BaseDir)
-	if err != nil {
-		t.Fatalf("加载测试注册表失败: %v", err)
-	}
-	handler := NewHandler(reg)
-	payload := `{"content":"nested:\n  value: created\n"}`
-	res := httptest.NewRecorder()
-
-	handler.ServeHTTP(res, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configput/config", strings.NewReader(payload)))
-
-	if res.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
-	}
-	path := filepath.Join(reg.BaseDir, "configs", "plugins", "vendor.configput.yaml")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("配置文件未创建: %v", err)
-	}
-	if !strings.Contains(string(data), "created") {
-		t.Fatalf("配置文件内容未写入: %s", data)
-	}
-	catalogRes := httptest.NewRecorder()
-	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
-	if !strings.Contains(catalogRes.Body.String(), "vendor.configput.tool") {
-		t.Fatalf("保存配置后 registry/catalog 未保持可用: %s", catalogRes.Body.String())
-	}
-}
-
-func TestPluginHostConfigPutRejectsInvalidYAMLWithoutWriting(t *testing.T) {
-	baseReg := testRegistry(t)
-	installTestPlugin(t, baseReg.BaseDir, "vendor.configbad", "1.0.0")
-	reg, err := registry.Load(baseReg.BaseDir)
-	if err != nil {
-		t.Fatalf("加载测试注册表失败: %v", err)
-	}
-	res := httptest.NewRecorder()
-
-	NewHandler(reg).ServeHTTP(res, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configbad/config", strings.NewReader(`{"content":"bad: [\n"}`)))
-
-	if res.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want bad request; body = %s", res.Code, res.Body.String())
-	}
-	if _, err := os.Stat(filepath.Join(reg.BaseDir, "configs", "plugins", "vendor.configbad.yaml")); !os.IsNotExist(err) {
-		t.Fatalf("YAML 错误不应写入配置文件，stat err = %v", err)
-	}
-}
-
-func TestPluginHostConfigRejectsUnsafeUnknownAndNonPutGet(t *testing.T) {
-	reg := testRegistry(t)
-	cases := []struct {
-		method string
-		path   string
-		want   int
-		text   string
-	}{
-		{http.MethodGet, "/api/plugins/vendor%2Fevil/config", http.StatusBadRequest, "不安全路径字符"},
-		{http.MethodPut, "/api/plugins/vendor.missing/config", http.StatusNotFound, "vendor.missing"},
-		{http.MethodPost, "/api/plugins/vendor.method/config", http.StatusMethodNotAllowed, "method not allowed"},
-	}
-	for _, tc := range cases {
-		res := httptest.NewRecorder()
-		body := strings.NewReader(`{"content":"ok: true\n"}`)
-		NewHandler(reg).ServeHTTP(res, httptest.NewRequest(tc.method, tc.path, body))
-		if res.Code != tc.want {
-			t.Fatalf("%s %s status = %d, want %d; body = %s", tc.method, tc.path, res.Code, tc.want, res.Body.String())
-		}
-		if tc.text != "" && !strings.Contains(res.Body.String(), tc.text) {
-			t.Fatalf("%s %s 响应缺少 %q: %s", tc.method, tc.path, tc.text, res.Body.String())
-		}
-	}
-}
-
-func TestPluginHostConfigRejectsUnsafeUnknownBeforeYAMLValidation(t *testing.T) {
-	reg := testRegistry(t)
-	cases := []struct {
-		path string
-		want int
-		text string
-	}{
-		{"/api/plugins/vendor%2Fevil/config", http.StatusBadRequest, "不安全路径字符"},
-		{"/api/plugins/vendor.missing/config", http.StatusNotFound, "vendor.missing"},
-	}
-	for _, tc := range cases {
-		res := httptest.NewRecorder()
-		NewHandler(reg).ServeHTTP(res, httptest.NewRequest(http.MethodPut, tc.path, strings.NewReader(`{"content":"bad: [\n"}`)))
-		if res.Code != tc.want {
-			t.Fatalf("%s status = %d, want %d; body = %s", tc.path, res.Code, tc.want, res.Body.String())
-		}
-		if !strings.Contains(res.Body.String(), tc.text) {
-			t.Fatalf("%s 响应缺少 %q: %s", tc.path, tc.text, res.Body.String())
-		}
-		if strings.Contains(res.Body.String(), "YAML 语法错误") {
-			t.Fatalf("%s 应先校验插件 ID/存在性，不能先暴露 YAML 错误: %s", tc.path, res.Body.String())
-		}
-	}
-}
-
-func TestPluginHostConfigPutRollsBackOnReloadFailure(t *testing.T) {
-	baseReg := testRegistry(t)
-	installTestPlugin(t, baseReg.BaseDir, "vendor.configrollback", "1.0.0")
-	reg, err := registry.Load(baseReg.BaseDir)
-	if err != nil {
-		t.Fatalf("加载测试注册表失败: %v", err)
-	}
-	configPath := filepath.Join(reg.BaseDir, "configs", "plugins", "vendor.configrollback.yaml")
-	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(configPath, []byte("old: value\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	installTestPlugin(t, reg.BaseDir, "vendor.configreloadbad", "1.0.0")
-	if err := os.WriteFile(filepath.Join(reg.BaseDir, "plugins", "vendor.configreloadbad", "plugin.yaml"), []byte("id: ../bad\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	res := httptest.NewRecorder()
-
-	NewHandler(reg).ServeHTTP(res, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configrollback/config", strings.NewReader(`{"content":"new: value\n"}`)))
-
-	if res.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want bad request; body = %s", res.Code, res.Body.String())
-	}
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "old: value\n" {
-		t.Fatalf("刷新失败应回滚旧配置，got: %s", data)
-	}
-}
-
-func TestPluginHostConfigAllowsDisabledPlugin(t *testing.T) {
-	baseReg := testRegistry(t)
-	installTestPlugin(t, baseReg.BaseDir, "vendor.configdisabled", "1.0.0")
-	reg, err := registry.Load(baseReg.BaseDir)
-	if err != nil {
-		t.Fatalf("加载测试注册表失败: %v", err)
-	}
-	handler := NewHandler(reg)
-	disableRes := httptest.NewRecorder()
-	handler.ServeHTTP(disableRes, httptest.NewRequest(http.MethodPost, "/api/plugins/vendor.configdisabled/disable", nil))
-	if disableRes.Code != http.StatusOK {
-		t.Fatalf("disable status = %d, body = %s", disableRes.Code, disableRes.Body.String())
-	}
-	putRes := httptest.NewRecorder()
-
-	handler.ServeHTTP(putRes, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configdisabled/config", strings.NewReader(`{"content":"disabled: true\n"}`)))
-
-	if putRes.Code != http.StatusOK {
-		t.Fatalf("disabled plugin config status = %d, body = %s", putRes.Code, putRes.Body.String())
-	}
-	if _, err := os.Stat(filepath.Join(reg.BaseDir, "configs", "plugins", "vendor.configdisabled.yaml")); err != nil {
-		t.Fatalf("禁用插件配置未写入: %v", err)
-	}
-}
-*/
 
 func TestPluginDisableAddsConfigAndRefreshesCatalog(t *testing.T) {
 	baseReg := testRegistry(t)
@@ -1612,6 +1426,70 @@ func TestWorkflowSaveAPIPreservesLoopRoundTrip(t *testing.T) {
 		t.Fatalf("saved workflow missing loop fields: %s", text)
 	}
 }
+func TestPluginConfigFilesEditDeclaredPluginFile(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, "plugins", "vendor.configfiles")
+	if err := os.MkdirAll(filepath.Join(pluginDir, "configs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(pluginDir, "configs", "app.conf")
+	if err := os.WriteFile(configPath, []byte("old=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{},
+		Tools: map[string]*registry.Tool{
+			"vendor.configfiles.run": {
+				Entry: config.ToolEntry{ID: "vendor.configfiles.run"},
+				Config: &config.ToolConfig{
+					ID:          "vendor.configfiles.run",
+					ConfigFiles: []string{"configs/app.conf"},
+					PluginConfig: config.PluginToolConfig{
+						ID:  "vendor.configfiles",
+						Dir: pluginDir,
+					},
+				},
+				Dir:    pluginDir,
+				Source: registry.Source{Type: "plugin", PluginID: "vendor.configfiles"},
+			},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	handler := NewHandler(reg)
+
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.configfiles/files", nil))
+	if listRes.Code != http.StatusOK || !strings.Contains(listRes.Body.String(), "configs/app.conf") {
+		t.Fatalf("list status = %d, body = %s", listRes.Code, listRes.Body.String())
+	}
+
+	getRes := httptest.NewRecorder()
+	handler.ServeHTTP(getRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.configfiles/files/configs%2Fapp.conf", nil))
+	if getRes.Code != http.StatusOK || !strings.Contains(getRes.Body.String(), "old=true") {
+		t.Fatalf("get status = %d, body = %s", getRes.Code, getRes.Body.String())
+	}
+
+	putRes := httptest.NewRecorder()
+	handler.ServeHTTP(putRes, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configfiles/files/configs%2Fapp.conf", strings.NewReader(`{"content":"new=true\n"}`)))
+	if putRes.Code != http.StatusOK {
+		t.Fatalf("put status = %d, body = %s", putRes.Code, putRes.Body.String())
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "new=true\n" {
+		t.Fatalf("plugin config file = %q", content)
+	}
+
+	badRes := httptest.NewRecorder()
+	handler.ServeHTTP(badRes, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configfiles/files/plugin.yaml", strings.NewReader(`{"content":"bad"}`)))
+	if badRes.Code != http.StatusBadRequest {
+		t.Fatalf("undeclared put status = %d, body = %s", badRes.Code, badRes.Body.String())
+	}
+}
+
 func testRegistry(t *testing.T) *registry.Registry {
 	t.Helper()
 	dir := t.TempDir()

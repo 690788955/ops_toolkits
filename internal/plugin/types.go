@@ -39,7 +39,7 @@ type Tool struct {
 	Parameters     []config.Parameter     `yaml:"parameters" json:"parameters"`
 	PassMode       config.PassMode        `yaml:"pass_mode" json:"pass_mode"`
 	ConfigDefaults map[string]interface{} `yaml:"config_defaults" json:"config_defaults"`
-	ConfigFiles    []config.ConfigFile    `yaml:"config_files" json:"config_files"`
+	ConfigFiles    []string               `yaml:"config_files" json:"config_files"`
 	SensitivePaths []string               `yaml:"sensitive_paths" json:"sensitive_paths"`
 	Confirm        config.Confirmation    `yaml:"confirm" json:"confirm"`
 	Env            map[string]string      `yaml:"env" json:"env"`
