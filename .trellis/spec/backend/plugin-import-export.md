@@ -334,7 +334,76 @@ Why correct:
 
 ---
 
-## Scenario: Plugin Integration Warnings
+## Scenario: Uploaded Plugin Install Permissions
+
+### 1. Scope / Trigger
+
+- Trigger: adding or changing plugin ZIP upload extraction, staged install, replacement install, or copy logic.
+- This is a backend filesystem contract: uploaded plugins must be runnable after install even when ZIP metadata comes from Windows or tools that omit Unix executable bits.
+
+### 2. Signatures
+
+- Upload API: `POST /api/plugins/upload`
+  - Query `replace=true|1` keeps the existing replacement semantics.
+  - Response shape is unchanged from the existing upload contract.
+- Filesystem install target: `<baseDir>/<first plugins.path>/<plugin-id>/`.
+
+### 3. Contracts
+
+- Upload must not trust ZIP entry permission bits as the final installed permissions.
+- Extracted staging directories and files may be normalized, but the final installed plugin package is authoritative:
+  - directories: `0755`
+  - regular files: `0755`
+- The permission contract applies to both first install and higher-version replacement install.
+- Existing ZIP safety boundaries still apply: reject traversal, absolute paths, symlinks, special files, too many files, and excessive uncompressed size.
+- Upload must not execute installed content while setting permissions.
+
+### 4. Validation & Error Matrix
+
+| Condition | Expected behavior |
+|---|---|
+| ZIP regular file records mode `0644` | upload succeeds; installed regular file mode is `0755` on Unix-like platforms |
+| ZIP directory records restrictive mode | upload succeeds; installed directory mode is `0755` on Unix-like platforms |
+| Higher-version replace uploads files with non-executable ZIP modes | replacement succeeds; new installed files/directories are `0755` |
+| `os.Chmod` fails while normalizing permissions | upload fails before reporting install success |
+| Windows test environment | do not assert Unix executable bits through `os.FileMode`; Windows does not expose them reliably |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a Windows-created plugin ZIP containing `scripts/run.sh` with recorded mode `0644` uploads successfully and installs `scripts/run.sh` as `0755` on Linux/macOS.
+- Base: an already executable ZIP entry still installs as `0755`.
+- Bad: preserving `file.FileInfo().Mode().Perm()` into `plugins/<plugin-id>/scripts/run.sh`, causing uploaded shell scripts to fail after deployment.
+
+### 6. Tests Required
+
+- Upload install test creates ZIP entries with `0644`, uploads a new plugin, and asserts installed `plugin.yaml` plus `scripts/run.sh` are `0755` on non-Windows platforms.
+- Replacement upload test repeats the permission assertion for a higher-version replacement.
+- Existing upload safety tests must continue to pass.
+- Full Go test suite must pass; build and validate commands must still succeed.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, file.FileInfo().Mode().Perm())
+```
+
+#### Correct
+
+```go
+out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, uploadPluginFileMode)
+// after close succeeds
+return os.Chmod(path, uploadPluginFileMode)
+```
+
+Why correct:
+- ZIP metadata is not portable across plugin authors' machines and ZIP tools.
+- Explicit install-time permission normalization matches the packaged runtime expectation that plugin contents are executable.
+- `Chmod` after close avoids relying on platform create defaults or process umask.
+
+---
+
 
 ### 1. Scope / Trigger
 

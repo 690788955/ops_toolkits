@@ -24,6 +24,8 @@ const (
 	maxPluginUploadSize       = 20 << 20
 	maxPluginUploadFiles      = 200
 	maxPluginUncompressedSize = 50 << 20
+	uploadPluginFileMode      = 0o755
+	uploadPluginDirectoryMode = 0o755
 )
 
 type pluginUploadResult struct {
@@ -396,19 +398,25 @@ func extractPluginZip(data []byte, dest string) error {
 			return fmt.Errorf("ZIP 包含路径逃逸: %s", file.Name)
 		}
 		if file.FileInfo().IsDir() {
-			if err := os.MkdirAll(path, 0o755); err != nil {
+			if err := os.MkdirAll(path, uploadPluginDirectoryMode); err != nil {
+				return err
+			}
+			if err := os.Chmod(path, uploadPluginDirectoryMode); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), uploadPluginDirectoryMode); err != nil {
+			return err
+		}
+		if err := os.Chmod(filepath.Dir(path), uploadPluginDirectoryMode); err != nil {
 			return err
 		}
 		in, err := file.Open()
 		if err != nil {
 			return err
 		}
-		out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, file.FileInfo().Mode().Perm())
+		out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, uploadPluginFileMode)
 		if err != nil {
 			_ = in.Close()
 			return err
@@ -421,6 +429,9 @@ func extractPluginZip(data []byte, dest string) error {
 		}
 		if closeErr != nil {
 			return closeErr
+		}
+		if err := os.Chmod(path, uploadPluginFileMode); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -527,7 +538,7 @@ func replacePlugin(reg *registry.Registry, state *serverState, srcDir, installDi
 }
 
 func copyDir(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), uploadPluginDirectoryMode); err != nil {
 		return err
 	}
 	if _, err := os.Stat(dst); err == nil {
@@ -545,7 +556,10 @@ func copyDir(src, dst string) error {
 		}
 		outPath := filepath.Join(dst, rel)
 		if d.IsDir() {
-			return os.MkdirAll(outPath, 0o755)
+			if err := os.MkdirAll(outPath, uploadPluginDirectoryMode); err != nil {
+				return err
+			}
+			return os.Chmod(outPath, uploadPluginDirectoryMode)
 		}
 		info, err := d.Info()
 		if err != nil {
@@ -559,7 +573,7 @@ func copyDir(src, dst string) error {
 			return err
 		}
 		defer in.Close()
-		out, err := os.OpenFile(outPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
+		out, err := os.OpenFile(outPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, uploadPluginFileMode)
 		if err != nil {
 			return err
 		}
@@ -568,7 +582,10 @@ func copyDir(src, dst string) error {
 		if copyErr != nil {
 			return copyErr
 		}
-		return closeErr
+		if closeErr != nil {
+			return closeErr
+		}
+		return os.Chmod(outPath, uploadPluginFileMode)
 	})
 }
 

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -485,9 +486,12 @@ func TestPluginUploadInstallsNewPluginAndRefreshesCatalog(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
 	}
-	if _, err := os.Stat(filepath.Join(reg.BaseDir, "plugins", "vendor.upload", "plugin.yaml")); err != nil {
+	pluginDir := filepath.Join(reg.BaseDir, "plugins", "vendor.upload")
+	if _, err := os.Stat(filepath.Join(pluginDir, "plugin.yaml")); err != nil {
 		t.Fatalf("插件未安装: %v", err)
 	}
+	assertFilePerm(t, filepath.Join(pluginDir, "plugin.yaml"), 0o755)
+	assertFilePerm(t, filepath.Join(pluginDir, "scripts", "run.sh"), 0o755)
 	catalogReq := httptest.NewRequest(http.MethodGet, "/api/catalog", nil)
 	catalogRes := httptest.NewRecorder()
 	handler.ServeHTTP(catalogRes, catalogReq)
@@ -1294,6 +1298,9 @@ func TestPluginUploadReplacesHigherVersionAndRefreshesCatalog(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
 	}
+	pluginDir := filepath.Join(reg.BaseDir, "plugins", "vendor.replace")
+	assertFilePerm(t, filepath.Join(pluginDir, "plugin.yaml"), 0o755)
+	assertFilePerm(t, filepath.Join(pluginDir, "scripts", "run.sh"), 0o755)
 	catalogReq := httptest.NewRequest(http.MethodGet, "/api/catalog", nil)
 	catalogRes := httptest.NewRecorder()
 	handler.ServeHTTP(catalogRes, catalogReq)
@@ -1732,12 +1739,28 @@ func unsafeZip(t *testing.T, name string) []byte {
 
 func writeZipFile(t *testing.T, writer *zip.Writer, name, content string) {
 	t.Helper()
-	file, err := writer.Create(name)
+	header := &zip.FileHeader{Name: name, Method: zip.Deflate}
+	header.SetMode(0o644)
+	file, err := writer.CreateHeader(header)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := file.Write([]byte(content)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func assertFilePerm(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("%s perm = %o, want %o", path, got, want)
 	}
 }
 
