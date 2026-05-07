@@ -74,3 +74,36 @@ Aligned the Web console canvas with the design system, added branch-aware condit
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: 修正插件模板 SPEC config_dir 说明
+
+**Date**: 2026-05-07
+**Task**: 修正插件模板 SPEC config_dir 说明
+**Branch**: `master`
+
+### Summary
+
+修正 /api/dev/toolkit.zip 下载包内嵌 SPEC、示例 plugin.yaml 和模板 README，补充 config_dir 推荐写法与插件配置文件约束，并增加下载包测试断言。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e5fcc62` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
