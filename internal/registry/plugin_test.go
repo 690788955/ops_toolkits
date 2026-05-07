@@ -3,6 +3,7 @@ package registry
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"shell_ops/internal/config"
@@ -326,6 +327,222 @@ contributes:
 				t.Fatal("Load returned nil, want mapping validation error")
 			}
 		})
+	}
+}
+
+func TestLoadAcceptsHostAbsoluteConfigMappingInsideWhitelist(t *testing.T) {
+	dir := t.TempDir()
+	hostDir := filepath.Join(dir, "host-config")
+	hostFile := filepath.Join(hostDir, "app.conf")
+	writeFile(t, hostFile, "old=true\n", 0o644)
+	writeRoot(t, dir, `plugins:
+  paths: [plugins]
+  strict: true
+host_config_files:
+  allowed_dirs:
+    - `+hostDir+`
+`)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.mapping", "scripts", "run.sh"), "#!/usr/bin/env bash\necho run\n", 0o755)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.mapping", "plugin.yaml"), `id: vendor.mapping
+name: Mapping
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.mapping.run
+      category: mapping
+      command: scripts/run.sh
+`, 0o644)
+	writeFile(t, filepath.Join(dir, "configs", "plugins", "vendor.mapping.mapping.yaml"), `tools:
+  vendor.mapping.run:
+    config_files:
+      - id: app-main
+        label: App 主配置
+        scope: host_absolute
+        config_dir: `+hostDir+`
+        path: app.conf
+        access: read_write
+        create: false
+`, 0o644)
+
+	reg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	tool, err := reg.Tool("vendor.mapping.run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tool.Config.ConfigFileRefs) != 1 || tool.Config.ConfigFileRefs[0].ID != "app-main" || tool.Config.ConfigFileRefs[0].Scope != config.ConfigFileScopeHostAbsolute {
+		t.Fatalf("host config entry not normalized: %#v", tool.Config.ConfigFileRefs)
+	}
+}
+
+func TestLoadRejectsHostAbsoluteConfigMappingOutsideWhitelist(t *testing.T) {
+	dir := t.TempDir()
+	allowedDir := filepath.Join(dir, "allowed")
+	outsideDir := filepath.Join(dir, "outside")
+	writeFile(t, filepath.Join(allowedDir, "placeholder"), "x", 0o644)
+	outsideFile := filepath.Join(outsideDir, "app.conf")
+	writeFile(t, outsideFile, "old=true\n", 0o644)
+	writeRoot(t, dir, `plugins:
+  paths: [plugins]
+  strict: true
+host_config_files:
+  allowed_dirs:
+    - `+allowedDir+`
+`)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.mapping", "scripts", "run.sh"), "#!/usr/bin/env bash\necho run\n", 0o755)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.mapping", "plugin.yaml"), `id: vendor.mapping
+name: Mapping
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.mapping.run
+      category: mapping
+      command: scripts/run.sh
+`, 0o644)
+	writeFile(t, filepath.Join(dir, "configs", "plugins", "vendor.mapping.mapping.yaml"), `tools:
+  vendor.mapping.run:
+    config_files:
+      - id: app-main
+        scope: host_absolute
+        config_dir: `+outsideDir+`
+        path: app.conf
+        access: read
+`, 0o644)
+
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "白名单") {
+		t.Fatalf("Load error = %v, want whitelist error", err)
+	}
+}
+
+func TestLoadRejectsHostConfigWhitelistFile(t *testing.T) {
+	dir := t.TempDir()
+	allowedFile := filepath.Join(dir, "allowed.conf")
+	writeFile(t, allowedFile, "x", 0o644)
+	writeRoot(t, dir, `plugins:
+  paths: [plugins]
+  strict: true
+host_config_files:
+  allowed_dirs:
+    - `+allowedFile+`
+`)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.mapping", "scripts", "run.sh"), "#!/usr/bin/env bash\necho run\n", 0o755)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.mapping", "plugin.yaml"), `id: vendor.mapping
+name: Mapping
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.mapping.run
+      category: mapping
+      command: scripts/run.sh
+`, 0o644)
+	writeFile(t, filepath.Join(dir, "configs", "plugins", "vendor.mapping.mapping.yaml"), `tools:
+  vendor.mapping.run:
+    config_files:
+      - id: app-main
+        scope: host_absolute
+        path: `+allowedFile+`
+        access: read
+`, 0o644)
+
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "目录白名单") {
+		t.Fatalf("Load error = %v, want directory whitelist error", err)
+	}
+}
+
+func TestLoadRejectsHostAbsoluteConfigMappingSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	allowedDir := filepath.Join(dir, "allowed")
+	outsideDir := filepath.Join(dir, "outside")
+	if err := os.MkdirAll(allowedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(allowedDir, "link")
+	if err := os.Symlink(outsideDir, linkDir); err != nil {
+		t.Skipf("当前环境不支持创建目录符号链接: %v", err)
+	}
+	writeRoot(t, dir, `plugins:
+  paths: [plugins]
+  strict: true
+host_config_files:
+  allowed_dirs:
+    - `+allowedDir+`
+`)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.mapping", "scripts", "run.sh"), "#!/usr/bin/env bash\necho run\n", 0o755)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.mapping", "plugin.yaml"), `id: vendor.mapping
+name: Mapping
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.mapping.run
+      category: mapping
+      command: scripts/run.sh
+`, 0o644)
+	writeFile(t, filepath.Join(dir, "configs", "plugins", "vendor.mapping.mapping.yaml"), `tools:
+  vendor.mapping.run:
+    config_files:
+      - id: app-main
+        scope: host_absolute
+        config_dir: `+linkDir+`
+        path: app.conf
+        access: read_write
+        create: true
+`, 0o644)
+
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "符号链接") || !strings.Contains(err.Error(), "白名单") {
+		t.Fatalf("Load error = %v, want symlink whitelist escape error", err)
+	}
+}
+
+func TestLoadRejectsHostAbsoluteConfigMappingFileSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	allowedDir := filepath.Join(dir, "allowed")
+	outsideDir := filepath.Join(dir, "outside")
+	if err := os.MkdirAll(allowedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outsideFile := filepath.Join(outsideDir, "secret.conf")
+	writeFile(t, outsideFile, "secret=true\n", 0o644)
+	linkFile := filepath.Join(allowedDir, "linked.conf")
+	if err := os.Symlink(outsideFile, linkFile); err != nil {
+		t.Skipf("当前环境不支持创建文件符号链接: %v", err)
+	}
+	writeRoot(t, dir, `plugins:
+  paths: [plugins]
+  strict: true
+host_config_files:
+  allowed_dirs:
+    - `+allowedDir+`
+`)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.mapping", "scripts", "run.sh"), "#!/usr/bin/env bash\necho run\n", 0o755)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.mapping", "plugin.yaml"), `id: vendor.mapping
+name: Mapping
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.mapping.run
+      category: mapping
+      command: scripts/run.sh
+`, 0o644)
+	writeFile(t, filepath.Join(dir, "configs", "plugins", "vendor.mapping.mapping.yaml"), `tools:
+  vendor.mapping.run:
+    config_files:
+      - id: app-main
+        scope: host_absolute
+        config_dir: `+allowedDir+`
+        path: linked.conf
+        access: read
+`, 0o644)
+
+	if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "符号链接") || !strings.Contains(err.Error(), "白名单") {
+		t.Fatalf("Load error = %v, want file symlink whitelist escape error", err)
 	}
 }
 

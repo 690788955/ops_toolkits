@@ -12,6 +12,7 @@ type RootConfig struct {
 	Menu              MenuConfig             `yaml:"menu" json:"menu"`
 	Registry          RegistryConfig         `yaml:"registry" json:"registry"`
 	Plugins           PluginsConfig          `yaml:"plugins" json:"plugins"`
+	HostConfigFiles   HostConfigFilesConfig  `yaml:"host_config_files" json:"host_config_files"`
 	UI                UIConfig               `yaml:"ui" json:"ui"`
 	ConfigDefaults    map[string]interface{} `yaml:"config_defaults" json:"config_defaults"`
 	RuntimeCategories []Category             `yaml:"-" json:"-"`
@@ -90,25 +91,27 @@ type WorkflowRef struct {
 }
 
 type ToolConfig struct {
-	ID              string                 `yaml:"id" json:"id"`
-	Name            string                 `yaml:"name" json:"name"`
-	Description     string                 `yaml:"description" json:"description"`
-	Version         string                 `yaml:"version" json:"version"`
-	Category        string                 `yaml:"category" json:"category"`
-	Tags            []string               `yaml:"tags" json:"tags"`
-	Help            HelpConfig             `yaml:"help" json:"help"`
-	Entry           string                 `yaml:"entry" json:"entry"`
-	Execution       ExecutionConfig        `yaml:"execution" json:"execution"`
-	Parameters      []Parameter            `yaml:"parameters" json:"parameters"`
-	PassMode        PassMode               `yaml:"pass_mode" json:"pass_mode"`
-	Timeout         string                 `yaml:"timeout" json:"timeout"`
-	Confirm         Confirmation           `yaml:"confirm" json:"confirm"`
-	Confirmation    Confirmation           `yaml:"confirmation" json:"-"`
-	Env             map[string]string      `yaml:"env" json:"env"`
-	ConfigDefaults  map[string]interface{} `yaml:"config_defaults" json:"config_defaults"`
-	PluginConfig    PluginToolConfig       `yaml:"-" json:"-"`
-	ConfigFiles     []string               `yaml:"config_files" json:"config_files"`
-	SensitivePaths  []string               `yaml:"sensitive_paths" json:"sensitive_paths"`
+	ID             string                 `yaml:"id" json:"id"`
+	Name           string                 `yaml:"name" json:"name"`
+	Description    string                 `yaml:"description" json:"description"`
+	Version        string                 `yaml:"version" json:"version"`
+	Category       string                 `yaml:"category" json:"category"`
+	Tags           []string               `yaml:"tags" json:"tags"`
+	Help           HelpConfig             `yaml:"help" json:"help"`
+	Entry          string                 `yaml:"entry" json:"entry"`
+	Execution      ExecutionConfig        `yaml:"execution" json:"execution"`
+	Parameters     []Parameter            `yaml:"parameters" json:"parameters"`
+	PassMode       PassMode               `yaml:"pass_mode" json:"pass_mode"`
+	Timeout        string                 `yaml:"timeout" json:"timeout"`
+	Confirm        Confirmation           `yaml:"confirm" json:"confirm"`
+	Confirmation   Confirmation           `yaml:"confirmation" json:"-"`
+	Env            map[string]string      `yaml:"env" json:"env"`
+	ConfigDefaults map[string]interface{} `yaml:"config_defaults" json:"config_defaults"`
+	PluginConfig   PluginToolConfig       `yaml:"-" json:"-"`
+	ConfigDir      string                 `yaml:"config_dir" json:"config_dir,omitempty"`
+	ConfigFiles    []string               `yaml:"config_files" json:"config_files"`
+	ConfigFileRefs []ConfigFileRef        `yaml:"-" json:"config_file_entries,omitempty"`
+	SensitivePaths []string               `yaml:"sensitive_paths" json:"sensitive_paths"`
 }
 
 type HelpConfig struct {
@@ -129,7 +132,7 @@ type PluginConfigMapping struct {
 }
 
 type PluginToolConfigMapping struct {
-	ConfigFiles []string `yaml:"config_files" json:"config_files"`
+	ConfigFiles []ConfigFileRef `yaml:"config_files" json:"config_files"`
 }
 
 type PluginToolConfig struct {

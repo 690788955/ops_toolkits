@@ -203,7 +203,7 @@ func (r *Registry) buildPluginPackageWithVersion(pkg plugin.Package, version str
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("读取插件 %s 宿主配置失败: %w", pkg.Manifest.ID, err)
 	}
-	mapping, _, err := loadPluginConfigMapping(r.BaseDir, pkg)
+	mapping, _, err := loadPluginConfigMapping(r.BaseDir, pkg, r.Root)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -213,7 +213,15 @@ func (r *Registry) buildPluginPackageWithVersion(pkg plugin.Package, version str
 			return nil, nil, nil, err
 		}
 		if rule, ok := mapping.Tools[contributed.ID]; ok {
-			toolCfg.ConfigFiles = append([]string{}, rule.ConfigFiles...)
+			entries := make([]config.ConfigFileRef, 0, len(rule.ConfigFiles))
+			legacy := make([]string, 0, len(rule.ConfigFiles))
+			for _, entry := range rule.ConfigFiles {
+				entry = normalizeConfigFileRef(entry)
+				entries = append(entries, entry)
+				legacy = append(legacy, entry.ID)
+			}
+			toolCfg.ConfigFiles = legacy
+			toolCfg.ConfigFileRefs = entries
 		}
 		entry := normalizeToolEntry(config.ToolEntry{}, toolCfg)
 		if _, exists := r.Tools[entry.ID]; exists {
@@ -346,6 +354,21 @@ func normalizePluginTool(pkg plugin.Package, contributed plugin.Tool, packageDef
 	if version == "" {
 		version = pkg.Manifest.Version
 	}
+	configDir := contributed.ConfigDir
+	legacyConfigFiles := configDir == ""
+	if configDir == "" {
+		configDir = "config"
+	}
+	entries := make([]config.ConfigFileRef, 0, len(contributed.ConfigFiles))
+	for _, path := range contributed.ConfigFiles {
+		entry := config.ConfigFileRef{ID: path, ConfigDir: configDir, Path: path, Scope: config.ConfigFileScopePlugin, Access: config.ConfigFileAccessReadWrite, Create: true}
+		if legacyConfigFiles && legacyConfigFilePath(path) {
+			entry.ConfigDir = "."
+			entry.Legacy = true
+		}
+		config.NormalizeConfigFileRef(&entry)
+		entries = append(entries, entry)
+	}
 	cfg := &config.ToolConfig{
 		ID:          contributed.ID,
 		Name:        contributed.Name,
@@ -364,7 +387,9 @@ func normalizePluginTool(pkg plugin.Package, contributed plugin.Tool, packageDef
 		Parameters:     contributed.Parameters,
 		PassMode:       pluginPassMode(contributed.PassMode),
 		ConfigDefaults: config.CopyValues(contributed.ConfigDefaults),
+		ConfigDir:      configDir,
 		ConfigFiles:    contributed.ConfigFiles,
+		ConfigFileRefs: entries,
 		SensitivePaths: append([]string{}, contributed.SensitivePaths...),
 		PluginConfig: config.PluginToolConfig{
 			ID:                   pkg.Manifest.ID,
@@ -378,6 +403,11 @@ func normalizePluginTool(pkg plugin.Package, contributed plugin.Tool, packageDef
 		Env:     contributed.Env,
 	}
 	return cfg, pkg.Dir, nil
+}
+
+func legacyConfigFilePath(path string) bool {
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
+	return clean == "config" || strings.HasPrefix(clean, "config/")
 }
 
 func pluginPassMode(mode config.PassMode) config.PassMode {

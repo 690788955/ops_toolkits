@@ -50,7 +50,11 @@ contributes:
           description: 要执行的操作
           required: true
           default: check
+      # 推荐写法：config_dir 作为插件内基准目录，config_files 只写相对文件名或相对目录项。
+      # 旧写法 config_files: [config/example.conf] 仍兼容，但新插件建议使用当前短文件名写法。
+      # 不要在插件包内声明宿主绝对路径；宿主路径由管理员通过 host_config_files.allowed_dirs 和 host-side mapping 显式启用。
+      config_dir: config
       config_files:
-        - config/example.conf
+        - example.conf
       confirm:
         required: false

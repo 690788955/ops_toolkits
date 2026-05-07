@@ -19,6 +19,9 @@ var allowedConditionOperators = map[string]bool{
 }
 
 func (r *Registry) Validate() error {
+	if _, err := normalizeHostAllowedDirs(r.Root); err != nil {
+		return err
+	}
 	for id, wf := range r.Workflows {
 		if err := r.ValidateWorkflow(wf.Config); err != nil {
 			return fmt.Errorf("工作流 %s: %w", id, err)

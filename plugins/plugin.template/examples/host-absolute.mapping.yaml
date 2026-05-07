@@ -1,0 +1,38 @@
+# 宿主绝对路径配置文件映射示例
+#
+# 本文件仅作为管理员参考，不会随插件包自动启用宿主路径能力。
+# 如需启用，请由管理员复制到 configs/plugins/<plugin-id>.mapping.yaml，
+# 并先在 configs/ops.yaml 中配置 host_config_files.allowed_dirs。
+#
+# 全局白名单示例：
+# host_config_files:
+#   allowed_dirs:
+#     - /etc/myapp
+#     - C:\\ProgramData\\Vendor\\MyApp
+#
+# 白名单只支持目录；最终文件路径以及符号链接解析后的真实路径也必须仍在白名单内。
+
+tools:
+  plugin.mycompany.mytool.action:
+    config_files:
+      - id: app-main
+        label: 应用主配置
+        scope: host_absolute
+        config_dir: /etc/myapp
+        path: app.conf
+        access: read_write
+        create: false
+      - id: app-extra-readonly
+        label: 只读扩展配置
+        scope: host_absolute
+        config_dir: /etc/myapp/conf.d
+        path: extra.conf
+        access: read
+        create: false
+      - id: app-created-on-demand
+        label: 可按需创建的配置
+        scope: host_absolute
+        config_dir: /etc/myapp/conf.d
+        path: generated.conf
+        access: read_write
+        create: true

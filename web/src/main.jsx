@@ -228,7 +228,7 @@ function App() {
 
   const hasConfigTab = useMemo(() => {
     const tools = catalog?.tools || []
-    return tools.some(tool => tool.config_files && tool.config_files.length > 0)
+    return tools.some(tool => (tool.config_file_entries && tool.config_file_entries.length > 0) || (tool.config_files && tool.config_files.length > 0))
   }, [catalog])
 
   const sourceEntries = useMemo(() => {
@@ -440,10 +440,11 @@ function buildConfigItems(catalog, activeCategory) {
       if (tool.source?.plugin_id !== plugin.id) {
         return
       }
-      ;(tool.config_files || []).forEach(file => {
-        if (file && !seenFiles.has(file)) {
-          seenFiles.add(file)
-          configFiles.push(file)
+      ;(tool.config_file_entries || tool.config_files || []).forEach(file => {
+        const key = typeof file === 'string' ? file : (file.id || file.path)
+        if (key && !seenFiles.has(key)) {
+          seenFiles.add(key)
+          configFiles.push(normalizeConfigFileItem(file, plugin.id))
         }
       })
     })
@@ -468,7 +469,7 @@ function buildConfigItems(catalog, activeCategory) {
       return
     }
 
-    configFiles.sort()
+    configFiles.sort((a, b) => `${a.path || ''}${a.label || ''}`.localeCompare(`${b.path || ''}${b.label || ''}`))
 
     items.push({
       type: 'plugin',
@@ -476,7 +477,7 @@ function buildConfigItems(catalog, activeCategory) {
       name: plugin.name || plugin.id,
       typeLabel: '插件',
       description: plugin.description || `插件 ${plugin.id} 声明的配置文件`,
-      files: configFiles.map(file => ({path: `plugins/${plugin.id}/${file}`, label: '配置文件'})),
+      files: configFiles,
       disabled: plugin.disabled,
       version: plugin.version,
       relatedCategories: Array.from(relatedCategories)
@@ -484,6 +485,22 @@ function buildConfigItems(catalog, activeCategory) {
   })
 
   return items
+}
+
+
+function normalizeConfigFileItem(file, pluginID) {
+  if (typeof file === 'string') {
+    return {path: `plugins/${pluginID}/${file}`, label: '配置文件'}
+  }
+  const scope = file.scope || 'plugin'
+  const configDir = file.config_dir || (scope === 'plugin' ? 'config' : '')
+  const itemPath = file.path || file.id
+  const displayPath = scope === 'host_absolute' ? [configDir, itemPath].filter(Boolean).join('/') : `plugins/${pluginID}/${[configDir, itemPath].filter(Boolean).join('/')}`
+  const accessLabel = file.access === 'read_write' ? '可读写' : '只读'
+  return {
+    path: displayPath,
+    label: file.label || (scope === 'host_absolute' ? `宿主配置文件（${accessLabel}）` : '配置文件')
+  }
 }
 
 
@@ -712,7 +729,8 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
     pluginsPaths: 'plugins',
     pluginsStrict: false,
     pathsRuns: 'runs',
-    pathsLogs: 'runs/logs'
+    pathsLogs: 'runs/logs',
+    hostConfigAllowedDirs: ''
   })
 
   useEffect(() => {
@@ -740,7 +758,8 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
             pluginsPaths: (config.plugins?.paths || ['plugins']).join(', '),
             pluginsStrict: config.plugins?.strict || false,
             pathsRuns: config.paths?.runs || 'runs',
-            pathsLogs: config.paths?.logs || 'runs/logs'
+            pathsLogs: config.paths?.logs || 'runs/logs',
+        hostConfigAllowedDirs: (config.host_config_files?.allowed_dirs || []).join('\n')
           })
         } catch (parseErr) {
           console.warn('YAML 解析失败，使用默认表单值', parseErr)
@@ -781,6 +800,9 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
       paths: {
         runs: formData.pathsRuns,
         logs: formData.pathsLogs
+      },
+      host_config_files: {
+        allowed_dirs: formData.hostConfigAllowedDirs.split('\n').map(p => p.trim()).filter(Boolean)
       }
     }
     setContent(yaml.dump(config, {indent: 2, lineWidth: -1}))
@@ -801,7 +823,8 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
         pluginsPaths: (config.plugins?.paths || ['plugins']).join(', '),
         pluginsStrict: config.plugins?.strict || false,
         pathsRuns: config.paths?.runs || 'runs',
-        pathsLogs: config.paths?.logs || 'runs/logs'
+        pathsLogs: config.paths?.logs || 'runs/logs',
+        hostConfigAllowedDirs: (config.host_config_files?.allowed_dirs || []).join('\n')
       })
       setEditMode('form')
     } catch (err) {
@@ -834,6 +857,9 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
           paths: {
             runs: formData.pathsRuns,
             logs: formData.pathsLogs
+          },
+          host_config_files: {
+            allowed_dirs: formData.hostConfigAllowedDirs.split('\n').map(p => p.trim()).filter(Boolean)
           }
         }
         yamlToSave = yaml.dump(config, {indent: 2, lineWidth: -1})
@@ -918,6 +944,15 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
                   <span>日志目录</span>
                   <input type="text" value={formData.pathsLogs} disabled={loading || saving} placeholder="runs/logs" onChange={e => updateFormField('pathsLogs', e.target.value)} />
                 </label>
+              </fieldset>
+
+              <fieldset>
+                <legend>宿主配置文件白名单</legend>
+                <label>
+                  <span>允许目录（每行一个绝对目录）</span>
+                  <textarea value={formData.hostConfigAllowedDirs} disabled={loading || saving} placeholder="/etc/myapp&#10;C:\ProgramData\Vendor" onChange={e => updateFormField('hostConfigAllowedDirs', e.target.value)} />
+                </label>
+                <div className="empty small">仅允许目录白名单；宿主 mapping 的 config_dir 必须落在这些目录内。</div>
               </fieldset>
             </div>
           ) : (
@@ -1036,6 +1071,7 @@ function PluginConfigFilesPanel({pluginID, onBack}) {
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('正在加载配置文件列表...')
   const [editingFile, setEditingFile] = useState(null)
+  const fileTree = useMemo(() => buildPluginConfigFileTree(files, pluginID), [files, pluginID])
 
   useEffect(() => {
     loadFiles()
@@ -1046,8 +1082,9 @@ function PluginConfigFilesPanel({pluginID, onBack}) {
     setMessage('正在加载配置文件列表...')
     try {
       const body = await fetchJSON(`/api/plugins/${encodeURIComponent(pluginID)}/files`)
-      setFiles(body.data?.files || [])
-      setMessage(body.data?.files?.length > 0 ? `已加载 ${body.data.files.length} 个配置文件。` : '当前没有配置文件。')
+      const fileList = (body.data?.files || []).map(normalizePluginConfigFile)
+      setFiles(fileList)
+      setMessage(fileList.length > 0 ? `已加载 ${fileList.length} 个配置文件。` : '当前没有配置文件。')
     } catch (err) {
       setMessage(readableAPIError(err, '加载配置文件列表失败。'))
     } finally {
@@ -1059,7 +1096,7 @@ function PluginConfigFilesPanel({pluginID, onBack}) {
     return (
       <PluginConfigFileEditor
         pluginID={pluginID}
-        fileName={editingFile}
+        file={editingFile}
         onBack={() => {
           setEditingFile(null)
           loadFiles()
@@ -1070,16 +1107,10 @@ function PluginConfigFilesPanel({pluginID, onBack}) {
 
   return (
     <div className="pluginConfigFilesPanel">
-      <div className="empty small">配置文件由工具声明，页面会直接读取和保存插件目录内对应路径的文件。</div>
-      <div className="configFilesList">
-        {files.map(file => (
-          <div className="configFileItem" key={file}>
-            <div>
-              <strong>{file}</strong>
-              <span>plugins/{pluginID}/{file}</span>
-            </div>
-            <button className="secondary" onClick={() => setEditingFile(file)}>编辑</button>
-          </div>
+      <div className="empty small">配置文件由工具声明；插件内文件可维护，宿主绝对路径文件必须由平台白名单和插件 mapping 授权。目录默认展开，可按目录折叠查找。</div>
+      <div className="configFilesTree" role="tree" aria-label="配置文件目录树">
+        {fileTree.children.map(node => (
+          <ConfigFileTreeNode key={node.key} node={node} depth={0} onSelectFile={setEditingFile} />
         ))}
         {files.length === 0 && !loading && (
           <div className="empty">当前没有配置文件。配置文件由插件工具在 plugin.yaml 中声明。</div>
@@ -1093,21 +1124,207 @@ function PluginConfigFilesPanel({pluginID, onBack}) {
   )
 }
 
-function PluginConfigFileEditor({pluginID, fileName, onBack}) {
+function normalizePluginConfigFile(file) {
+  if (typeof file === 'string') {
+    return {
+      id: file,
+      label: file,
+      path: file,
+      displayPath: file,
+      scope: 'plugin',
+      access: 'read_write',
+      create: true,
+      exists: true,
+      readable: true,
+      writable: true,
+      reason: ''
+    }
+  }
+  const scope = file.scope || 'plugin'
+  const path = file.path || file.id || ''
+  const configDir = file.config_dir || file.configDir || ''
+  const displayPath = file.display_path || file.displayPath || [configDir, path].filter(Boolean).join('/') || path || file.id || ''
+  return {
+    ...file,
+    id: file.id || path,
+    label: file.label || file.name || file.id || path,
+    path,
+    config_dir: configDir || file.config_dir,
+    displayPath,
+    scope,
+    access: file.access || (scope === 'plugin' ? 'read_write' : 'read')
+  }
+}
+
+function buildPluginConfigFileTree(files, pluginID) {
+  const root = {key: 'root', type: 'root', children: []}
+  const roots = new Map()
+
+  files.forEach(file => {
+    const scope = file.scope || 'plugin'
+    const rootLabel = scope === 'host_absolute'
+      ? (file.config_dir || '宿主配置')
+      : `plugins/${pluginID}`
+    const rootKey = `${scope}:${rootLabel}`
+    let rootNode = roots.get(rootKey)
+    if (!rootNode) {
+      rootNode = {key: rootKey, type: 'dir', name: rootLabel, path: rootLabel, scope, children: [], childMap: new Map()}
+      roots.set(rootKey, rootNode)
+      root.children.push(rootNode)
+    }
+
+    const rawPath = scope === 'host_absolute'
+      ? (file.path || file.displayPath || file.id || file.label || '')
+      : (file.path || file.displayPath || file.id || file.label || '')
+    const segments = splitConfigPath(rawPath)
+    insertConfigFileTreeNode(rootNode, segments.length > 0 ? segments : [file.label || file.id || '未命名配置文件'], file)
+  })
+
+  sortConfigFileTree(root)
+  return root
+}
+
+function splitConfigPath(value) {
+  return String(value || '')
+    .replace(/\\/g, '/')
+    .split('/')
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function insertConfigFileTreeNode(rootNode, segments, file) {
+  let current = rootNode
+  segments.slice(0, -1).forEach(segment => {
+    const key = `${current.key}/${segment}`
+    let next = current.childMap.get(segment)
+    if (!next) {
+      next = {key, type: 'dir', name: segment, path: key, scope: rootNode.scope, children: [], childMap: new Map()}
+      current.childMap.set(segment, next)
+      current.children.push(next)
+    }
+    current = next
+  })
+  const fileName = segments[segments.length - 1] || file.label || file.id
+  current.children.push({
+    key: `file:${file.id}:${current.key}/${fileName}`,
+    type: 'file',
+    name: fileName,
+    file
+  })
+}
+
+function sortConfigFileTree(node) {
+  if (!node.children) return
+  node.children.sort((left, right) => {
+    if (left.type !== right.type) return left.type === 'dir' ? -1 : 1
+    return String(left.name || '').localeCompare(String(right.name || ''), 'zh-CN')
+  })
+  node.children.forEach(sortConfigFileTree)
+}
+
+function ConfigFileTreeNode({node, depth, onSelectFile}) {
+  if (node.type === 'file') {
+    const file = node.file
+    const actionLabel = file.access === 'read_write' && file.writable !== false && !(file.exists === false && file.create === false) ? '编辑' : '查看'
+    return (
+      <div
+        className="configFileTreeFile"
+        role="treeitem"
+        tabIndex={0}
+        style={{'--tree-depth': depth}}
+        onClick={() => onSelectFile(file)}
+        onKeyDown={event => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            onSelectFile(file)
+          }
+        }}
+      >
+        <div className="configFileTreeFileMain">
+          <strong>{file.label || node.name || file.id}</strong>
+          <span>{file.displayPath || file.path || file.id}</span>
+          <ConfigFileStatusBadges file={file} />
+          {file.reason && <small className="configFileReason">{file.reason}</small>}
+        </div>
+        <button
+          type="button"
+          className="secondary"
+          onClick={event => {
+            event.stopPropagation()
+            onSelectFile(file)
+          }}
+        >
+          {actionLabel}
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <details className="configFileTreeDir" open role="group" style={{'--tree-depth': depth}}>
+      <summary role="treeitem">
+        <span className="configFileTreeTwisty" aria-hidden="true">›</span>
+        <strong>{node.name}</strong>
+        <small>{countConfigTreeFiles(node)} 个文件</small>
+      </summary>
+      <div className="configFileTreeChildren">
+        {node.children.map(child => (
+          <ConfigFileTreeNode key={child.key} node={child} depth={depth + 1} onSelectFile={onSelectFile} />
+        ))}
+      </div>
+    </details>
+  )
+}
+
+function countConfigTreeFiles(node) {
+  if (!node?.children) return 0
+  return node.children.reduce((total, child) => total + (child.type === 'file' ? 1 : countConfigTreeFiles(child)), 0)
+}
+
+function ConfigFileStatusBadges({file}) {
+  const badges = []
+  if (file.scope === 'host_absolute') badges.push({key: 'scope', label: '宿主', kind: 'warning'})
+  if (file.access === 'read_write') {
+    badges.push({key: 'access', label: '可写', kind: 'success'})
+  } else {
+    badges.push({key: 'access', label: '只读', kind: 'muted'})
+  }
+  if (file.exists === false) badges.push({key: 'exists', label: '不存在', kind: 'warning'})
+  if (file.readable === false) badges.push({key: 'readable', label: '不可读', kind: 'danger'})
+  if (file.writable === false) badges.push({key: 'writable', label: '不可写', kind: 'danger'})
+  return (
+    <div className="configFileBadges" aria-label="文件状态">
+      {badges.map(badge => <span key={badge.key} className={`configFileBadge ${badge.kind}`}>{badge.label}</span>)}
+    </div>
+  )
+}
+
+function pluginConfigFileSaveBlockReason(file) {
+  if (!file) return '未选择配置文件，不能保存。'
+  if (file.access !== 'read_write') return '当前文件声明为只读，只允许查看，不能保存。'
+  if (file.exists === false && file.create === false) return '当前文件不存在，且声明不允许创建，不能保存。'
+  if (file.writable === false) return file.reason || '当前进程对该文件或父目录没有写入权限，不能保存。'
+  return ''
+}
+
+function PluginConfigFileEditor({pluginID, file, onBack}) {
   const [content, setContent] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('正在读取配置文件...')
+  const fileID = file?.id || ''
+  const saveBlockReason = pluginConfigFileSaveBlockReason(file)
+  const canSave = !saveBlockReason
 
   useEffect(() => {
     loadFile()
-  }, [pluginID, fileName])
+  }, [pluginID, fileID])
 
   async function loadFile() {
     setLoading(true)
     setMessage('正在读取配置文件...')
     try {
-      const body = await fetchJSON(`/api/plugins/${encodeURIComponent(pluginID)}/files/${encodeURIComponent(fileName)}`)
+      const body = await fetchJSON(`/api/plugins/${encodeURIComponent(pluginID)}/files/${encodeURIComponent(fileID)}`)
       setContent(body.data?.content || '')
       setMessage('已加载配置文件。')
     } catch (err) {
@@ -1118,10 +1335,14 @@ function PluginConfigFileEditor({pluginID, fileName, onBack}) {
   }
 
   async function saveFile() {
+    if (!canSave) {
+      setMessage(saveBlockReason)
+      return
+    }
     setSaving(true)
     setMessage('正在保存配置文件...')
     try {
-      await putJSON(`/api/plugins/${encodeURIComponent(pluginID)}/files/${encodeURIComponent(fileName)}`, {content})
+      await putJSON(`/api/plugins/${encodeURIComponent(pluginID)}/files/${encodeURIComponent(fileID)}`, {content})
       setMessage('配置文件已保存。')
     } catch (err) {
       setMessage(readableAPIError(err, '保存配置文件失败。'))
@@ -1132,18 +1353,26 @@ function PluginConfigFileEditor({pluginID, fileName, onBack}) {
 
   return (
     <div className="pluginConfigEditor">
-      <div className="empty small">编辑配置文件：{fileName}</div>
+      <div className="configFileEditorSummary">
+        <div>
+          <strong>{file?.label || fileID}</strong>
+          <span>{file?.displayPath || file?.path || fileID}</span>
+        </div>
+        <ConfigFileStatusBadges file={file || {}} />
+        {file?.reason && <small className="configFileReason">{file.reason}</small>}
+        {saveBlockReason && <small className="configFileSaveHint">{saveBlockReason}</small>}
+      </div>
       <label>
         <span>文件内容</span>
         <textarea
           value={content}
-          disabled={loading || saving}
+          disabled={loading || saving || !canSave}
           placeholder="输入配置文件内容..."
           onChange={event => setContent(event.target.value)}
         />
       </label>
       <div className="buttonRow">
-        <button className="primary" disabled={loading || saving} onClick={saveFile}>保存配置文件</button>
+        <button className="primary" disabled={loading || saving || !canSave} onClick={saveFile}>保存配置文件</button>
         <button className="secondary" disabled={saving} onClick={onBack}>返回列表</button>
       </div>
       <pre className="modalResult">{message}</pre>

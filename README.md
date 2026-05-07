@@ -173,6 +173,9 @@ contributes:
           type: string
           description: 备份目标
           required: true
+      config_dir: config
+      config_files:
+        - example.conf
       confirm:
         required: true
         message: 确认执行全量备份？
@@ -185,6 +188,33 @@ contributes:
 - `strict: false` 时坏插件会被跳过并输出告警；`strict: true` 时任意插件加载失败都会阻断校验/启动。
 - `disabled` 可以按插件 ID 或插件目录名禁用插件。
 - `confirm.required: true` 的工具在 CLI、菜单和 Web 执行前都需要确认。
+- 插件 manifest 的 `config_files` 只声明插件包内配置文件；推荐用 `config_dir: config` + 短文件名，旧 `config/example.conf` 写法保持兼容。
+- 未声明 `config_dir` 时，新短文件名默认以插件 `config/` 作为基准；声明 `config_dir` 后，`config_files` / `path` 只写相对文件或相对目录项。
+- `config_files` 可以是相对文件或相对目录项；目录项在 Web/API 列表中只展开下一层普通文件，不递归。
+- 插件包不能直接声明任意宿主绝对路径。宿主文件编辑需由管理员在 `configs/ops.yaml` 配置 `host_config_files.allowed_dirs` 目录白名单，并在 `configs/plugins/<plugin-id>.mapping.yaml` 中用 `scope: host_absolute`、`config_dir`、相对 `path`、`access: read/read_write`、`create` 显式启用；最终路径及符号链接解析后的真实路径都必须仍在白名单目录内。
+
+宿主绝对路径配置文件映射示例（由管理员配置，不写入插件包默认清单）：
+
+```yaml
+# configs/ops.yaml
+host_config_files:
+  allowed_dirs:
+    - /etc/myapp
+
+# configs/plugins/vendor.backup.mapping.yaml
+tools:
+  vendor.backup.full:
+    config_files:
+      - id: backup-main
+        label: 备份主配置
+        scope: host_absolute
+        config_dir: /etc/myapp
+        path: backup.conf
+        access: read_write
+        create: false
+```
+
+`access: read` 只允许查看并拒绝保存；`access: read_write` 还需要当前进程具备 OS 写权限才允许保存。`create: false` 不自动创建缺失文件；`create: true` 仅在父目录可写时允许创建。白名单只支持目录前缀，不支持单文件白名单。
 
 ## Web 前端
 

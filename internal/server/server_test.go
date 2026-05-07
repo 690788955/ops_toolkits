@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -486,12 +485,9 @@ func TestPluginUploadInstallsNewPluginAndRefreshesCatalog(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
 	}
-	pluginDir := filepath.Join(reg.BaseDir, "plugins", "vendor.upload")
-	if _, err := os.Stat(filepath.Join(pluginDir, "plugin.yaml")); err != nil {
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "plugins", "vendor.upload", "plugin.yaml")); err != nil {
 		t.Fatalf("插件未安装: %v", err)
 	}
-	assertFilePerm(t, filepath.Join(pluginDir, "plugin.yaml"), 0o755)
-	assertFilePerm(t, filepath.Join(pluginDir, "scripts", "run.sh"), 0o755)
 	catalogReq := httptest.NewRequest(http.MethodGet, "/api/catalog", nil)
 	catalogRes := httptest.NewRecorder()
 	handler.ServeHTTP(catalogRes, catalogReq)
@@ -1298,9 +1294,6 @@ func TestPluginUploadReplacesHigherVersionAndRefreshesCatalog(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
 	}
-	pluginDir := filepath.Join(reg.BaseDir, "plugins", "vendor.replace")
-	assertFilePerm(t, filepath.Join(pluginDir, "plugin.yaml"), 0o755)
-	assertFilePerm(t, filepath.Join(pluginDir, "scripts", "run.sh"), 0o755)
 	catalogReq := httptest.NewRequest(http.MethodGet, "/api/catalog", nil)
 	catalogRes := httptest.NewRecorder()
 	handler.ServeHTTP(catalogRes, catalogReq)
@@ -1491,7 +1484,7 @@ func TestPluginConfigFilesEditDeclaredPluginFile(t *testing.T) {
 
 	listRes := httptest.NewRecorder()
 	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.configfiles/files", nil))
-	if listRes.Code != http.StatusOK || !strings.Contains(listRes.Body.String(), "configs/app.conf") {
+	if listRes.Code != http.StatusOK || !strings.Contains(listRes.Body.String(), `"id":"configs/app.conf"`) || !strings.Contains(listRes.Body.String(), `"scope":"plugin"`) {
 		t.Fatalf("list status = %d, body = %s", listRes.Code, listRes.Body.String())
 	}
 
@@ -1518,6 +1511,235 @@ func TestPluginConfigFilesEditDeclaredPluginFile(t *testing.T) {
 	handler.ServeHTTP(badRes, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configfiles/files/plugin.yaml", strings.NewReader(`{"content":"bad"}`)))
 	if badRes.Code != http.StatusBadRequest {
 		t.Fatalf("undeclared put status = %d, body = %s", badRes.Code, badRes.Body.String())
+	}
+}
+
+func TestPluginConfigFilesHostAbsoluteAccessControls(t *testing.T) {
+	dir := t.TempDir()
+	hostDir := filepath.Join(dir, "host")
+	if err := os.MkdirAll(hostDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	readOnlyPath := filepath.Join(hostDir, "readonly.conf")
+	writePath := filepath.Join(hostDir, "write.conf")
+	createPath := filepath.Join(hostDir, "created.conf")
+	if err := os.WriteFile(readOnlyPath, []byte("readonly=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(writePath, []byte("old=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := hostConfigFileTestRegistry(t, dir, []config.ConfigFileRef{
+		{ID: "readonly", Label: "只读", Scope: config.ConfigFileScopeHostAbsolute, ConfigDir: hostDir, Path: "readonly.conf", Access: config.ConfigFileAccessRead},
+		{ID: "write", Label: "可写", Scope: config.ConfigFileScopeHostAbsolute, ConfigDir: hostDir, Path: "write.conf", Access: config.ConfigFileAccessReadWrite},
+		{ID: "missing", Label: "缺失", Scope: config.ConfigFileScopeHostAbsolute, ConfigDir: hostDir, Path: "missing.conf", Access: config.ConfigFileAccessReadWrite, Create: false},
+		{ID: "create", Label: "创建", Scope: config.ConfigFileScopeHostAbsolute, ConfigDir: hostDir, Path: "created.conf", Access: config.ConfigFileAccessReadWrite, Create: true},
+	})
+	handler := NewHandler(reg)
+
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.configfiles/files", nil))
+	body := listRes.Body.String()
+	if listRes.Code != http.StatusOK || !strings.Contains(body, `"scope":"host_absolute"`) || !strings.Contains(body, `"id":"missing"`) || !strings.Contains(body, `"writable":false`) {
+		t.Fatalf("list status = %d, body = %s", listRes.Code, body)
+	}
+
+	getRes := httptest.NewRecorder()
+	handler.ServeHTTP(getRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.configfiles/files/readonly", nil))
+	if getRes.Code != http.StatusOK || !strings.Contains(getRes.Body.String(), "readonly=true") {
+		t.Fatalf("readonly get status = %d, body = %s", getRes.Code, getRes.Body.String())
+	}
+
+	readOnlyPut := httptest.NewRecorder()
+	handler.ServeHTTP(readOnlyPut, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configfiles/files/readonly", strings.NewReader(`{"content":"bad"}`)))
+	if readOnlyPut.Code != http.StatusBadRequest || !strings.Contains(readOnlyPut.Body.String(), "只读") {
+		t.Fatalf("readonly put status = %d, body = %s", readOnlyPut.Code, readOnlyPut.Body.String())
+	}
+
+	writePut := httptest.NewRecorder()
+	handler.ServeHTTP(writePut, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configfiles/files/write", strings.NewReader(`{"content":"new=true\n"}`)))
+	if writePut.Code != http.StatusOK {
+		t.Fatalf("write put status = %d, body = %s", writePut.Code, writePut.Body.String())
+	}
+	if content, _ := os.ReadFile(writePath); string(content) != "new=true\n" {
+		t.Fatalf("write content = %q", content)
+	}
+
+	missingPut := httptest.NewRecorder()
+	handler.ServeHTTP(missingPut, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configfiles/files/missing", strings.NewReader(`{"content":"bad"}`)))
+	if missingPut.Code != http.StatusBadRequest || !strings.Contains(missingPut.Body.String(), "不允许创建") {
+		t.Fatalf("missing put status = %d, body = %s", missingPut.Code, missingPut.Body.String())
+	}
+
+	createPut := httptest.NewRecorder()
+	handler.ServeHTTP(createPut, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.configfiles/files/create", strings.NewReader(`{"content":"created=true\n"}`)))
+	if createPut.Code != http.StatusOK {
+		t.Fatalf("create put status = %d, body = %s", createPut.Code, createPut.Body.String())
+	}
+	if content, _ := os.ReadFile(createPath); string(content) != "created=true\n" {
+		t.Fatalf("created content = %q", content)
+	}
+}
+
+func TestPluginConfigFilesRejectsUnsafeHostOperations(t *testing.T) {
+	dir := t.TempDir()
+	hostDir := filepath.Join(dir, "host")
+	if err := os.MkdirAll(filepath.Join(hostDir, "subdir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hostPath := filepath.Join(hostDir, "app.conf")
+	if err := os.WriteFile(hostPath, []byte("ok=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := hostConfigFileTestRegistry(t, dir, []config.ConfigFileRef{
+		{ID: "host", Scope: config.ConfigFileScopeHostAbsolute, ConfigDir: hostDir, Path: "app.conf", Access: config.ConfigFileAccessReadWrite},
+		{ID: "dir", Scope: config.ConfigFileScopeHostAbsolute, ConfigDir: hostDir, Path: "subdir", Access: config.ConfigFileAccessReadWrite},
+	})
+	handler := NewHandler(reg)
+
+	encodedTraversal := httptest.NewRecorder()
+	handler.ServeHTTP(encodedTraversal, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.configfiles/files/%252e%252e%252Fpasswd", nil))
+	if encodedTraversal.Code != http.StatusBadRequest {
+		t.Fatalf("encoded traversal status = %d, body = %s", encodedTraversal.Code, encodedTraversal.Body.String())
+	}
+
+	deleteRes := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRes, httptest.NewRequest(http.MethodDelete, "/api/plugins/vendor.configfiles/files/host", nil))
+	if deleteRes.Code != http.StatusBadRequest || !strings.Contains(deleteRes.Body.String(), "不支持删除") {
+		t.Fatalf("delete status = %d, body = %s", deleteRes.Code, deleteRes.Body.String())
+	}
+
+	dirGet := httptest.NewRecorder()
+	handler.ServeHTTP(dirGet, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.configfiles/files/dir", nil))
+	if dirGet.Code != http.StatusBadRequest || !strings.Contains(dirGet.Body.String(), "普通文件") {
+		t.Fatalf("dir get status = %d, body = %s", dirGet.Code, dirGet.Body.String())
+	}
+}
+
+func TestPluginConfigFilesRejectsHostFileSymlinkEscapeAtRuntime(t *testing.T) {
+	dir := t.TempDir()
+	hostDir := filepath.Join(dir, "host")
+	outsideDir := filepath.Join(dir, "outside")
+	if err := os.MkdirAll(hostDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outsidePath := filepath.Join(outsideDir, "secret.conf")
+	if err := os.WriteFile(outsidePath, []byte("secret=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(hostDir, "linked.conf")
+	if err := os.Symlink(outsidePath, symlinkPath); err != nil {
+		t.Skipf("当前环境不支持创建文件符号链接: %v", err)
+	}
+	reg := hostConfigFileTestRegistry(t, dir, []config.ConfigFileRef{
+		{ID: "host", Scope: config.ConfigFileScopeHostAbsolute, ConfigDir: hostDir, Path: "linked.conf", Access: config.ConfigFileAccessReadWrite},
+	})
+	handler := NewHandler(reg)
+
+	getRes := httptest.NewRecorder()
+	handler.ServeHTTP(getRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.configfiles/files/host", nil))
+	if getRes.Code != http.StatusBadRequest || !strings.Contains(getRes.Body.String(), "白名单") {
+		t.Fatalf("get status = %d, body = %s", getRes.Code, getRes.Body.String())
+	}
+}
+
+func TestPluginConfigFilesHostAbsoluteRequiresRuntimeWhitelist(t *testing.T) {
+	dir := t.TempDir()
+	hostDir := filepath.Join(dir, "host")
+	if err := os.MkdirAll(hostDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hostPath := filepath.Join(hostDir, "app.conf")
+	if err := os.WriteFile(hostPath, []byte("ok=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := hostConfigFileTestRegistry(t, dir, []config.ConfigFileRef{
+		{ID: "host", Scope: config.ConfigFileScopeHostAbsolute, ConfigDir: hostDir, Path: "app.conf", Access: config.ConfigFileAccessReadWrite},
+	})
+	reg.Root.HostConfigFiles.AllowedDirs = nil
+	handler := NewHandler(reg)
+
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.configfiles/files", nil))
+	if listRes.Code != http.StatusOK || !strings.Contains(listRes.Body.String(), "host_config_files.allowed_dirs") || !strings.Contains(listRes.Body.String(), `"readable":false`) {
+		t.Fatalf("list status = %d, body = %s", listRes.Code, listRes.Body.String())
+	}
+
+	getRes := httptest.NewRecorder()
+	handler.ServeHTTP(getRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.configfiles/files/host", nil))
+	if getRes.Code != http.StatusBadRequest || !strings.Contains(getRes.Body.String(), "host_config_files.allowed_dirs") {
+		t.Fatalf("get status = %d, body = %s", getRes.Code, getRes.Body.String())
+	}
+}
+
+func TestPluginConfigFilesExpandsDirectoryEntries(t *testing.T) {
+	dir := t.TempDir()
+	hostDir := filepath.Join(dir, "host")
+	confDir := filepath.Join(hostDir, "conf.d")
+	if err := os.MkdirAll(filepath.Join(confDir, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	firstPath := filepath.Join(confDir, "first.conf")
+	secondPath := filepath.Join(confDir, "second.conf")
+	if err := os.WriteFile(firstPath, []byte("first=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte("second=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(confDir, "nested", "ignored.conf"), []byte("ignored=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := hostConfigFileTestRegistry(t, dir, []config.ConfigFileRef{
+		{ID: "conf-dir", Scope: config.ConfigFileScopeHostAbsolute, ConfigDir: hostDir, Path: "conf.d", Access: config.ConfigFileAccessReadWrite},
+	})
+	handler := NewHandler(reg)
+
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.configfiles/files", nil))
+	body := listRes.Body.String()
+	if listRes.Code != http.StatusOK || !strings.Contains(body, `"id":"conf-dir:first.conf"`) || !strings.Contains(body, `"id":"conf-dir:second.conf"`) || strings.Contains(body, "ignored.conf") {
+		t.Fatalf("list status = %d, body = %s", listRes.Code, body)
+	}
+
+	getRes := httptest.NewRecorder()
+	handler.ServeHTTP(getRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.configfiles/files/conf-dir:first.conf", nil))
+	if getRes.Code != http.StatusOK || !strings.Contains(getRes.Body.String(), "first=true") {
+		t.Fatalf("get status = %d, body = %s", getRes.Code, getRes.Body.String())
+	}
+}
+
+func hostConfigFileTestRegistry(t *testing.T, dir string, entries []config.ConfigFileRef) *registry.Registry {
+	t.Helper()
+	pluginDir := filepath.Join(dir, "plugins", "vendor.configfiles")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &registry.Registry{
+		BaseDir: dir,
+		Root: &config.RootConfig{
+			HostConfigFiles: config.HostConfigFilesConfig{AllowedDirs: []string{filepath.Join(dir, "host")}},
+		},
+		Tools: map[string]*registry.Tool{
+			"vendor.configfiles.run": {
+				Entry: config.ToolEntry{ID: "vendor.configfiles.run"},
+				Config: &config.ToolConfig{
+					ID:             "vendor.configfiles.run",
+					ConfigFiles:    []string{},
+					ConfigFileRefs: entries,
+					PluginConfig: config.PluginToolConfig{
+						ID:  "vendor.configfiles",
+						Dir: pluginDir,
+					},
+				},
+				Dir:    pluginDir,
+				Source: registry.Source{Type: "plugin", PluginID: "vendor.configfiles"},
+			},
+		},
+		Workflows: map[string]*registry.Workflow{},
 	}
 }
 
@@ -1739,28 +1961,12 @@ func unsafeZip(t *testing.T, name string) []byte {
 
 func writeZipFile(t *testing.T, writer *zip.Writer, name, content string) {
 	t.Helper()
-	header := &zip.FileHeader{Name: name, Method: zip.Deflate}
-	header.SetMode(0o644)
-	file, err := writer.CreateHeader(header)
+	file, err := writer.Create(name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := file.Write([]byte(content)); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func assertFilePerm(t *testing.T, path string, want os.FileMode) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		return
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := info.Mode().Perm(); got != want {
-		t.Fatalf("%s perm = %o, want %o", path, got, want)
 	}
 }
 

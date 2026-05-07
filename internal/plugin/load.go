@@ -140,19 +140,43 @@ func validateTool(pkg Package, tool Tool, seen map[string]bool) error {
 			return fmt.Errorf("插件工具 %s 的 workdir 不安全: %w", tool.ID, err)
 		}
 	}
+	configDirSpecified := strings.TrimSpace(tool.ConfigDir) != ""
+	configDir := strings.TrimSpace(tool.ConfigDir)
+	if configDir == "" {
+		configDir = "config"
+	}
+	if filepath.IsAbs(configDir) {
+		return fmt.Errorf("插件工具 %s 的 config_dir 不能是绝对路径", tool.ID)
+	}
+	configDirPath, err := SafePath(pkg.Dir, configDir)
+	if err != nil {
+		return fmt.Errorf("插件工具 %s 的 config_dir 不安全: %w", tool.ID, err)
+	}
 	for _, cf := range tool.ConfigFiles {
 		if strings.TrimSpace(cf) == "" {
 			return fmt.Errorf("插件工具 %s 的 config_files 包含空文件名", tool.ID)
 		}
-		path, err := SafePath(pkg.Dir, cf)
+		if filepath.IsAbs(cf) {
+			return fmt.Errorf("插件工具 %s 的 config_files 不能是绝对路径: %s", tool.ID, cf)
+		}
+		basePath := configDirPath
+		if !configDirSpecified && legacyConfigFilePath(cf) {
+			basePath = pkg.Dir
+		}
+		path, err := SafePath(basePath, cf)
 		if err != nil {
 			return fmt.Errorf("插件工具 %s 的 config_files 路径不安全: %w", tool.ID, err)
 		}
-		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			return fmt.Errorf("插件工具 %s 的 config_files 不能是目录: %s", tool.ID, cf)
+		if _, err := os.Stat(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("插件工具 %s 的 config_files 无法访问: %w", tool.ID, err)
 		}
 	}
 	return nil
+}
+
+func legacyConfigFilePath(path string) bool {
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
+	return clean == "config" || strings.HasPrefix(clean, "config/")
 }
 
 func validateWorkflow(pkg Package, workflow Workflow, seen map[string]bool) error {
@@ -239,8 +263,21 @@ func toolWarnings(pkg Package, tool Tool) []Warning {
 			Suggestion: "请写清影响范围、目标环境和是否可回滚，例如：确认重启生产集群？请先核对变更窗口和回滚方案。",
 		})
 	}
+	configDirSpecified := strings.TrimSpace(tool.ConfigDir) != ""
+	configDir := strings.TrimSpace(tool.ConfigDir)
+	if configDir == "" {
+		configDir = "config"
+	}
+	configDirPath, err := SafePath(pkg.Dir, configDir)
+	if err != nil {
+		return warnings
+	}
 	for _, cf := range tool.ConfigFiles {
-		path, err := SafePath(pkg.Dir, cf)
+		basePath := configDirPath
+		if !configDirSpecified && legacyConfigFilePath(cf) {
+			basePath = pkg.Dir
+		}
+		path, err := SafePath(basePath, cf)
 		if err != nil {
 			continue
 		}

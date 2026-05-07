@@ -177,6 +177,110 @@ func SaveRoot(path string, cfg *RootConfig) error {
 
 ---
 
+## Scenario: Host Absolute Config File Mapping
+
+### 1. Scope / Trigger
+
+- Trigger: adding or changing `tools[].config_files`, host-side plugin mapping, plugin config file API, or Web plugin configuration editing.
+- This is a backend/API/UI safety contract: plugin manifests, `configs/ops.yaml`, `configs/plugins/<plugin-id>.mapping.yaml`, registry normalization, HTTP routes, and Web editing behavior must remain aligned.
+
+### 2. Signatures
+
+- Global whitelist config in `configs/ops.yaml`:
+  ```yaml
+  host_config_files:
+    allowed_dirs:
+      - /etc/myapp
+      - C:\\ProgramData\\Vendor
+  ```
+  - `allowed_dirs` accepts directory prefixes only.
+  - Single-file whitelist entries are invalid.
+- Plugin manifest `plugin.yaml` keeps legacy plugin-local string semantics:
+  ```yaml
+  config_files:
+    - config/example.conf
+  ```
+- Host-side plugin mapping may use structured entries. `config_dir` is the base directory and `path` is the relative `config_files` item:
+  ```yaml
+  tools:
+    vendor.app.reload:
+      config_files:
+        - id: app-main
+          label: App 主配置
+          scope: host_absolute
+          config_dir: /etc/myapp
+          path: app.conf
+          access: read_write
+          create: false
+  ```
+- Config file API:
+  - `GET /api/plugins/{pluginID}/files` returns `data.files[]` objects containing at least `id`, `path`, `scope`, `access`, `create`, `exists`, `readable`, `writable`, and `reason`.
+  - `GET /api/plugins/{pluginID}/files/{fileID}` reads only a registry-declared ID or legacy plugin-local path.
+  - `PUT /api/plugins/{pluginID}/files/{fileID}` writes only a registry-declared ID or legacy plugin-local path.
+
+### 3. Contracts
+
+- Plugin package safety boundary remains plugin-local:
+  - `plugin.yaml` string `config_files` entries must be relative paths inside the plugin directory.
+  - Plugin packages must not directly grant arbitrary host absolute file access.
+- `config_dir + config_files` is the only path construction rule:
+  - `config_dir` defaults to plugin `config/` for new structured declarations.
+  - `path`/`config_files` entries are always relative file or directory items; absolute paths and `..` escape are invalid.
+  - A directory item expands to one-level regular files only; recursion is not part of the MVP.
+- Host absolute files are enabled only by host-side mapping plus global whitelist:
+  - `scope: host_absolute` requires `config_dir` to be an absolute directory recognized by the current platform.
+  - The cleaned absolute `config_dir`, and the symlink-resolved final base when it exists, must be inside one configured `host_config_files.allowed_dirs` directory.
+  - For non-existing files under an existing base, the nearest existing parent directory must be symlink-resolved before the final path is checked against the whitelist.
+- Application access is separate from OS permissions:
+  - `access: read` allows GET when OS checks pass and rejects PUT.
+  - `access: read_write` allows PUT only when OS checks pass.
+  - Non-existing files can be created only when `create: true` and the parent directory is writable.
+- File type and size checks are mandatory:
+  - GET/PUT must reject directories and special files; only regular files are editable.
+  - GET must reject files above the configured server-side size limit.
+- URL path is not a filesystem path:
+  - The API must resolve `{fileID}` through registry declarations.
+  - URL-encoded traversal such as `%2e%2e`, slash-bearing undeclared values, or arbitrary absolute paths must not be read or written.
+- Delete behavior:
+  - Plugin-local config files may keep existing delete semantics.
+  - Host absolute config files must reject DELETE by default.
+- Plugin export ZIPs must include only plugin-owned files from the plugin directory and must not read or include host absolute config file targets.
+
+### 4. Validation & Error Matrix
+
+| Condition | Expected behavior |
+|---|---|
+| `plugin.yaml` config file is relative and inside plugin dir | load succeeds; file can be listed/read/written through plugin-local declaration |
+| `plugin.yaml` config file is absolute | reject as unsafe plugin-local path |
+| mapping structured host `config_dir` is inside whitelist and `path` is relative | registry registers it and API lists structured status |
+| mapping host `config_dir` is outside whitelist | registry rejects mapping with readable Chinese whitelist error |
+| whitelist entry points to a file | registry rejects; whitelist supports directories only |
+| host mapping is `access: read` | GET allowed if OS-readable; PUT rejects with read-only error |
+| host mapping is `access: read_write` | PUT allowed only if file or parent directory is OS-writable |
+| missing host file with `create: false` | list reports not readable/not writable and PUT rejects |
+| missing host file with `create: true` and writable parent | PUT creates the file |
+| host `config_dir` resolves through symlink outside whitelist | registry/API rejects before editing |
+| file item resolves to directory or special file | list reports reason; GET/PUT reject, except declared directory items expand one-level in list |
+| undeclared `{fileID}` or encoded traversal | reject; do not touch filesystem path from URL |
+| DELETE host absolute config file | reject by default |
+
+### 5. Good/Base/Bad Cases
+
+- Good: `configs/ops.yaml` whitelists `/etc/myapp`, mapping declares `id: app-main`, `scope: host_absolute`, `config_dir: /etc/myapp`, `path: app.conf`, `access: read_write`; API lists status and PUT updates the regular file when the process can write it.
+- Base: plugin manifest declares `config/example.conf`; API remains backward compatible and legacy URL `/files/configs%2Fapp.conf` continues to resolve only when declared.
+- Bad: caller sends `/api/plugins/vendor.app/files/%2Fetc%2Fpasswd`; backend rejects because the URL value is not a declared ID.
+
+### 6. Tests Required
+
+- Registry test for structured host mapping accepted inside whitelist.
+- Registry test for host mapping rejected outside whitelist and for single-file whitelist rejection when applicable.
+- Server test for structured list status including `scope`, `access`, `exists`, `readable`, `writable`, and `reason`.
+- Server tests for read-only GET/PUT rejection, read-write PUT success, `create:false` missing rejection, `create:true` creation, directory/special-file rejection, undeclared/encoded traversal rejection, and host DELETE rejection.
+- Existing plugin-local config file read/write tests must continue to pass.
+- Web build test must pass after list API response shape changes.
+
+---
+
 ## Scenario: Disable and Delete an Installed Plugin
 
 ### 1. Scope / Trigger
@@ -334,76 +438,7 @@ Why correct:
 
 ---
 
-## Scenario: Uploaded Plugin Install Permissions
-
-### 1. Scope / Trigger
-
-- Trigger: adding or changing plugin ZIP upload extraction, staged install, replacement install, or copy logic.
-- This is a backend filesystem contract: uploaded plugins must be runnable after install even when ZIP metadata comes from Windows or tools that omit Unix executable bits.
-
-### 2. Signatures
-
-- Upload API: `POST /api/plugins/upload`
-  - Query `replace=true|1` keeps the existing replacement semantics.
-  - Response shape is unchanged from the existing upload contract.
-- Filesystem install target: `<baseDir>/<first plugins.path>/<plugin-id>/`.
-
-### 3. Contracts
-
-- Upload must not trust ZIP entry permission bits as the final installed permissions.
-- Extracted staging directories and files may be normalized, but the final installed plugin package is authoritative:
-  - directories: `0755`
-  - regular files: `0755`
-- The permission contract applies to both first install and higher-version replacement install.
-- Existing ZIP safety boundaries still apply: reject traversal, absolute paths, symlinks, special files, too many files, and excessive uncompressed size.
-- Upload must not execute installed content while setting permissions.
-
-### 4. Validation & Error Matrix
-
-| Condition | Expected behavior |
-|---|---|
-| ZIP regular file records mode `0644` | upload succeeds; installed regular file mode is `0755` on Unix-like platforms |
-| ZIP directory records restrictive mode | upload succeeds; installed directory mode is `0755` on Unix-like platforms |
-| Higher-version replace uploads files with non-executable ZIP modes | replacement succeeds; new installed files/directories are `0755` |
-| `os.Chmod` fails while normalizing permissions | upload fails before reporting install success |
-| Windows test environment | do not assert Unix executable bits through `os.FileMode`; Windows does not expose them reliably |
-
-### 5. Good/Base/Bad Cases
-
-- Good: a Windows-created plugin ZIP containing `scripts/run.sh` with recorded mode `0644` uploads successfully and installs `scripts/run.sh` as `0755` on Linux/macOS.
-- Base: an already executable ZIP entry still installs as `0755`.
-- Bad: preserving `file.FileInfo().Mode().Perm()` into `plugins/<plugin-id>/scripts/run.sh`, causing uploaded shell scripts to fail after deployment.
-
-### 6. Tests Required
-
-- Upload install test creates ZIP entries with `0644`, uploads a new plugin, and asserts installed `plugin.yaml` plus `scripts/run.sh` are `0755` on non-Windows platforms.
-- Replacement upload test repeats the permission assertion for a higher-version replacement.
-- Existing upload safety tests must continue to pass.
-- Full Go test suite must pass; build and validate commands must still succeed.
-
-### 7. Wrong vs Correct
-
-#### Wrong
-
-```go
-out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, file.FileInfo().Mode().Perm())
-```
-
-#### Correct
-
-```go
-out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, uploadPluginFileMode)
-// after close succeeds
-return os.Chmod(path, uploadPluginFileMode)
-```
-
-Why correct:
-- ZIP metadata is not portable across plugin authors' machines and ZIP tools.
-- Explicit install-time permission normalization matches the packaged runtime expectation that plugin contents are executable.
-- `Chmod` after close avoids relying on platform create defaults or process umask.
-
----
-
+## Scenario: Plugin Integration Warnings
 
 ### 1. Scope / Trigger
 

@@ -614,11 +614,12 @@ type categoryCatalogEntry struct {
 
 type toolCatalogEntry struct {
 	config.ToolEntry
-	Tags        []string            `json:"tags"`
-	Parameters  []config.Parameter  `json:"parameters"`
-	ConfigFiles []string            `json:"config_files"`
-	Confirm     config.Confirmation `json:"confirm"`
-	Source      registry.Source     `json:"source"`
+	Tags           []string               `json:"tags"`
+	Parameters     []config.Parameter     `json:"parameters"`
+	ConfigFiles    []string               `json:"config_files"`
+	ConfigFileRefs []config.ConfigFileRef `json:"config_file_entries,omitempty"`
+	Confirm        config.Confirmation    `json:"confirm"`
+	Source         registry.Source        `json:"source"`
 }
 
 type workflowCatalogEntry struct {
@@ -1163,13 +1164,13 @@ func pluginDownloadHandler(state *serverState) http.HandlerFunc {
 					// /api/plugins/{id}/files - 列出配置文件
 					handlePluginConfigFiles(w, req, state, pluginID)
 				} else {
-					// /api/plugins/{id}/files/{filename} - 读取/保存/删除配置文件
-					fileName, err := url.PathUnescape(strings.Join(parts[2:], "/"))
+					// /api/plugins/{id}/files/{fileID} - 读取/保存/删除配置文件；legacy 插件内路径允许编码后的斜杠，但必须命中声明。
+					fileID, err := url.PathUnescape(strings.Join(parts[2:], "/"))
 					if err != nil {
-						writeJSON(w, http.StatusBadRequest, response{Error: "配置文件路径格式错误"})
+						writeJSON(w, http.StatusBadRequest, response{Error: "配置文件 ID 格式错误"})
 						return
 					}
-					handlePluginConfigFile(w, req, state, pluginID, fileName)
+					handlePluginConfigFile(w, req, state, pluginID, fileID)
 				}
 				return
 			}
@@ -1316,7 +1317,7 @@ func buildCatalog(reg *registry.Registry) catalogResponse {
 		out.Plugins = append(out.Plugins, item)
 	}
 	for _, tool := range reg.Tools {
-		out.Tools = append(out.Tools, toolCatalogEntry{ToolEntry: tool.Entry, Tags: tool.Config.Tags, Parameters: tool.Config.Parameters, ConfigFiles: tool.Config.ConfigFiles, Confirm: tool.Config.Confirm, Source: tool.Source})
+		out.Tools = append(out.Tools, toolCatalogEntry{ToolEntry: tool.Entry, Tags: tool.Config.Tags, Parameters: tool.Config.Parameters, ConfigFiles: tool.Config.ConfigFiles, ConfigFileRefs: declaredConfigFiles(tool.Config), Confirm: tool.Config.Confirm, Source: tool.Source})
 	}
 	for _, wf := range reg.Workflows {
 		out.Workflows = append(out.Workflows, workflowCatalogEntry{WorkflowRef: wf.Entry, Tags: wf.Config.Tags, Parameters: wf.Config.Parameters, Confirm: effectiveWorkflowConfirm(reg, wf.Config), Source: wf.Source})
@@ -1674,6 +1675,23 @@ func errorText(err error) string {
 	return err.Error()
 }
 
+const maxPluginConfigFileBytes int64 = 1024 * 1024
+
+type pluginConfigFileStatus struct {
+	ID        string `json:"id"`
+	Label     string `json:"label,omitempty"`
+	ConfigDir string `json:"config_dir,omitempty"`
+	Path      string `json:"path"`
+	Scope     string `json:"scope"`
+	Access    string `json:"access"`
+	Create    bool   `json:"create"`
+	Exists    bool   `json:"exists"`
+	Readable  bool   `json:"readable"`
+	Writable  bool   `json:"writable"`
+	Reason    string `json:"reason,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+}
+
 func handlePluginConfigFiles(w http.ResponseWriter, req *http.Request, state *serverState, pluginID string) {
 	if req.Method != http.MethodGet {
 		methodNotAllowed(w)
@@ -1682,44 +1700,84 @@ func handlePluginConfigFiles(w http.ResponseWriter, req *http.Request, state *se
 
 	reg := state.registry()
 	seen := map[string]bool{}
-	var files []string
+	var files []pluginConfigFileStatus
 	for _, tool := range reg.Tools {
 		if tool.Source.PluginID != pluginID {
 			continue
 		}
-		for _, cf := range tool.Config.ConfigFiles {
-			if cf != "" && !seen[cf] {
-				seen[cf] = true
-				files = append(files, cf)
+		for _, declared := range declaredConfigFiles(tool.Config) {
+			expanded, err := expandDeclaredConfigFiles(reg.Root, tool.Config, declared)
+			if err != nil {
+				entry := normalizeServerConfigFileRef(declared)
+				id := entry.ID
+				if id == "" {
+					id = entry.Path
+				}
+				if id == "" || seen[id] {
+					continue
+				}
+				seen[id] = true
+				files = append(files, pluginConfigFileStatus{ID: id, Label: entry.Label, ConfigDir: entry.ConfigDir, Path: entry.Path, Scope: entry.Scope, Access: entry.Access, Create: entry.Create, Reason: err.Error()})
+				continue
+			}
+			for _, entry := range expanded {
+				if entry.ID == "" || seen[entry.ID] {
+					continue
+				}
+				seen[entry.ID] = true
+				filePath, err := resolvedConfigFilePath(reg.Root, tool.Config, entry)
+				if err != nil {
+					files = append(files, pluginConfigFileStatus{ID: entry.ID, Label: entry.Label, ConfigDir: entry.ConfigDir, Path: entry.Path, Scope: entry.Scope, Access: entry.Access, Create: entry.Create, Reason: err.Error()})
+					continue
+				}
+				files = append(files, configFileStatus(tool.Config, entry, filePath))
 			}
 		}
 	}
-	sort.Strings(files)
+	sort.Slice(files, func(i, j int) bool { return files[i].ID < files[j].ID })
 
 	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"files": files}})
 }
 
-func handlePluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileName string) {
+func handlePluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileID string) {
 	switch req.Method {
 	case http.MethodGet:
-		handleGetPluginConfigFile(w, req, state, pluginID, fileName)
+		handleGetPluginConfigFile(w, req, state, pluginID, fileID)
 	case http.MethodPut:
-		handleSavePluginConfigFile(w, req, state, pluginID, fileName)
+		handleSavePluginConfigFile(w, req, state, pluginID, fileID)
 	case http.MethodDelete:
-		handleDeletePluginConfigFile(w, req, state, pluginID, fileName)
+		handleDeletePluginConfigFile(w, req, state, pluginID, fileID)
 	default:
 		methodNotAllowed(w)
 	}
 }
 
-func handleGetPluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileName string) {
-	filePath, err := declaredPluginConfigFilePath(state.registry(), pluginID, fileName)
+func handleGetPluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileID string) {
+	entry, toolCfg, err := declaredPluginConfigFile(state.registry(), pluginID, fileID)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 		return
 	}
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"content": ""}})
+	filePath, err := resolvedConfigFilePath(state.registry().Root, toolCfg, entry)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) && entry.Scope == config.ConfigFileScopePlugin {
+			writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"content": ""}})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, response{Error: fmt.Sprintf("配置文件不可读: %v", err)})
+		return
+	}
+	if !info.Mode().IsRegular() {
+		writeJSON(w, http.StatusBadRequest, response{Error: "配置文件不是普通文件"})
+		return
+	}
+	if info.Size() > maxPluginConfigFileBytes {
+		writeJSON(w, http.StatusBadRequest, response{Error: "配置文件超过大小限制"})
 		return
 	}
 	data, err := os.ReadFile(filePath)
@@ -1731,7 +1789,7 @@ func handleGetPluginConfigFile(w http.ResponseWriter, req *http.Request, state *
 	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"content": string(data)}})
 }
 
-func handleSavePluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileName string) {
+func handleSavePluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileID string) {
 	defer req.Body.Close()
 	var body struct {
 		Content string `json:"content"`
@@ -1741,14 +1799,54 @@ func handleSavePluginConfigFile(w http.ResponseWriter, req *http.Request, state 
 		return
 	}
 
-	filePath, err := declaredPluginConfigFilePath(state.registry(), pluginID, fileName)
+	entry, toolCfg, err := declaredPluginConfigFile(state.registry(), pluginID, fileID)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("创建配置目录失败: %v", err)})
+	if entry.Access != config.ConfigFileAccessReadWrite {
+		writeJSON(w, http.StatusBadRequest, response{Error: "配置文件声明为只读，不能保存"})
 		return
+	}
+	if int64(len([]byte(body.Content))) > maxPluginConfigFileBytes {
+		writeJSON(w, http.StatusBadRequest, response{Error: "配置文件内容超过大小限制"})
+		return
+	}
+	filePath, err := resolvedConfigFilePath(state.registry().Root, toolCfg, entry)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("检查配置文件失败: %v", err)})
+			return
+		}
+		if entry.Scope == config.ConfigFileScopeHostAbsolute {
+			if !entry.Create {
+				writeJSON(w, http.StatusBadRequest, response{Error: "配置文件不存在且声明不允许创建"})
+				return
+			}
+			if !parentWritable(filepath.Dir(filePath)) {
+				writeJSON(w, http.StatusBadRequest, response{Error: "配置文件父目录不可写或不存在"})
+				return
+			}
+		} else if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+			writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("创建配置目录失败: %v", err)})
+			return
+		}
+	} else {
+		if !info.Mode().IsRegular() {
+			writeJSON(w, http.StatusBadRequest, response{Error: "配置文件不是普通文件"})
+			return
+		}
+		file, err := os.OpenFile(filePath, os.O_WRONLY, 0)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, response{Error: fmt.Sprintf("配置文件不可写: %v", err)})
+			return
+		}
+		_ = file.Close()
 	}
 	if err := os.WriteFile(filePath, []byte(body.Content), 0o644); err != nil {
 		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("保存配置文件失败: %v", err)})
@@ -1758,8 +1856,17 @@ func handleSavePluginConfigFile(w http.ResponseWriter, req *http.Request, state 
 	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"message": "配置文件已保存"}})
 }
 
-func handleDeletePluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileName string) {
-	filePath, err := declaredPluginConfigFilePath(state.registry(), pluginID, fileName)
+func handleDeletePluginConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, pluginID, fileID string) {
+	entry, toolCfg, err := declaredPluginConfigFile(state.registry(), pluginID, fileID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	if entry.Scope == config.ConfigFileScopeHostAbsolute {
+		writeJSON(w, http.StatusBadRequest, response{Error: "宿主绝对路径配置文件默认不支持删除"})
+		return
+	}
+	filePath, err := resolvedConfigFilePath(state.registry().Root, toolCfg, entry)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 		return
@@ -1773,21 +1880,341 @@ func handleDeletePluginConfigFile(w http.ResponseWriter, req *http.Request, stat
 	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"message": "配置文件已删除"}})
 }
 
-func declaredPluginConfigFilePath(reg *registry.Registry, pluginID, fileName string) (string, error) {
+func declaredPluginConfigFile(reg *registry.Registry, pluginID, fileID string) (config.ConfigFileRef, *config.ToolConfig, error) {
+	if strings.TrimSpace(fileID) == "" || strings.Contains(fileID, "\x00") {
+		return config.ConfigFileRef{}, nil, fmt.Errorf("配置文件 ID 不安全")
+	}
 	for _, tool := range reg.Tools {
 		if tool.Source.PluginID != pluginID {
 			continue
 		}
-		for _, declared := range tool.Config.ConfigFiles {
-			if declared != fileName {
+		for _, declared := range declaredConfigFiles(tool.Config) {
+			declared = normalizeServerConfigFileRef(declared)
+			if declared.ID == fileID {
+				return declared, tool.Config, nil
+			}
+			expanded, err := expandDeclaredConfigFiles(reg.Root, tool.Config, declared)
+			if err != nil {
 				continue
 			}
-			filePath, err := plugin.SafePath(tool.Config.PluginConfig.Dir, declared)
-			if err != nil {
-				return "", fmt.Errorf("配置文件路径不安全: %w", err)
+			for _, entry := range expanded {
+				if entry.ID != fileID {
+					continue
+				}
+				return entry, tool.Config, nil
 			}
-			return filePath, nil
 		}
 	}
-	return "", fmt.Errorf("配置文件 %s 未在插件 %s 中声明", fileName, pluginID)
+	return config.ConfigFileRef{}, nil, fmt.Errorf("配置文件 %s 未在插件 %s 中声明", fileID, pluginID)
+}
+
+func declaredConfigFiles(toolCfg *config.ToolConfig) []config.ConfigFileRef {
+	if toolCfg == nil {
+		return nil
+	}
+	if len(toolCfg.ConfigFileRefs) > 0 {
+		out := make([]config.ConfigFileRef, 0, len(toolCfg.ConfigFileRefs))
+		for _, entry := range toolCfg.ConfigFileRefs {
+			out = append(out, normalizeServerConfigFileRef(entry))
+		}
+		return out
+	}
+	out := make([]config.ConfigFileRef, 0, len(toolCfg.ConfigFiles))
+	for _, path := range toolCfg.ConfigFiles {
+		out = append(out, config.NewPluginConfigFileRef(path))
+	}
+	return out
+}
+
+func expandDeclaredConfigFiles(root *config.RootConfig, toolCfg *config.ToolConfig, entry config.ConfigFileRef) ([]config.ConfigFileRef, error) {
+	entry = normalizeServerConfigFileRef(entry)
+	baseDir, err := resolvedConfigDir(root, toolCfg, entry)
+	if err != nil {
+		return nil, err
+	}
+	filePath, err := joinConfigFilePath(baseDir, entry.Path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []config.ConfigFileRef{entry}, nil
+		}
+		return nil, err
+	}
+	if !info.IsDir() {
+		return []config.ConfigFileRef{entry}, nil
+	}
+	items, err := os.ReadDir(filePath)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]config.ConfigFileRef, 0, len(items))
+	for _, item := range items {
+		if item.Type()&os.ModeType != 0 {
+			continue
+		}
+		child := entry
+		child.Path = filepath.ToSlash(filepath.Join(entry.Path, item.Name()))
+		child.ID = child.Path
+		if entry.Scope == config.ConfigFileScopeHostAbsolute {
+			child.ID = entry.ID + ":" + filepath.ToSlash(item.Name())
+		}
+		child.Label = item.Name()
+		out = append(out, normalizeServerConfigFileRef(child))
+	}
+	return out, nil
+}
+
+func normalizeServerConfigFileRef(entry config.ConfigFileRef) config.ConfigFileRef {
+	legacy := entry.Legacy
+	config.NormalizeConfigFileRef(&entry)
+	if legacy {
+		entry.ConfigDir = "."
+	}
+	return entry
+}
+
+func resolvedConfigFilePath(root *config.RootConfig, toolCfg *config.ToolConfig, entry config.ConfigFileRef) (string, error) {
+	entry = normalizeServerConfigFileRef(entry)
+	baseDir, err := resolvedConfigDir(root, toolCfg, entry)
+	if err != nil {
+		return "", err
+	}
+	filePath, err := joinConfigFilePath(baseDir, entry.Path)
+	if err != nil {
+		return "", err
+	}
+	if entry.Scope != config.ConfigFileScopeHostAbsolute {
+		return filePath, nil
+	}
+	allowedDirs, err := normalizeHostAllowedDirsForServer(root)
+	if err != nil {
+		return "", err
+	}
+	if err := ensureHostPathAllowedForServer(filePath, allowedDirs); err != nil {
+		return "", err
+	}
+	resolved, err := resolveHostConfigFileForServer(filePath)
+	if err != nil {
+		return "", err
+	}
+	if err := ensureHostPathAllowedForServer(resolved, allowedDirs); err != nil {
+		return "", fmt.Errorf("宿主配置文件符号链接最终路径未命中白名单: %w", err)
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func resolvedConfigDir(root *config.RootConfig, toolCfg *config.ToolConfig, entry config.ConfigFileRef) (string, error) {
+	entry = normalizeServerConfigFileRef(entry)
+	switch entry.Scope {
+	case config.ConfigFileScopePlugin:
+		if filepath.IsAbs(entry.ConfigDir) {
+			return "", fmt.Errorf("插件 config_dir 不能是绝对路径")
+		}
+		baseDir, err := plugin.SafePath(toolCfg.PluginConfig.Dir, entry.ConfigDir)
+		if err != nil {
+			return "", fmt.Errorf("config_dir 不安全: %w", err)
+		}
+		return baseDir, nil
+	case config.ConfigFileScopeHostAbsolute:
+		if !filepath.IsAbs(entry.ConfigDir) {
+			return "", fmt.Errorf("宿主 config_dir 必须是绝对路径")
+		}
+		allowedDirs, err := normalizeHostAllowedDirsForServer(root)
+		if err != nil {
+			return "", err
+		}
+		cleanAbs, err := filepath.Abs(filepath.Clean(entry.ConfigDir))
+		if err != nil {
+			return "", err
+		}
+		if err := ensureHostPathAllowedForServer(cleanAbs, allowedDirs); err != nil {
+			return "", err
+		}
+		resolved, err := resolveHostConfigFileForServer(cleanAbs)
+		if err != nil {
+			return "", err
+		}
+		if err := ensureHostPathAllowedForServer(resolved, allowedDirs); err != nil {
+			return "", fmt.Errorf("宿主 config_dir 符号链接最终路径未命中白名单: %w", err)
+		}
+		return filepath.Clean(resolved), nil
+	default:
+		return "", fmt.Errorf("配置文件 scope 不支持: %s", entry.Scope)
+	}
+}
+
+func joinConfigFilePath(baseDir, item string) (string, error) {
+	if strings.TrimSpace(item) == "" {
+		return "", fmt.Errorf("config_files 条目不能为空")
+	}
+	if filepath.IsAbs(item) {
+		return "", fmt.Errorf("config_files 条目不能是绝对路径")
+	}
+	cleanItem := filepath.Clean(filepath.FromSlash(item))
+	if cleanItem == "." || cleanItem == ".." || strings.HasPrefix(cleanItem, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("config_files 条目不能逃逸 config_dir")
+	}
+	for _, part := range strings.FieldsFunc(item, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("config_files 条目包含不安全路径片段")
+		}
+	}
+	baseAbs, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", err
+	}
+	pathAbs, err := filepath.Abs(filepath.Join(baseAbs, cleanItem))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(baseAbs, pathAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("config_files 条目逃逸 config_dir")
+	}
+	return pathAbs, nil
+}
+func normalizeHostAllowedDirsForServer(root *config.RootConfig) ([]string, error) {
+	if root == nil || len(root.HostConfigFiles.AllowedDirs) == 0 {
+		return nil, fmt.Errorf("未配置 host_config_files.allowed_dirs")
+	}
+	allowedDirs := make([]string, 0, len(root.HostConfigFiles.AllowedDirs))
+	for index, dir := range root.HostConfigFiles.AllowedDirs {
+		if strings.TrimSpace(dir) == "" {
+			return nil, fmt.Errorf("host_config_files.allowed_dirs 第 %d 项不能为空", index+1)
+		}
+		if !filepath.IsAbs(dir) {
+			return nil, fmt.Errorf("host_config_files.allowed_dirs 第 %d 项必须是当前平台可识别的绝对目录", index+1)
+		}
+		cleanAbs, err := filepath.Abs(filepath.Clean(dir))
+		if err != nil {
+			return nil, fmt.Errorf("host_config_files.allowed_dirs 第 %d 项无效: %w", index+1, err)
+		}
+		info, err := os.Stat(cleanAbs)
+		if err != nil {
+			return nil, fmt.Errorf("host_config_files.allowed_dirs 第 %d 项必须是已存在目录: %w", index+1, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("host_config_files.allowed_dirs 第 %d 项只支持目录白名单，不支持单文件", index+1)
+		}
+		resolved, err := filepath.EvalSymlinks(cleanAbs)
+		if err != nil {
+			return nil, fmt.Errorf("host_config_files.allowed_dirs 第 %d 项符号链接解析失败: %w", index+1, err)
+		}
+		allowedDirs = append(allowedDirs, filepath.Clean(resolved))
+	}
+	return allowedDirs, nil
+}
+
+func ensureHostPathAllowedForServer(path string, allowedDirs []string) error {
+	cleanPath := filepath.Clean(path)
+	for _, dir := range allowedDirs {
+		cleanDir := filepath.Clean(dir)
+		rel, err := filepath.Rel(cleanDir, cleanPath)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel) {
+			return nil
+		}
+	}
+	return fmt.Errorf("路径 %s 不在 host_config_files.allowed_dirs 白名单内", path)
+}
+
+func resolveHostConfigFileForServer(cleanAbs string) (string, error) {
+	if _, err := os.Lstat(cleanAbs); err == nil {
+		return filepath.EvalSymlinks(cleanAbs)
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	parent := filepath.Dir(cleanAbs)
+	for {
+		if info, err := os.Stat(parent); err == nil {
+			if !info.IsDir() {
+				return "", fmt.Errorf("父路径不是目录: %s", parent)
+			}
+			resolvedParent, err := filepath.EvalSymlinks(parent)
+			if err != nil {
+				return "", err
+			}
+			rel, err := filepath.Rel(parent, cleanAbs)
+			if err != nil {
+				return "", err
+			}
+			return filepath.Join(resolvedParent, rel), nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		next := filepath.Dir(parent)
+		if next == parent {
+			return "", fmt.Errorf("未找到已存在父目录")
+		}
+		parent = next
+	}
+}
+
+func configFileStatus(toolCfg *config.ToolConfig, entry config.ConfigFileRef, filePath string) pluginConfigFileStatus {
+	entry = normalizeServerConfigFileRef(entry)
+	status := pluginConfigFileStatus{ID: entry.ID, Label: entry.Label, ConfigDir: entry.ConfigDir, Path: entry.Path, Scope: entry.Scope, Access: entry.Access, Create: entry.Create}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			status.Reason = "文件不存在"
+			if entry.Scope == config.ConfigFileScopePlugin {
+				status.Writable = entry.Access == config.ConfigFileAccessReadWrite
+				return status
+			}
+			if entry.Create {
+				if parentWritable(filepath.Dir(filePath)) {
+					status.Writable = entry.Access == config.ConfigFileAccessReadWrite
+				} else {
+					status.Reason = "父目录不可写或不存在"
+				}
+			}
+			return status
+		}
+		status.Reason = err.Error()
+		return status
+	}
+	status.Exists = true
+	status.Size = info.Size()
+	if !info.Mode().IsRegular() {
+		status.Reason = "不是普通文件"
+		return status
+	}
+	if info.Size() > maxPluginConfigFileBytes {
+		status.Reason = "超过大小限制"
+		return status
+	}
+	if file, err := os.Open(filePath); err == nil {
+		status.Readable = true
+		_ = file.Close()
+	} else {
+		status.Reason = "不可读: " + err.Error()
+	}
+	if entry.Access == config.ConfigFileAccessReadWrite {
+		if file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND, 0); err == nil {
+			status.Writable = true
+			_ = file.Close()
+		} else if status.Reason == "" {
+			status.Reason = "不可写: " + err.Error()
+		}
+	} else if status.Reason == "" {
+		status.Reason = "只读"
+	}
+	return status
+}
+
+func parentWritable(parent string) bool {
+	info, err := os.Stat(parent)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	tmp, err := os.CreateTemp(parent, ".opsctl-perm-*")
+	if err != nil {
+		return false
+	}
+	name := tmp.Name()
+	_ = tmp.Close()
+	_ = os.Remove(name)
+	return true
 }
