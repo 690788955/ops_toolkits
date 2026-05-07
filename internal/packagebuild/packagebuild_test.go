@@ -77,11 +77,8 @@ func assertTarGzEntries(t *testing.T, tarPath string, paths []string) {
 			t.Fatal(err)
 		}
 		entries[header.Name] = true
-		if header.Typeflag == tar.TypeDir && header.Name == "opsctl/plugins/vendor.demo" && header.Mode != 0o755 {
-			t.Fatalf("插件目录权限 = %#o, want 0755", header.Mode)
-		}
-		if header.Typeflag == tar.TypeReg && header.Name == "opsctl/plugins/vendor.demo/scripts/check.sh" && header.Mode != 0o755 {
-			t.Fatalf("插件脚本权限 = %#o, want 0755", header.Mode)
+		if (header.Name == "opsctl/plugins" || header.Name == "opsctl/plugins/vendor.demo" || header.Name == "opsctl/plugins/vendor.demo/scripts" || header.Name == "opsctl/plugins/vendor.demo/scripts/check.sh") && header.Mode != 0o755 {
+			t.Fatalf("插件内容 %s 权限 = %#o, want 0755", header.Name, header.Mode)
 		}
 	}
 	for _, path := range paths {
