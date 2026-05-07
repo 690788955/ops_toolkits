@@ -36,9 +36,7 @@ from .paths import (
     DIR_TASKS,
     DIR_WORKFLOW,
     FILE_TASK_JSON,
-    clear_current_task,
     generate_task_date_prefix,
-    get_current_task,
     get_developer,
     get_repo_root,
     get_tasks_dir,
@@ -99,12 +97,13 @@ _SUBAGENT_CONFIG_DIRS: tuple[str, ...] = (
     ".codebuddy",
     ".factory",   # Factory Droid
     ".github/copilot",
+    ".pi",        # Pi Agent
 )
 
 _SEED_EXAMPLE = (
     "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. "
     "Put spec/research files only — no code paths. "
-    "Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. "
+    "Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. "
     "Delete this line once real entries are added."
 )
 
@@ -262,6 +261,22 @@ def cmd_create(args: argparse.Namespace) -> int:
 
                 print(colored(f"Linked as child of: {parent_dir.name}", Colors.GREEN), file=sys.stderr)
 
+    # Auto-activate the new task so the per-turn breadcrumb fires planning
+    # state. Best-effort: gracefully degrade if no session identity (CLI run
+    # outside an AI session) — the task is still created, the user can run
+    # task.py start later. Pointer is session-scoped so this never affects
+    # other AI sessions.
+    try:
+        from .active_task import resolve_context_key, set_active_task
+        if resolve_context_key():
+            try:
+                rel_dir = task_dir.relative_to(repo_root).as_posix()
+            except ValueError:
+                rel_dir = str(task_dir)
+            set_active_task(rel_dir, repo_root)
+    except Exception:
+        pass
+
     print(colored(f"Created task: {dir_name}", Colors.GREEN), file=sys.stderr)
     print("", file=sys.stderr)
     print(colored("Next steps:", Colors.BLUE), file=sys.stderr)
@@ -272,9 +287,9 @@ def cmd_create(args: argparse.Namespace) -> int:
             "see .trellis/workflow.md Phase 1.3)",
             file=sys.stderr,
         )
-        print("  3. Run: python3 task.py start <dir>", file=sys.stderr)
+        print("  3. Run: python task.py start <dir>", file=sys.stderr)
     else:
-        print("  2. Run: python3 task.py start <dir>", file=sys.stderr)
+        print("  2. Run: python task.py start <dir>", file=sys.stderr)
     print("", file=sys.stderr)
 
     # Output relative path for script chaining
@@ -299,8 +314,8 @@ def cmd_archive(args: argparse.Namespace) -> int:
 
     tasks_dir = get_tasks_dir(repo_root)
 
-    # Find task directory
-    task_dir = find_task_by_name(task_name, tasks_dir)
+    # Resolve task directory (supports task name, relative path, or absolute path)
+    task_dir = resolve_task_dir(task_name, repo_root)
 
     if not task_dir or not task_dir.is_dir():
         print(colored(f"Error: Task not found: {task_name}", Colors.RED), file=sys.stderr)
@@ -323,23 +338,11 @@ def cmd_archive(args: argparse.Namespace) -> int:
             data["completedAt"] = today
             write_json(task_json_path, data)
 
-            # Handle subtask relationships on archive
-            task_parent = data.get("parent")
+            # Handle subtask relationships on archive.
+            # Keep this task in its parent's children list so progress
+            # counters (children_progress) stay consistent — children
+            # missing from the active set are treated as completed.
             task_children = data.get("children", [])
-
-            # If this is a child, remove from parent's children list
-            if task_parent:
-                parent_dir = find_task_by_name(task_parent, tasks_dir)
-                if parent_dir:
-                    parent_json = parent_dir / FILE_TASK_JSON
-                    if parent_json.is_file():
-                        parent_data = read_json(parent_json)
-                        if parent_data:
-                            parent_children = parent_data.get("children", [])
-                            if dir_name in parent_children:
-                                parent_children.remove(dir_name)
-                                parent_data["children"] = parent_children
-                                write_json(parent_json, parent_data)
 
             # If this is a parent, clear parent field in all children
             if task_children:
@@ -353,10 +356,9 @@ def cmd_archive(args: argparse.Namespace) -> int:
                                 child_data["parent"] = None
                                 write_json(child_json, child_data)
 
-    # Clear if current task
-    current = get_current_task(repo_root)
-    if current and dir_name in current:
-        clear_current_task(repo_root)
+    # Clear any session that still points at this task before the path moves.
+    from .active_task import clear_task_from_sessions
+    clear_task_from_sessions(str(task_dir), repo_root)
 
     # Archive
     result = archive_task_complete(task_dir, repo_root)
@@ -513,7 +515,7 @@ def cmd_set_branch(args: argparse.Namespace) -> int:
 
     if not branch:
         print(colored("Error: Missing arguments", Colors.RED))
-        print("Usage: python3 task.py set-branch <task-dir> <branch-name>")
+        print("Usage: python task.py set-branch <task-dir> <branch-name>")
         return 1
 
     task_json = target_dir / FILE_TASK_JSON
@@ -544,8 +546,8 @@ def cmd_set_base_branch(args: argparse.Namespace) -> int:
 
     if not base_branch:
         print(colored("Error: Missing arguments", Colors.RED))
-        print("Usage: python3 task.py set-base-branch <task-dir> <base-branch>")
-        print("Example: python3 task.py set-base-branch <dir> develop")
+        print("Usage: python task.py set-base-branch <task-dir> <base-branch>")
+        print("Example: python task.py set-base-branch <dir> develop")
         print()
         print("This sets the target branch for PR (the branch your feature will merge into).")
         return 1
@@ -579,7 +581,7 @@ def cmd_set_scope(args: argparse.Namespace) -> int:
 
     if not scope:
         print(colored("Error: Missing arguments", Colors.RED))
-        print("Usage: python3 task.py set-scope <task-dir> <scope>")
+        print("Usage: python task.py set-scope <task-dir> <scope>")
         return 1
 
     task_json = target_dir / FILE_TASK_JSON
