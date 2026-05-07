@@ -6,12 +6,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 func Build(baseDir string) (string, error) {
 	distRoot := filepath.Join(baseDir, "dist")
-	name := "opsctl-package-" + time.Now().Format("20060102150405")
+	name := "opsctl"
 	outDir := filepath.Join(distRoot, name)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return "", err
@@ -103,7 +102,7 @@ func tarGzDir(srcDir, tarPath string) error {
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(srcDir, path)
+		rel, err := filepath.Rel(filepath.Dir(srcDir), path)
 		if err != nil {
 			return err
 		}

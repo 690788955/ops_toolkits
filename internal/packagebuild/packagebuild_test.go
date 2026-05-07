@@ -35,9 +35,9 @@ func TestBuildCopiesPackageContents(t *testing.T) {
 		t.Fatalf("交付包 tar.gz 缺失: %v", err)
 	}
 	assertTarGzEntries(t, tarPath, []string{
-		"configs/ops.yaml",
-		"plugins/vendor.demo/plugin.yaml",
-		filepath.ToSlash(exePath),
+		"opsctl/configs/ops.yaml",
+		"opsctl/plugins/vendor.demo/plugin.yaml",
+		"opsctl/" + filepath.ToSlash(exePath),
 	})
 }
 

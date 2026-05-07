@@ -49,11 +49,11 @@ jobs:
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
           pkg="opsctl-${{ matrix.goos }}-${{ matrix.goarch }}"
-          mkdir -p "$pkg/bin"
-          cp "dist/opsctl${ext}" "$pkg/bin/"
-          cp -r configs "$pkg/"
-          cp -r plugins "$pkg/"
-          tar -czf "${pkg}.tar.gz" -C "$pkg" .
+          mkdir -p opsctl/bin
+          cp "dist/opsctl${ext}" opsctl/bin/
+          cp -r configs opsctl/
+          cp -r plugins opsctl/
+          tar -czf "${pkg}.tar.gz" opsctl
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
