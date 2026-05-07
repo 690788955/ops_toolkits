@@ -1,7 +1,8 @@
 package packagebuild
 
 import (
-	"archive/zip"
+	"archive/tar"
+	"compress/gzip"
 	"io"
 	"os"
 	"path/filepath"
@@ -26,7 +27,7 @@ func Build(baseDir string) (string, error) {
 	if exe, err := os.Executable(); err == nil {
 		_ = copyFile(exe, filepath.Join(outDir, "bin", filepath.Base(exe)))
 	}
-	if err := zipDir(outDir, outDir+".zip"); err != nil {
+	if err := tarGzDir(outDir, outDir+".tar.gz"); err != nil {
 		return "", err
 	}
 	return outDir, nil
@@ -80,32 +81,45 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-func zipDir(srcDir, zipPath string) error {
-	out, err := os.Create(zipPath)
+func tarGzDir(srcDir, tarPath string) error {
+	out, err := os.Create(tarPath)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-	zw := zip.NewWriter(out)
-	defer zw.Close()
+	gw := gzip.NewWriter(out)
+	defer gw.Close()
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
 	return filepath.WalkDir(srcDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		rel, err := filepath.Rel(filepath.Dir(srcDir), path)
 		if err != nil {
 			return err
 		}
-		w, err := zw.Create(filepath.ToSlash(rel))
+		info, err := d.Info()
 		if err != nil {
 			return err
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(rel)
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
 		}
 		in, err := os.Open(path)
 		if err != nil {
 			return err
 		}
 		defer in.Close()
-		_, err = io.Copy(w, in)
+		_, err = io.Copy(tw, in)
 		return err
 	})
 }

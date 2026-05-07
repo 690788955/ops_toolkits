@@ -1,7 +1,9 @@
 package packagebuild
 
 import (
-	"archive/zip"
+	"archive/tar"
+	"compress/gzip"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,11 +30,11 @@ func TestBuildCopiesPackageContents(t *testing.T) {
 		}
 	}
 
-	zipPath := outDir + ".zip"
-	if _, err := os.Stat(zipPath); err != nil {
-		t.Fatalf("交付包 zip 缺失: %v", err)
+	tarPath := outDir + ".tar.gz"
+	if _, err := os.Stat(tarPath); err != nil {
+		t.Fatalf("交付包 tar.gz 缺失: %v", err)
 	}
-	assertZipEntries(t, zipPath, []string{
+	assertTarGzEntries(t, tarPath, []string{
 		"configs/ops.yaml",
 		"plugins/vendor.demo/plugin.yaml",
 		filepath.ToSlash(exePath),
@@ -49,23 +51,34 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-func assertZipEntries(t *testing.T, zipPath string, paths []string) {
+func assertTarGzEntries(t *testing.T, tarPath string, paths []string) {
 	t.Helper()
-	reader, err := zip.OpenReader(zipPath)
+	f, err := os.Open(tarPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
 
 	entries := map[string]bool{}
-	for _, file := range reader.File {
-		entries[file.Name] = true
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries[header.Name] = true
 	}
-	packageDir := filepath.Base(zipPath[:len(zipPath)-len(filepath.Ext(zipPath))])
 	for _, path := range paths {
-		entry := packageDir + "/" + path
-		if !entries[entry] {
-			t.Fatalf("zip 条目 %s 缺失", entry)
+		if !entries[path] {
+			t.Fatalf("tar.gz 条目 %s 缺失", path)
 		}
 	}
 }
