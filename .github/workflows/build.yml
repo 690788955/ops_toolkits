@@ -52,7 +52,7 @@ jobs:
           cp "dist/opsctl${ext}" "$pkg/bin/"
           cp -r configs "$pkg/"
           cp -r plugins "$pkg/"
-          tar -czf "${pkg}.tar.gz" "$pkg"
+          tar -czf "${pkg}.tar.gz" -C "$pkg" .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
