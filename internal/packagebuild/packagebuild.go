@@ -108,8 +108,10 @@ func tarGzDir(srcDir, tarPath string) error {
 			return err
 		}
 		header.Name = filepath.ToSlash(rel)
-		if d.IsDir() && (header.Name == "opsctl/plugins" || strings.HasPrefix(header.Name, "opsctl/plugins/")) {
-			header.Mode = 0o755
+		if strings.HasPrefix(header.Name, "opsctl/plugins/") {
+			if d.IsDir() || strings.HasSuffix(header.Name, ".sh") {
+				header.Mode = 0o755
+			}
 		}
 		if err := tw.WriteHeader(header); err != nil {
 			return err

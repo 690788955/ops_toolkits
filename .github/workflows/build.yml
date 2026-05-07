@@ -54,6 +54,7 @@ jobs:
           cp -r configs opsctl/
           cp -r plugins opsctl/
           find opsctl/plugins -type d -exec chmod 755 {} +
+          find opsctl/plugins -type f -name '*.sh' -exec chmod 755 {} +
           tar -czf "${pkg}.tar.gz" opsctl
 
       - name: Upload artifact

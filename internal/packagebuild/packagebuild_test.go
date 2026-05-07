@@ -13,6 +13,7 @@ func TestBuildCopiesPackageContents(t *testing.T) {
 	baseDir := t.TempDir()
 	writeFile(t, filepath.Join(baseDir, "configs", "ops.yaml"), "app:\n  name: 测试运维\n")
 	writeFile(t, filepath.Join(baseDir, "plugins", "vendor.demo", "plugin.yaml"), "id: vendor.demo\n")
+	writeFile(t, filepath.Join(baseDir, "plugins", "vendor.demo", "scripts", "check.sh"), "#!/bin/sh\n")
 
 	outDir, err := Build(baseDir)
 	if err != nil {
@@ -37,6 +38,7 @@ func TestBuildCopiesPackageContents(t *testing.T) {
 	assertTarGzEntries(t, tarPath, []string{
 		"opsctl/configs/ops.yaml",
 		"opsctl/plugins/vendor.demo/plugin.yaml",
+		"opsctl/plugins/vendor.demo/scripts/check.sh",
 		"opsctl/" + filepath.ToSlash(exePath),
 	})
 }
@@ -77,6 +79,9 @@ func assertTarGzEntries(t *testing.T, tarPath string, paths []string) {
 		entries[header.Name] = true
 		if header.Typeflag == tar.TypeDir && header.Name == "opsctl/plugins/vendor.demo" && header.Mode != 0o755 {
 			t.Fatalf("插件目录权限 = %#o, want 0755", header.Mode)
+		}
+		if header.Typeflag == tar.TypeReg && header.Name == "opsctl/plugins/vendor.demo/scripts/check.sh" && header.Mode != 0o755 {
+			t.Fatalf("插件脚本权限 = %#o, want 0755", header.Mode)
 		}
 	}
 	for _, path := range paths {
