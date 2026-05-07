@@ -40,3 +40,37 @@ Aligned the Web console canvas with the design system, added branch-aware condit
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: 支持宿主配置文件映射
+
+**Date**: 2026-05-07
+**Task**: 支持宿主配置文件映射
+**Branch**: `master`
+
+### Summary
+
+上传插件默认设置 755 权限；配置文件支持 config_dir、宿主白名单映射、权限检查、目录项展开、Web 目录树 UI，并同步插件模板规范。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9d48033` | (see git log) |
+| `233063e` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
