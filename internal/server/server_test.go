@@ -333,7 +333,16 @@ func TestToolDevKitDownloadAPI(t *testing.T) {
 		contents["plugins/plugin.template/README.md"],
 		contents["plugins/plugin.template/examples/README.md"],
 	}, "\n")
-	for _, want := range []string{"插件开发包", "plugin.yaml", "规范插件模板", "可复制的规范模板", "id: plugin.template", "name: 规范插件模板", "version: 1.0.0", "description:", "author: your-team", "compatibility:", "contributes:", "categories:", "tools:", "workflows:", "plugin.template.inspect", "plugin.template.apply", "plugin.template.maintenance-flow", "confirm.required", "required: true", "default: demo", "type: bool", "timeout: 5m", "tags: [plugin, template, change, high-risk]", "command: scripts/run.sh", "workdir: .", "args:", "depends_on: [inspect]", "from: inspect", "to: apply", "usage()", "error()", "normalize_bool()", "未知参数", "缺少必填参数 target", "action 只支持 inspect 或 apply", "dry-run 只接受 true/false、yes/no、1/0、on/off", "dry-run", "config_files:", "config/example.conf", "配置文件", "不要在 stdout/stderr 输出密码", "./bin/opsctl.exe validate", "./bin/opsctl.exe run tool plugin.template.inspect", "./bin/opsctl.exe run workflow plugin.template.maintenance-flow", "./bin/opsctl.exe package build", "插件开发者交付清单", "更新已存在插件时提升 version", "不要假设交付或接入时会执行脚本", "宿主运行环境", "打包交付", "command、workdir、workflow path 都应留在插件目录内部"} {
+	if !strings.Contains(contents["SPEC.md"], "config_dir: config") || !strings.Contains(contents["SPEC.md"], "config_files:") || !strings.Contains(contents["SPEC.md"], "- example.conf") {
+		t.Fatalf("SPEC.md 缺少 config_dir 推荐写法: %s", contents["SPEC.md"])
+	}
+	if !strings.Contains(contents["plugins/plugin.template/plugin.yaml"], "config_dir: config") || !strings.Contains(contents["plugins/plugin.template/plugin.yaml"], "- example.conf") {
+		t.Fatalf("模板 plugin.yaml 缺少 config_dir 推荐写法: %s", contents["plugins/plugin.template/plugin.yaml"])
+	}
+	if !strings.Contains(contents["plugins/plugin.template/README.md"], "config_dir: config") {
+		t.Fatalf("模板 README 缺少 config_dir 说明: %s", contents["plugins/plugin.template/README.md"])
+	}
+	for _, want := range []string{"插件开发包", "plugin.yaml", "规范插件模板", "可复制的规范模板", "id: plugin.template", "name: 规范插件模板", "version: 1.0.0", "description:", "author: your-team", "compatibility:", "contributes:", "categories:", "tools:", "workflows:", "plugin.template.inspect", "plugin.template.apply", "plugin.template.maintenance-flow", "confirm.required", "required: true", "default: demo", "type: bool", "timeout: 5m", "tags: [plugin, template, change, high-risk]", "command: scripts/run.sh", "workdir: .", "args:", "depends_on: [inspect]", "from: inspect", "to: apply", "usage()", "error()", "normalize_bool()", "未知参数", "缺少必填参数 target", "action 只支持 inspect 或 apply", "dry-run 只接受 true/false、yes/no、1/0、on/off", "dry-run", "config_dir: config", "config_files:", "config/example.conf", "配置文件", "不要在 stdout/stderr 输出密码", "./bin/opsctl.exe validate", "./bin/opsctl.exe run tool plugin.template.inspect", "./bin/opsctl.exe run workflow plugin.template.maintenance-flow", "./bin/opsctl.exe package build", "插件开发者交付清单", "更新已存在插件时提升 version", "不要假设交付或接入时会执行脚本", "宿主运行环境", "打包交付", "command、workdir、workflow path 都应留在插件目录内部"} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("开发包文案缺少关键内容 %q", want)
 		}

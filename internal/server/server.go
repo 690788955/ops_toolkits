@@ -55,7 +55,7 @@ const toolDevKitReadme = `# 插件开发包
 - plugins/plugin.template/plugin.yaml：插件清单，声明分类、普通工具、高风险工具、workflow、参数和确认策略。
 - plugins/plugin.template/scripts/run.sh：示例工具脚本，包含 usage、参数解析、未知参数拒绝、必填校验和错误返回。
 - plugins/plugin.template/workflows/maintenance-flow.yaml：插件内 workflow 示例，引用本插件工具并展示 depends_on 依赖。
-- plugins/plugin.template/config/example.conf：插件内配置文件示例，可由 config_files 声明并由脚本读取。
+- plugins/plugin.template/config/example.conf：插件内配置文件示例，推荐由工具声明 config_dir: config 和 config_files: [example.conf] 后由脚本读取。
 - plugins/plugin.template/examples/params.yaml：本地验证参数示例。
 - plugins/plugin.template/README.md：插件开发者交付给使用方的说明模板。
 
@@ -125,7 +125,8 @@ const toolDevKitSpec = `# 插件开发规范
 - timeout 建议显式填写，例如 1m、30m，避免长时间挂起。
 - tags 建议填写，便于接入方理解工具用途和风险类别。
 - parameters 必须列出脚本需要的输入，并包含 type、description、required、default。
-- config_files 可选，只声明插件内可维护的配置文件相对路径，例如 config/example.conf；脚本是否读取该文件由 args 或脚本默认逻辑决定。
+- config_dir 可选，推荐填写插件内配置基准目录，例如 config。
+- config_files 可选，推荐声明相对 config_dir 的短文件名或相对目录项，例如 example.conf；脚本是否读取该文件由 args 或脚本默认逻辑决定。
 - confirm.required=true 用于高风险工具；message 应写清楚影响范围、目标环境和是否可回滚。
 
 workflow 引用要求：
@@ -147,12 +148,22 @@ workflow 引用要求：
 
 ## 4. 配置文件
 
-如果工具需要配置文件，推荐把文件放在插件目录内的 config/ 目录，并在 plugin.yaml 中声明：
+如果工具需要插件内配置文件，推荐把文件放在插件目录内的 config/ 目录，并在 plugin.yaml 的工具声明中使用 config_dir 作为配置基准目录，config_files 只写相对 config_dir 的短文件名或相对目录项：
 
 ` + "```yaml" + `
+config_dir: config
 config_files:
-  - config/example.conf
+  - example.conf
 ` + "```" + `
+
+含义与约束：
+
+- config_dir 是插件内配置基准目录。上例中 example.conf 会按插件目录内的 config/example.conf 处理。
+- 旧写法仍兼容：未声明 config_dir 时，config_files: [config/example.conf] 会继续按插件目录内路径识别，便于旧插件平滑升级；新模板推荐短文件名 + config_dir。
+- config_files 中的字符串条目，以及结构化条目的 path，只能是相对文件或相对目录项；禁止绝对路径，禁止使用 .. 或其他方式逃逸 config_dir。
+- 如果 config_files/path 指向目录，目录项只会一级展开普通文件，不递归进入子目录，也不会包含目录、符号链接或特殊文件。
+- 插件包不能直接声明宿主绝对路径，也不能通过 config_files/path 获得任意宿主文件访问权。
+- 需要维护宿主绝对路径配置文件时，由管理员在宿主侧显式启用：先在全局配置 host_config_files.allowed_dirs 加入允许目录，再通过 host-side mapping 为具体工具声明 scope: host_absolute、config_dir 和 path。插件开发包只应声明插件内默认配置文件。
 
 config_files 只用于声明哪些插件内文件可被配置维护；宿主不会自动生成、复制或传参。工具脚本应通过 args、默认路径或自己的逻辑读取这些文件。配置文件路径必须留在插件目录内部。
 
@@ -227,8 +238,9 @@ contributes:
         - '{{ .dry_run }}'
         - --config
         - config/example.conf
+      config_dir: config
       config_files:
-        - config/example.conf
+        - example.conf
       workdir: .
       timeout: 1m
       parameters:
@@ -265,8 +277,9 @@ contributes:
         - '{{ .dry_run }}'
         - --config
         - config/example.conf
+      config_dir: config
       config_files:
-        - config/example.conf
+        - example.conf
       workdir: .
       timeout: 5m
       parameters:
@@ -502,7 +515,7 @@ const samplePluginReadme = `# 规范插件模板
 - plugin.yaml：声明插件元数据、分类、工具、workflow、参数和 confirm。
 - scripts/run.sh：工具脚本，演示 usage、参数解析、未知参数拒绝、必填校验、dry-run、错误返回和安全输出。
 - workflows/maintenance-flow.yaml：插件内 workflow 示例，引用本插件工具并使用 depends_on 表达依赖。
-- config/example.conf：插件内可编辑配置文件示例，路径在 plugin.yaml 的 config_files 中声明。
+- config/example.conf：插件内可编辑配置文件示例，plugin.yaml 中通过 config_dir: config 与 config_files: [example.conf] 声明。
 - examples/params.yaml：本地运行参数示例。
 
 ## 输入
@@ -511,6 +524,12 @@ const samplePluginReadme = `# 规范插件模板
 - action：执行动作，示例支持 inspect 或 apply。
 - dry_run：是否仅预览动作，默认 true。
 - config/example.conf：插件内配置文件示例，工具脚本通过 --config 读取。
+
+## 配置文件
+
+plugin.yaml 推荐使用 config_dir: config 作为插件内配置基准目录，再在 config_files 中声明相对该目录的短文件名或相对目录项，例如 example.conf 对应插件目录内的 config/example.conf。旧的 config_files: [config/example.conf] 写法仍兼容，但新模板推荐短文件名 + config_dir。
+
+config_files 的字符串条目和结构化条目的 path 只能是相对文件或相对目录项，禁止绝对路径和 .. 逃逸。目录项只一级展开普通文件，不递归。插件包不能直接声明宿主绝对路径；宿主配置文件映射只能由管理员通过 host_config_files.allowed_dirs 和宿主侧 mapping 中的 scope: host_absolute、config_dir、path 显式启用。
 
 ## 输出
 
