@@ -272,3 +272,36 @@ Enhanced CLI/menu UX: list grouping, start/menu consolidation, parameter prompts
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: Web UI 添加输出格式切换控件
+
+**Date**: 2026-05-08
+**Task**: Web UI 添加输出格式切换控件
+**Branch**: `master`
+
+### Summary
+
+在 Web UI 的工具执行结果界面添加了 text/json 格式切换按钮，修改 LogBlock 组件支持格式切换，每个日志块独立管理格式状态
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `dad4c99` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
