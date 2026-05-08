@@ -1,0 +1,2 @@
+{"file":".trellis/spec/guides/cross-platform-runtime-thinking-guide.md","reason":"CI 打包需要保持 plugin-first 运行结构、bin 目录约定和跨平台命名清晰。"}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"修改现有 GitHub Actions 时优先复用当前构建/打包流程，避免新增重复工作流。"}
