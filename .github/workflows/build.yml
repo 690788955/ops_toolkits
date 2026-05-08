@@ -11,13 +11,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        goos: [linux, windows, darwin]
-        goarch: [amd64, arm64]
-        exclude:
-          - goos: windows
-            goarch: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -34,33 +27,33 @@ jobs:
         with:
           go-version: '1.21'
 
-      - name: Build Go binary
+      - name: Build all Go binaries
         env:
           CGO_ENABLED: 0
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+          GOTOOLCHAIN: local
         run: |
-          ext=""
-          if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
-          go build -o "dist/opsctl${ext}" ./cmd/opsctl
-
-      - name: Package
-        run: |
-          ext=""
-          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
-          pkg="opsctl-${{ matrix.goos }}-${{ matrix.goarch }}"
           mkdir -p opsctl/bin
-          cp "dist/opsctl${ext}" opsctl/bin/
+          targets="linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64"
+          for target in $targets; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            ext=""
+            if [ "$goos" = "windows" ]; then ext=".exe"; fi
+            GOOS="$goos" GOARCH="$goarch" go build -o "opsctl/bin/opsctl_${goos}_${goarch}${ext}" ./cmd/opsctl
+          done
+
+      - name: Package all platforms
+        run: |
           cp -r configs opsctl/
           cp -r plugins opsctl/
           chmod -R 755 opsctl/plugins
-          tar -czf "${pkg}.tar.gz" opsctl
+          tar -czf opsctl-all-platforms.tar.gz opsctl
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: opsctl-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: opsctl-*.tar.gz
+          name: opsctl-all-platforms
+          path: opsctl-all-platforms.tar.gz
 
   release:
     needs: build
@@ -71,12 +64,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          name: opsctl-all-platforms
           path: artifacts
-          pattern: opsctl-*
-          merge-multiple: true
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/opsctl-*.tar.gz
+          files: artifacts/opsctl-all-platforms.tar.gz
           generate_release_notes: true
