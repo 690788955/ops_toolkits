@@ -163,6 +163,7 @@ type Parameter struct {
 	Description string      `yaml:"description" json:"description"`
 	Required    bool        `yaml:"required" json:"required"`
 	Default     interface{} `yaml:"default" json:"default"`
+	Options     []string    `yaml:"options" json:"options"`
 	Sensitive   bool        `yaml:"sensitive" json:"sensitive"`
 }
 

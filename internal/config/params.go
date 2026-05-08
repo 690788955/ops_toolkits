@@ -19,21 +19,31 @@ func MergeParamsValues(defs []Parameter, fileParams, overrides map[string]interf
 func PromptMissing(defs []Parameter, params map[string]string, reader io.Reader, writer io.Writer) error {
 	scanner := bufio.NewScanner(reader)
 	for _, p := range defs {
-		if params[p.Name] != "" || !p.Required {
+		if params[p.Name] != "" {
 			continue
 		}
-		if _, err := fmt.Fprintf(writer, "%s: ", parameterPromptLabel(p)); err != nil {
+		if _, err := fmt.Fprint(writer, parameterPromptLabel(p)); err != nil {
 			return err
 		}
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
 				return err
 			}
-			return fmt.Errorf("缺少必填参数 %s", p.Name)
+			if p.Required {
+				return fmt.Errorf("缺少必填参数 %s", p.Name)
+			}
+			break
 		}
 		value := strings.TrimSpace(scanner.Text())
 		if value == "" {
-			return fmt.Errorf("缺少必填参数 %s", p.Name)
+			if p.Default != nil {
+				params[p.Name] = fmt.Sprint(p.Default)
+				continue
+			}
+			if p.Required {
+				return fmt.Errorf("缺少必填参数 %s", p.Name)
+			}
+			continue
 		}
 		params[p.Name] = value
 	}
@@ -64,7 +74,16 @@ func parameterPromptLabel(param Parameter) string {
 	if len(meta) > 0 {
 		parts = append(parts, "("+strings.Join(meta, ", ")+")")
 	}
-	return strings.Join(parts, " ")
+	if len(param.Options) > 0 {
+		parts = append(parts, "\n可选值: "+strings.Join(param.Options, ", "))
+	}
+	prompt := strings.Join(parts, " ")
+	if param.Default != nil {
+		prompt += fmt.Sprintf("\n请输入 [默认: %v]: ", param.Default)
+	} else {
+		prompt += ": "
+	}
+	return prompt
 }
 
 func ParseSetValues(values []string) (map[string]string, error) {
