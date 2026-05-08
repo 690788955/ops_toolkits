@@ -50,11 +50,46 @@ func PromptMissing(defs []Parameter, params map[string]string, reader io.Reader,
 	return ValidateRequired(defs, params)
 }
 
+func PromptAll(defs []Parameter, params map[string]string, reader io.Reader, writer io.Writer) error {
+	scanner := bufio.NewScanner(reader)
+	for _, p := range defs {
+		current := params[p.Name]
+		if _, err := fmt.Fprint(writer, parameterPromptLabelWithCurrent(p, current)); err != nil {
+			return err
+		}
+		value := ""
+		if scanner.Scan() {
+			value = strings.TrimSpace(scanner.Text())
+		} else if err := scanner.Err(); err != nil {
+			return err
+		}
+		if value != "" {
+			params[p.Name] = value
+			continue
+		}
+		if strings.TrimSpace(current) != "" {
+			continue
+		}
+		if p.Default != nil {
+			params[p.Name] = fmt.Sprint(p.Default)
+			continue
+		}
+		if p.Required {
+			return fmt.Errorf("缺少必填参数 %s", p.Name)
+		}
+	}
+	return ValidateRequired(defs, params)
+}
+
 func ValidateRequired(defs []Parameter, params map[string]string) error {
 	return ValidateRequiredValues(defs, StringMapToValues(params))
 }
 
 func parameterPromptLabel(param Parameter) string {
+	return parameterPromptLabelWithCurrent(param, "")
+}
+
+func parameterPromptLabelWithCurrent(param Parameter, current string) string {
 	parts := []string{param.Name}
 	if param.Description != "" {
 		parts = append(parts, param.Description)
@@ -71,6 +106,9 @@ func parameterPromptLabel(param Parameter) string {
 	if param.Default != nil {
 		meta = append(meta, fmt.Sprintf("默认值=%v", param.Default))
 	}
+	if strings.TrimSpace(current) != "" {
+		meta = append(meta, fmt.Sprintf("当前值=%s", current))
+	}
 	if len(meta) > 0 {
 		parts = append(parts, "("+strings.Join(meta, ", ")+")")
 	}
@@ -78,7 +116,9 @@ func parameterPromptLabel(param Parameter) string {
 		parts = append(parts, "\n可选值: "+strings.Join(param.Options, ", "))
 	}
 	prompt := strings.Join(parts, " ")
-	if param.Default != nil {
+	if strings.TrimSpace(current) != "" {
+		prompt += fmt.Sprintf("\n请输入 [当前: %s]: ", current)
+	} else if param.Default != nil {
 		prompt += fmt.Sprintf("\n请输入 [默认: %v]: ", param.Default)
 	} else {
 		prompt += ": "

@@ -88,6 +88,96 @@ func TestPromptMissing(t *testing.T) {
 	}
 }
 
+func TestPromptMissingSkipsExistingValues(t *testing.T) {
+	params := map[string]string{"name": "cli"}
+	var out bytes.Buffer
+	err := PromptMissing([]Parameter{{Name: "name", Type: "string", Description: "用户名称", Required: true}}, params, bytes.NewBufferString("ignored\n"), &out)
+	if err != nil {
+		t.Fatalf("PromptMissing 返回错误: %v", err)
+	}
+	if params["name"] != "cli" {
+		t.Fatalf("name = %q, want cli", params["name"])
+	}
+	if out.Len() != 0 {
+		t.Fatalf("PromptMissing 不应提示已有值参数: %q", out.String())
+	}
+}
+
+func TestPromptAllKeepsDefaultOnEnter(t *testing.T) {
+	defs := []Parameter{{Name: "name", Type: "string", Description: "用户名称", Required: true, Default: "World"}}
+	params := MergeParams(defs, nil, nil)
+	var out bytes.Buffer
+
+	if err := PromptAll(defs, params, bytes.NewBufferString("\n"), &out); err != nil {
+		t.Fatalf("PromptAll 返回错误: %v", err)
+	}
+	if params["name"] != "World" {
+		t.Fatalf("name = %q, want World", params["name"])
+	}
+	for _, want := range []string{"name", "用户名称", "类型=string", "必填", "默认值=World", "当前值=World"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("PromptAll 提示缺少 %q: %s", want, out.String())
+		}
+	}
+}
+
+func TestPromptAllKeepsCurrentSetValueOnEnter(t *testing.T) {
+	defs := []Parameter{{Name: "name", Type: "string", Required: true, Default: "World"}}
+	params := MergeParams(defs, nil, map[string]string{"name": "CLI"})
+	var out bytes.Buffer
+
+	if err := PromptAll(defs, params, bytes.NewBufferString("\n"), &out); err != nil {
+		t.Fatalf("PromptAll 返回错误: %v", err)
+	}
+	if params["name"] != "CLI" {
+		t.Fatalf("name = %q, want CLI", params["name"])
+	}
+	if !strings.Contains(out.String(), "当前值=CLI") || !strings.Contains(out.String(), "请输入 [当前: CLI]") {
+		t.Fatalf("PromptAll 未展示当前值: %s", out.String())
+	}
+}
+
+func TestPromptAllOverridesCurrentValue(t *testing.T) {
+	defs := []Parameter{{Name: "name", Type: "string", Required: true, Default: "World"}}
+	params := MergeParams(defs, nil, map[string]string{"name": "CLI"})
+
+	if err := PromptAll(defs, params, bytes.NewBufferString("Alice\n"), &bytes.Buffer{}); err != nil {
+		t.Fatalf("PromptAll 返回错误: %v", err)
+	}
+	if params["name"] != "Alice" {
+		t.Fatalf("name = %q, want Alice", params["name"])
+	}
+}
+
+func TestPromptAllPromptsAllParametersInOrder(t *testing.T) {
+	defs := []Parameter{
+		{Name: "first", Type: "string", Required: true, Default: "one"},
+		{Name: "second", Type: "string", Required: false, Default: "two"},
+	}
+	params := MergeParams(defs, nil, nil)
+	var out bytes.Buffer
+
+	if err := PromptAll(defs, params, bytes.NewBufferString("\nchanged\n"), &out); err != nil {
+		t.Fatalf("PromptAll 返回错误: %v", err)
+	}
+	if params["first"] != "one" || params["second"] != "changed" {
+		t.Fatalf("params = %#v, want first default and second override", params)
+	}
+	text := out.String()
+	firstIdx := strings.Index(text, "first")
+	secondIdx := strings.Index(text, "second")
+	if firstIdx < 0 || secondIdx < 0 || firstIdx >= secondIdx {
+		t.Fatalf("PromptAll 未按定义顺序提示: %s", text)
+	}
+}
+
+func TestPromptAllRequiredMissing(t *testing.T) {
+	err := PromptAll([]Parameter{{Name: "name", Type: "string", Required: true}}, map[string]string{}, bytes.NewBufferString("\n"), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "缺少必填参数 name") {
+		t.Fatalf("PromptAll error = %v, want missing required name", err)
+	}
+}
+
 func TestValidateRequired(t *testing.T) {
 	err := ValidateRequired([]Parameter{{Name: "name", Required: true}}, map[string]string{"name": ""})
 	if err == nil {

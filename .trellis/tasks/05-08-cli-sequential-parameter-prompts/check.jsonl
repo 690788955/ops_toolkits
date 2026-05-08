@@ -1,0 +1,2 @@
+{"path":".trellis/spec/backend/cli-interaction-patterns.md","why":"检查逐个确认提示是否符合 CLI 交互规范并覆盖默认值/当前值"}
+{"path":".trellis/spec/backend/quality-guidelines.md","why":"检查 Go 测试、构建、validate 和运行路径是否满足质量要求"}

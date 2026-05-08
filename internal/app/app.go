@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -206,11 +207,12 @@ func runToolCommand(cmd *cobra.Command, opts *options, reg *registry.Registry, i
 	if err != nil {
 		return err
 	}
-	params, err := resolveToolParams(opts, reg, tool)
+	in := sharedPromptReader(os.Stdin)
+	params, err := resolveToolParams(opts, reg, tool, in)
 	if err != nil {
 		return err
 	}
-	if err := config.PromptConfirmation(tool.Config.Confirm, os.Stdin, cmd.OutOrStdout()); err != nil {
+	if err := config.PromptConfirmation(tool.Config.Confirm, in, cmd.OutOrStdout()); err != nil {
 		return err
 	}
 	record, err := runner.New(reg).RunToolValues(context.Background(), id, params, cmd.OutOrStdout(), cmd.ErrOrStderr())
@@ -225,14 +227,15 @@ func runWorkflowCommand(cmd *cobra.Command, opts *options, reg *registry.Registr
 	if err != nil {
 		return err
 	}
-	params, err := resolveParams(opts, wf.Config.Parameters)
+	in := sharedPromptReader(os.Stdin)
+	params, err := resolveParams(opts, wf.Config.Parameters, in)
 	if err != nil {
 		return err
 	}
-	if err := config.PromptConfirmation(wf.Config.Confirm, os.Stdin, cmd.OutOrStdout()); err != nil {
+	if err := config.PromptConfirmation(wf.Config.Confirm, in, cmd.OutOrStdout()); err != nil {
 		return err
 	}
-	confirmed, err := confirmWorkflowTools(reg, wf.Config, os.Stdin, cmd.OutOrStdout())
+	confirmed, err := confirmWorkflowTools(reg, wf.Config, in, cmd.OutOrStdout())
 	if err != nil {
 		return err
 	}
@@ -302,7 +305,15 @@ func interactiveCommand(opts *options, use, short string, alias bool) *cobra.Com
 		if len(args) == 1 {
 			return runCatalogIDCommand(cmd, opts, reg, args[0])
 		}
-		return menu.Run(context.Background(), reg, os.Stdin, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		fileParams, err := config.LoadParamsFile(opts.paramsFile)
+		if err != nil {
+			return err
+		}
+		overrides, err := config.ParseSetValues(opts.setValues)
+		if err != nil {
+			return err
+		}
+		return menu.RunWithOptions(context.Background(), reg, os.Stdin, cmd.OutOrStdout(), cmd.ErrOrStderr(), menu.RunOptions{FileParams: fileParams, Overrides: overrides, NoPrompt: opts.noPrompt})
 	}}
 	if alias {
 		cmd.Long = "打开编号菜单。该命令为兼容保留；新用法推荐 opsctl start。"
@@ -501,7 +512,7 @@ func absBase(opts *options) string {
 	return base
 }
 
-func resolveParams(opts *options, defs []config.Parameter) (map[string]string, error) {
+func resolveParams(opts *options, defs []config.Parameter, in io.Reader) (map[string]string, error) {
 	fileParams, err := config.LoadParamsFile(opts.paramsFile)
 	if err != nil {
 		return nil, err
@@ -518,15 +529,16 @@ func resolveParams(opts *options, defs []config.Parameter) (map[string]string, e
 		provided[k] = v
 	}
 	if !opts.noPrompt {
+		before := config.MergeParams(defs, fileParams, overrides)
 		promptParams := config.MergeParams(defs, fileParams, overrides)
-		if err := config.PromptMissing(defs, promptParams, os.Stdin, os.Stdout); err != nil {
+		if err := config.PromptAll(defs, promptParams, in, os.Stdout); err != nil {
 			return nil, err
 		}
 		for k, v := range promptParams {
-			if _, exists := provided[k]; exists {
+			if strings.TrimSpace(v) == "" {
 				continue
 			}
-			if isParameterDefault(defs, k, v) {
+			if before[k] == v {
 				continue
 			}
 			provided[k] = v
@@ -540,7 +552,7 @@ func resolveParams(opts *options, defs []config.Parameter) (map[string]string, e
 	return provided, nil
 }
 
-func resolveToolParams(opts *options, reg *registry.Registry, tool *registry.Tool) (map[string]interface{}, error) {
+func resolveToolParams(opts *options, reg *registry.Registry, tool *registry.Tool, in io.Reader) (map[string]interface{}, error) {
 	fileParams, err := config.LoadParamsFileValues(opts.paramsFile)
 	if err != nil {
 		return nil, err
@@ -554,18 +566,14 @@ func resolveToolParams(opts *options, reg *registry.Registry, tool *registry.Too
 	if !opts.noPrompt {
 		before := config.FlattenValues(allValues)
 		promptParams := config.FlattenValues(allValues)
-		if err := config.PromptMissing(tool.Config.Parameters, promptParams, os.Stdin, os.Stdout); err != nil {
+		if err := config.PromptAll(tool.Config.Parameters, promptParams, in, os.Stdout); err != nil {
 			return nil, err
 		}
 		for k, v := range promptParams {
 			if strings.TrimSpace(v) == "" {
 				continue
 			}
-			if existing, ok := before[k]; ok && strings.TrimSpace(existing) != "" {
-				continue
-			}
-			if isParameterDefault(tool.Config.Parameters, k, v) {
-				config.DeletePathValue(provided, k)
+			if before[k] == v {
 				continue
 			}
 			if err := config.SetPathValue(provided, k, v); err != nil {
@@ -588,18 +596,36 @@ func toolConfigLayers(reg *registry.Registry, tool *registry.Tool) config.Values
 	)
 }
 
+type lineReader struct {
+	scanner *bufio.Scanner
+	pending []byte
+}
+
+func sharedPromptReader(in io.Reader) io.Reader {
+	return &lineReader{scanner: bufio.NewScanner(in)}
+}
+
+func (r *lineReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if len(r.pending) == 0 {
+		if !r.scanner.Scan() {
+			if err := r.scanner.Err(); err != nil {
+				return 0, err
+			}
+			return 0, io.EOF
+		}
+		r.pending = append([]byte(r.scanner.Text()), '\n')
+	}
+	n := copy(p, r.pending)
+	r.pending = r.pending[n:]
+	return n, nil
+}
+
 func loadRegistryWithVersion(opts *options) (*registry.Registry, error) {
 	if opts.configVersion == "" {
 		return registry.Load(absBase(opts))
 	}
 	return registry.LoadWithVersion(absBase(opts), opts.configVersion)
-}
-
-func isParameterDefault(defs []config.Parameter, name, value string) bool {
-	for _, p := range defs {
-		if p.Name == name && p.Default != nil && fmt.Sprint(p.Default) == value {
-			return true
-		}
-	}
-	return false
 }

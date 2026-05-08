@@ -108,6 +108,32 @@ func TestFilterItemsMatchesIDNameAndDescription(t *testing.T) {
 	}
 }
 
+func TestScannerLineReaderSharesMenuScanner(t *testing.T) {
+	scanner := bufio.NewScanner(strings.NewReader("first\nsecond\nq\n"))
+	reader := &scannerLineReader{scanner: scanner}
+
+	line, err := bufio.NewReader(reader).ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString returned error: %v", err)
+	}
+	if line != "first\n" {
+		t.Fatalf("line = %q, want first newline", line)
+	}
+	if !scanner.Scan() {
+		t.Fatalf("scanner.Scan() = false, err=%v", scanner.Err())
+	}
+	if scanner.Text() != "second" {
+		t.Fatalf("scanner.Text() = %q, want second", scanner.Text())
+	}
+	line, err = bufio.NewReader(reader).ReadString('\n')
+	if err != nil {
+		t.Fatalf("second ReadString returned error: %v", err)
+	}
+	if line != "q\n" {
+		t.Fatalf("line = %q, want q newline", line)
+	}
+}
+
 func testRegistry() *registry.Registry {
 	return &registry.Registry{
 		Root: &config.RootConfig{

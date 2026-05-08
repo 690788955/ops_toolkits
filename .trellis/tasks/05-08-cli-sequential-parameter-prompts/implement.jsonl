@@ -1,0 +1,2 @@
+{"path":".trellis/spec/backend/cli-interaction-patterns.md","why":"需要扩展 CLI 参数提示模式，保持提示文案元信息一致"}
+{"path":".trellis/spec/backend/quality-guidelines.md","why":"确认参数解析/验证修改的测试和构建要求"}

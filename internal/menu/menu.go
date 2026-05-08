@@ -29,8 +29,19 @@ var allCategory = config.Category{
 	Description: "显示所有工具和工作流",
 }
 
+type RunOptions struct {
+	FileParams map[string]string
+	Overrides  map[string]string
+	NoPrompt   bool
+}
+
 func Run(ctx context.Context, reg *registry.Registry, in io.Reader, out, errOut io.Writer) error {
+	return RunWithOptions(ctx, reg, in, out, errOut, RunOptions{})
+}
+
+func RunWithOptions(ctx context.Context, reg *registry.Registry, in io.Reader, out, errOut io.Writer, opts RunOptions) error {
 	scanner := bufio.NewScanner(in)
+	promptIn := &scannerLineReader{scanner: scanner}
 	for {
 		category, ok, err := selectCategory(reg, scanner, out)
 		if err != nil || !ok {
@@ -40,7 +51,7 @@ func Run(ctx context.Context, reg *registry.Registry, in io.Reader, out, errOut 
 		if err != nil || !ok {
 			continue
 		}
-		if err := runSelected(ctx, reg, selected, in, out, errOut); err != nil {
+		if err := runSelected(ctx, reg, selected, promptIn, out, errOut, opts); err != nil {
 			fmt.Fprintf(errOut, "执行失败: %v\n", err)
 		}
 		fmt.Fprint(out, "\n按回车返回主菜单，输入 q 退出: ")
@@ -48,6 +59,29 @@ func Run(ctx context.Context, reg *registry.Registry, in io.Reader, out, errOut 
 			return scanner.Err()
 		}
 	}
+}
+
+type scannerLineReader struct {
+	scanner *bufio.Scanner
+	pending []byte
+}
+
+func (r *scannerLineReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if len(r.pending) == 0 {
+		if !r.scanner.Scan() {
+			if err := r.scanner.Err(); err != nil {
+				return 0, err
+			}
+			return 0, io.EOF
+		}
+		r.pending = append([]byte(r.scanner.Text()), '\n')
+	}
+	n := copy(p, r.pending)
+	r.pending = r.pending[n:]
+	return n, nil
 }
 
 func selectCategory(reg *registry.Registry, scanner *bufio.Scanner, out io.Writer) (config.Category, bool, error) {
@@ -177,7 +211,7 @@ func itemsForCategory(reg *registry.Registry, categoryID string) []item {
 	return items
 }
 
-func runSelected(ctx context.Context, reg *registry.Registry, selected item, in io.Reader, out, errOut io.Writer) error {
+func runSelected(ctx context.Context, reg *registry.Registry, selected item, in io.Reader, out, errOut io.Writer, opts RunOptions) error {
 	if selected.kind == "workflow" {
 		if err := printWorkflowDetails(reg, selected.id, out); err != nil {
 			return err
@@ -193,20 +227,43 @@ func runSelected(ctx context.Context, reg *registry.Registry, selected item, in 
 		if err != nil {
 			return err
 		}
-		promptParams := config.MergeParams(defs, nil, nil)
-		if err := config.PromptMissing(defs, promptParams, in, out); err != nil {
-			return err
+		provided := config.MergeValues(config.StringMapToValues(opts.FileParams), config.StringMapToValues(opts.Overrides))
+		allValues := config.MergeValues(menuToolConfigLayers(reg, tool), provided)
+		if opts.NoPrompt {
+			if err := config.ValidateRequiredValues(defs, allValues); err != nil {
+				return err
+			}
+		} else {
+			before := config.FlattenValues(allValues)
+			promptParams := config.FlattenValues(allValues)
+			if err := config.PromptAll(defs, promptParams, in, out); err != nil {
+				return err
+			}
+			for k, v := range promptParams {
+				if strings.TrimSpace(v) == "" {
+					continue
+				}
+				if before[k] == v {
+					continue
+				}
+				if err := config.SetPathValue(provided, k, v); err != nil {
+					return err
+				}
+			}
 		}
-		params := valuesWithoutDefaults(defs, promptParams)
 		if err := config.PromptConfirmation(tool.Config.Confirm, in, out); err != nil {
 			return err
 		}
-		record, err := r.RunToolValues(ctx, selected.id, params, out, errOut)
+		record, err := r.RunToolValues(ctx, selected.id, provided, out, errOut)
 		printRecord(out, record)
 		return err
 	}
-	params := config.MergeParams(defs, nil, nil)
-	if err := config.PromptMissing(defs, params, in, out); err != nil {
+	params := config.MergeParams(defs, opts.FileParams, opts.Overrides)
+	if opts.NoPrompt {
+		if err := config.ValidateRequired(defs, params); err != nil {
+			return err
+		}
+	} else if err := config.PromptAll(defs, params, in, out); err != nil {
 		return err
 	}
 	wf, err := reg.Workflow(selected.id)
@@ -225,22 +282,12 @@ func runSelected(ctx context.Context, reg *registry.Registry, selected item, in 
 	return err
 }
 
-func valuesWithoutDefaults(defs []config.Parameter, params map[string]string) config.Values {
-	out := config.Values{}
-	for _, p := range defs {
-		value, ok := params[p.Name]
-		if !ok || isParameterDefault(p, value) {
-			continue
-		}
-		if err := config.SetPathValue(out, p.Name, value); err != nil {
-			out[p.Name] = value
-		}
-	}
-	return out
-}
-
-func isParameterDefault(param config.Parameter, value string) bool {
-	return param.Default != nil && fmt.Sprint(param.Default) == value
+func menuToolConfigLayers(reg *registry.Registry, tool *registry.Tool) config.Values {
+	return config.MergeValues(
+		config.MergeParameterDefaults(tool.Config.Parameters),
+		reg.GlobalEnv,
+		reg.Root.ConfigDefaults,
+	)
 }
 
 func confirmWorkflowTools(reg *registry.Registry, wf *config.WorkflowConfig, in io.Reader, out io.Writer) (bool, error) {

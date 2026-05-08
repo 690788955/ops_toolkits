@@ -6,9 +6,35 @@
 
 ## Parameter Prompts
 
+### Pattern: Sequential Confirmation for Interactive Parameters
+
+Interactive CLI execution should confirm every declared parameter in definition order, not only missing parameters. This applies to `opsctl run`, `opsctl start`, and `opsctl menu` paths when `--no-prompt` is not set.
+
+**Contract**:
+
+- Merge defaults, parameter files, and `--set` overrides first.
+- Prompt each parameter once, preserving the configured order.
+- Display metadata plus the current value when present.
+- Empty input keeps the current value; if no current value exists, it uses the default value.
+- Non-empty input overrides the current value for this run.
+- Required parameters that remain empty fail with `缺少必填参数 <name>`.
+- `--no-prompt` skips all parameter prompts and only validates required values.
+- Confirmation for high-risk tools/workflows still runs after parameter confirmation.
+
+**Example Output**:
+
+```text
+message 要显示的消息 (类型=string, 必填, 默认值=Hello World, 当前值=Hello World)
+请输入 [当前: Hello World]:
+```
+
+**Why**: Menu users expect CLI execution to behave like the Web execution form: all inputs are visible and can be changed before execution. Prompting only missing values silently accepts defaults and hides important runtime choices.
+
+**Location**: `internal/config/params.go`, `internal/app/app.go`, `internal/menu/menu.go`
+
 ### Pattern: Enhanced Parameter Labels
 
-When prompting for missing required parameters, display complete metadata to help operators understand what they're entering.
+When prompting for parameters, display complete metadata to help operators understand what they're entering.
 
 **Implementation**:
 
