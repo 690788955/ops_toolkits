@@ -305,3 +305,36 @@ Enhanced CLI/menu UX: list grouping, start/menu consolidation, parameter prompts
 ### Next Steps
 
 - None - task complete
+
+
+## Session 10: 移除 Web UI 结果区格式切换
+
+**Date**: 2026-05-08
+**Task**: 移除 Web UI 结果区格式切换
+**Branch**: `master`
+
+### Summary
+
+移除结果日志块上的 text/json 展示切换，避免误导用户以为运行后可转换真实输出格式。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `279481f` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
