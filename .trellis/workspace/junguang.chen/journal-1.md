@@ -338,3 +338,36 @@ Enhanced CLI/menu UX: list grouping, start/menu consolidation, parameter prompts
 ### Next Steps
 
 - None - task complete
+
+
+## Session 11: CLI 参数逐个交互确认
+
+**Date**: 2026-05-08
+**Task**: CLI 参数逐个交互确认
+**Branch**: `master`
+
+### Summary
+
+新增 CLI 逐个确认所有声明参数的交互模式，支持回车保留当前值/默认值、输入覆盖，并保持 --no-prompt 非交互行为。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2213221` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

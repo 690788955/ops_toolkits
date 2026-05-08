@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 10
+- **Total Sessions**: 11
 - **Last Active**: 2026-05-08
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~340 | Active |
+| `journal-1.md` | ~373 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 11 | 2026-05-08 | CLI 参数逐个交互确认 | `2213221` | `master` |
 | 10 | 2026-05-08 | 移除 Web UI 结果区格式切换 | `279481f` | `master` |
 | 9 | 2026-05-08 | Web UI 添加输出格式切换控件 | `dad4c99` | `master` |
 | 8 | 2026-05-08 | 交互式参数输入引导改进 | `f530ccc` | `master` |
