@@ -63,6 +63,7 @@ func selectCategory(reg *registry.Registry, scanner *bufio.Scanner, out io.Write
 			}
 			fmt.Fprintln(out)
 		}
+		fmt.Fprintln(out)
 		fmt.Fprintln(out, "q) 退出")
 		fmt.Fprint(out, "选择: ")
 		if !scanner.Scan() {
@@ -96,6 +97,7 @@ func selectItem(reg *registry.Registry, categoryID string, scanner *bufio.Scanne
 			}
 			fmt.Fprintln(out)
 		}
+		fmt.Fprintln(out)
 		fmt.Fprintln(out, "s) 搜索")
 		fmt.Fprintln(out, "b) 返回上级")
 		fmt.Fprintln(out, "q) 退出")
