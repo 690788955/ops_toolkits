@@ -1469,38 +1469,10 @@ function RunDetail({detail, run}) {
 }
 
 function LogBlock({title, value}) {
-  const [format, setFormat] = useState('text')
-
-  let displayContent = value || '无日志内容'
-  if (format === 'json' && value) {
-    try {
-      const parsed = JSON.parse(value)
-      displayContent = JSON.stringify(parsed, null, 2)
-    } catch (e) {
-      displayContent = value
-    }
-  }
-
   return (
     <div className="logBlock">
-      <div className="logBlockHeader">
-        <h4>{title}</h4>
-        <div className="logFormatTabs">
-          <button
-            className={format === 'text' ? 'tab active' : 'tab'}
-            onClick={() => setFormat('text')}
-          >
-            text
-          </button>
-          <button
-            className={format === 'json' ? 'tab active' : 'tab'}
-            onClick={() => setFormat('json')}
-          >
-            json
-          </button>
-        </div>
-      </div>
-      <pre>{displayContent}</pre>
+      <h4>{title}</h4>
+      <pre>{value || '无日志内容'}</pre>
     </div>
   )
 }
