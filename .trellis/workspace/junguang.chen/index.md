@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 3
-- **Last Active**: 2026-05-07
+- **Total Sessions**: 4
+- **Last Active**: 2026-05-08
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~109 | Active |
+| `journal-1.md` | ~142 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 4 | 2026-05-08 | Support Ansible plugin runtimes | `80619a0` | `master` |
 | 3 | 2026-05-07 | 修正插件模板 SPEC config_dir 说明 | `e5fcc62` | `master` |
 | 2 | 2026-05-07 | 支持宿主配置文件映射 | `9d48033`, `233063e` | `master` |
 | 1 | 2026-04-29 | Improve workflow canvas branch handling | `4ad9471`, `7b97642`, `48e9dae` | `master` |
