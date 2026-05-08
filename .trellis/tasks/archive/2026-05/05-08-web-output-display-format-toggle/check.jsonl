@@ -1,0 +1,2 @@
+{"path":".trellis/spec/frontend/component-guidelines.md","why":"检查 LogBlock 是否保持简单、无多余状态和误导性控件"}
+{"path":".trellis/spec/frontend/quality-guidelines.md","why":"检查前端构建和浏览器验证是否完成"}
