@@ -1,0 +1,3 @@
+{"path": ".trellis/spec/backend/cli-interaction-patterns.md", "why": "检查输出格式规范是否需要更新"}
+{"path": "web/src/main.jsx", "why": "检查 LogBlock 组件的实现是否正确"}
+{"path": "web/src/styles.css", "why": "检查样式是否正确应用"}
