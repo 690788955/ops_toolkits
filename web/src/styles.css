@@ -348,6 +348,9 @@ input:disabled { color: var(--color-muted); background: var(--color-bg); }
 .runSummary { display: flex; flex-wrap: wrap; gap: 10px; }
 .runSummary span { padding: 8px 12px; font-size: 13px; font-weight: 700; }
 .logBlock, .stepLogs { display: grid; gap: 8px; }
+.logBlockHeader { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.logFormatTabs { display: flex; gap: 6px; }
+.logFormatTabs .tab { padding: 6px 12px; font-size: 12px; }
 .logBlock h4, .stepLogs h4 { margin: 0; color: var(--color-text); font-size: 14px; font-weight: 800; }
 details summary { cursor: pointer; color: var(--color-link); font-weight: 800; }
 
