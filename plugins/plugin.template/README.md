@@ -71,6 +71,8 @@ contributes:
         required: false
 ```
 
+`command` 带 `/` 或 `\\` 时必须指向插件目录内文件；裸命令名（如 `java`、`ansible-playbook`）只有在管理员把它加入 `configs/ops.yaml` 的 `plugins.allowed_commands` 后才会通过运行环境 PATH 执行。不要把 shell 拼接字符串写进 `command`，参数应继续放在 `args` 数组里。
+
 ## 配置文件功能
 
 ### 什么时候使用配置文件？
@@ -96,9 +98,9 @@ plugins/plugin.mycompany.mytool/
     └── run.sh
 ```
 
-**2. 在 plugin.yaml 中声明插件内配置基准目录和相对项**
+**2. 在 plugin.yaml 中声明配置基准目录和相对项**
 
-推荐新版写法：用 `config_dir` 指定插件内基准目录，`config_files` 只写相对文件或相对目录项。
+推荐新版写法：用 `config_dir` 指定相对插件目录的配置基准目录，`config_files` 只写相对该基准目录的文件或目录项。
 
 ```yaml
 tools:
@@ -122,17 +124,17 @@ config_files:
 
 配置文件声明规则：
 
-- 插件 manifest 里的 `config_files` 仍只表示插件包内配置，不授予任意宿主文件访问能力。
+- 插件 manifest 里的 `config_dir` 是配置基准目录：相对路径按插件目录解析，可以写 `config`，内部场景也可以谨慎写 `../../shared-config` 指向仓库/工作区共享配置目录；绝对路径按当前平台 `filepath.IsAbs` 识别并直接作为基准目录。
 - 未声明 `config_dir` 时，新短文件名默认以插件 `config/` 目录作为基准；旧 `config/...` 路径保持兼容。
 - 声明了 `config_dir` 后，`config_files` / `path` 只写相对文件或相对目录项，例如 `example.conf`、`profiles/dev.env`、`profiles`。
 - `config_files` 可以声明目录项；Web/API 列表会展开该目录下一层普通文件，不递归扫描子目录。
-- `config_dir` 和 `config_files` 都不能使用 `..` 逃逸；`config_files` 不能写绝对路径。
-- 插件包本身不能直接声明 `/etc/...`、`C:\\...` 等任意宿主绝对路径。
+- `config_files` 不能写绝对路径，也不能使用 `..` 或其他方式逃逸最终解析出的 `config_dir`。
+- 如果需要集中管控宿主机器绝对路径配置，也可以由管理员用 host-side mapping 显式启用，并配置对应白名单和访问权限。
 - `config_files` 只声明页面可以编辑哪些配置文件；框架不会自动传参、复制或生成配置文件，工具脚本应按自己的逻辑读取这些文件。
 
 **3. 如需编辑宿主机器绝对路径配置，由管理员在宿主侧显式映射**
 
-宿主绝对路径属于更高风险能力，不应写进插件包默认 `plugin.yaml`。插件作者可以在 README 中说明建议映射方式，实际启用必须由管理员在框架配置和 host-side mapping 中声明。
+如果宿主绝对路径配置需要平台白名单、只读/可写权限或稳定文件 ID 管控，插件作者可以在 README 中说明建议映射方式，由管理员在框架配置和 host-side mapping 中声明。
 
 框架全局配置先声明允许访问的宿主目录白名单，只支持目录，不支持单文件白名单：
 
@@ -210,7 +212,7 @@ fi
 - 新写法声明 `config_dir: config` + `example.conf` 时，页面编辑 `plugins/{plugin-id}/config/example.conf`
 - 旧写法声明 `config/example.conf` 时，页面同样编辑 `plugins/{plugin-id}/config/example.conf`
 - 声明目录项时，页面会展开该目录下一层普通文件，不递归扫描子目录
-- 插件内路径必须留在插件目录内，不能使用绝对路径或 `..` 逃逸
+- `config_dir` 可以是相对插件目录或当前平台可识别的绝对路径；`config_files`/`path` 必须留在最终解析出的 `config_dir` 内，不能使用绝对路径或 `..` 逃逸
 
 同一插件的多个工具可以共享同一个配置文件声明。
 
@@ -350,8 +352,8 @@ exit 0
 - [ ] `plugin.yaml` 信息完整
 - [ ] 工具脚本可执行
 - [ ] 参数定义正确
-- [ ] 插件内配置文件路径已在 `config_dir` / `config_files` 中声明，且只使用插件内相对项
-- [ ] 如需宿主绝对路径配置文件，已在 README 或 `examples/host-absolute.mapping.yaml` 给出管理员 mapping 示例，且未在插件默认清单中直接启用宿主路径
+- [ ] 配置文件路径已在 `config_dir` / `config_files` 中声明，`config_dir` 使用相对插件目录或当前平台可识别的绝对路径，`config_files` 只使用不逃逸最终基准目录的相对项
+- [ ] 如需平台集中管控宿主绝对路径配置，已在 README 或 `examples/host-absolute.mapping.yaml` 给出管理员 mapping 示例
 - [ ] README.md 文档完善
 - [ ] 示例文件齐全
 
@@ -404,7 +406,7 @@ A: 不会。`config_files` 只用于 Web 配置页面展示和编辑声明文件
 
 ### Q: 插件能否直接声明宿主绝对路径配置文件？
 
-A: 不能。插件包默认清单只能声明插件目录内配置文件。宿主绝对路径必须由管理员通过 `configs/ops.yaml` 的 `host_config_files.allowed_dirs` 白名单和 `configs/plugins/<plugin-id>.mapping.yaml` 中的 `scope: host_absolute` 显式启用，并受 `access`、`create` 和 OS 权限共同限制。
+A: 可以。`config_dir` 支持当前平台可识别的绝对路径，并直接作为配置基准目录；但 `config_files` / `path` 仍必须是相对项，不能逃逸最终基准目录。若需要白名单、只读/可写权限或稳定文件 ID 管控，可由管理员通过 `configs/ops.yaml` 的 `host_config_files.allowed_dirs` 和 `configs/plugins/<plugin-id>.mapping.yaml` 中的 `scope: host_absolute` 显式启用。
 
 ### Q: 如何调试配置文件读取？
 

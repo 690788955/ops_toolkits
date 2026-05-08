@@ -68,6 +68,63 @@ func TestCatalogAPIIncludesTags(t *testing.T) {
 	}
 }
 
+func TestCatalogAPIKeepsPluginToolDeclarationOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeTestRootConfig(t, dir)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.order", "scripts", "run.sh"), "#!/usr/bin/env bash\necho order\n")
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.order", "plugin.yaml"), `id: vendor.order
+name: Ordered Tools
+version: 1.0.0
+contributes:
+  categories:
+    - id: ordered
+      name: 有序工具
+  tools:
+    - id: vendor.order.third
+      name: 第三个字母工具
+      category: ordered
+      command: scripts/run.sh
+    - id: vendor.order.first
+      name: 第一个字母工具
+      category: ordered
+      command: scripts/run.sh
+    - id: vendor.order.second
+      name: 第二个字母工具
+      category: ordered
+      command: scripts/run.sh
+`)
+	reg, err := registry.Load(dir)
+	if err != nil {
+		t.Fatalf("加载注册表失败: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Data struct {
+			Tools []struct {
+				ID string `json:"id"`
+			} `json:"tools"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析 catalog 响应失败: %v", err)
+	}
+	got := []string{}
+	for _, tool := range body.Data.Tools {
+		got = append(got, tool.ID)
+	}
+	want := []string{"vendor.order.third", "vendor.order.first", "vendor.order.second"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("catalog 工具顺序 = %v, want %v", got, want)
+	}
+}
+
 func TestWorkflowDetailAPI(t *testing.T) {
 	reg := testRegistry(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/demo.flow", nil)
@@ -502,6 +559,70 @@ func TestPluginUploadInstallsNewPluginAndRefreshesCatalog(t *testing.T) {
 	handler.ServeHTTP(catalogRes, catalogReq)
 	if !strings.Contains(catalogRes.Body.String(), "vendor.upload.tool") {
 		t.Fatalf("catalog 缺少上传插件贡献: %s", catalogRes.Body.String())
+	}
+}
+
+func TestPluginUploadReloadKeepsPluginToolDeclarationOrder(t *testing.T) {
+	reg := testRegistry(t)
+	req := pluginUploadRequest(t, pluginZipWithToolIDs(t, "vendor.uploadorder", "1.0.0", []string{"third", "first", "second"}), false)
+	res := httptest.NewRecorder()
+	handler := NewHandler(reg)
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", res.Code, res.Body.String())
+	}
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if catalogRes.Code != http.StatusOK {
+		t.Fatalf("catalog status = %d, body = %s", catalogRes.Code, catalogRes.Body.String())
+	}
+	var body struct {
+		Data struct {
+			Tools []struct {
+				ID string `json:"id"`
+			} `json:"tools"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(catalogRes.Body.Bytes(), &body); err != nil {
+		t.Fatalf("解析 catalog 响应失败: %v", err)
+	}
+	got := []string{}
+	for _, tool := range body.Data.Tools {
+		got = append(got, tool.ID)
+	}
+	want := []string{"vendor.uploadorder.third", "vendor.uploadorder.first", "vendor.uploadorder.second"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("上传 reload 后 catalog 工具顺序 = %v, want %v", got, want)
+	}
+}
+
+func TestPluginUploadAcceptsAllowedBareCommand(t *testing.T) {
+	reg := testRegistry(t)
+	reg.Root.Plugins.AllowedCommands = []string{"ansible-playbook"}
+	rootConfig := filepath.Join(reg.BaseDir, "configs", "ops.yaml")
+	content, err := os.ReadFile(rootConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = []byte(strings.Replace(string(content), "  disabled: []\n", "  disabled: []\n  allowed_commands:\n    - ansible-playbook\n", 1))
+	if err := os.WriteFile(rootConfig, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := pluginUploadRequest(t, pluginZipWithCommand(t, "vendor.pathupload", "1.0.0", "ansible-playbook"), false)
+	res := httptest.NewRecorder()
+	handler := NewHandler(reg)
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if !strings.Contains(catalogRes.Body.String(), "vendor.pathupload.tool") {
+		t.Fatalf("catalog 缺少 PATH command 上传插件贡献: %s", catalogRes.Body.String())
 	}
 }
 
@@ -1523,6 +1644,154 @@ func TestPluginConfigFilesEditDeclaredPluginFile(t *testing.T) {
 	}
 }
 
+func TestPluginConfigFilesEditPluginFileOutsidePluginDir(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, "plugins", "vendor.externalconfig")
+	sharedDir := filepath.Join(dir, "shared-config")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(sharedDir, "app.conf")
+	if err := os.WriteFile(configPath, []byte("old=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{},
+		Tools: map[string]*registry.Tool{
+			"vendor.externalconfig.run": {
+				Entry: config.ToolEntry{ID: "vendor.externalconfig.run"},
+				Config: &config.ToolConfig{
+					ID: "vendor.externalconfig.run",
+					ConfigFileRefs: []config.ConfigFileRef{
+						{ID: "app.conf", ConfigDir: "../../shared-config", Path: "app.conf", Scope: config.ConfigFileScopePlugin, Access: config.ConfigFileAccessReadWrite, Create: true},
+					},
+					PluginConfig: config.PluginToolConfig{
+						ID:  "vendor.externalconfig",
+						Dir: pluginDir,
+					},
+				},
+				Dir:    pluginDir,
+				Source: registry.Source{Type: "plugin", PluginID: "vendor.externalconfig"},
+			},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	handler := NewHandler(reg)
+
+	getRes := httptest.NewRecorder()
+	handler.ServeHTTP(getRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.externalconfig/files/app.conf", nil))
+	if getRes.Code != http.StatusOK || !strings.Contains(getRes.Body.String(), "old=true") {
+		t.Fatalf("get status = %d, body = %s", getRes.Code, getRes.Body.String())
+	}
+
+	putRes := httptest.NewRecorder()
+	handler.ServeHTTP(putRes, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.externalconfig/files/app.conf", strings.NewReader(`{"content":"new=true\n"}`)))
+	if putRes.Code != http.StatusOK {
+		t.Fatalf("put status = %d, body = %s", putRes.Code, putRes.Body.String())
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "new=true\n" {
+		t.Fatalf("external plugin config file = %q", content)
+	}
+}
+
+func TestPluginConfigFilesEditPluginFileWithAbsoluteConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	pluginDir := filepath.Join(dir, "plugins", "vendor.absoluteconfig")
+	absoluteConfigDir := filepath.Join(dir, "absolute-config")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(absoluteConfigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(absoluteConfigDir, "app.conf")
+	if err := os.WriteFile(configPath, []byte("old=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{},
+		Tools: map[string]*registry.Tool{
+			"vendor.absoluteconfig.run": {
+				Entry: config.ToolEntry{ID: "vendor.absoluteconfig.run"},
+				Config: &config.ToolConfig{
+					ID: "vendor.absoluteconfig.run",
+					ConfigFileRefs: []config.ConfigFileRef{
+						{ID: "app.conf", ConfigDir: absoluteConfigDir, Path: "app.conf", Scope: config.ConfigFileScopePlugin, Access: config.ConfigFileAccessReadWrite, Create: true},
+					},
+					PluginConfig: config.PluginToolConfig{
+						ID:  "vendor.absoluteconfig",
+						Dir: pluginDir,
+					},
+				},
+				Dir:    pluginDir,
+				Source: registry.Source{Type: "plugin", PluginID: "vendor.absoluteconfig"},
+			},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	handler := NewHandler(reg)
+
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.absoluteconfig/files", nil))
+	if listRes.Code != http.StatusOK || !strings.Contains(listRes.Body.String(), `"config_dir":"`+strings.ReplaceAll(absoluteConfigDir, `\`, `\\`)+`"`) {
+		t.Fatalf("list status = %d, body = %s", listRes.Code, listRes.Body.String())
+	}
+
+	getRes := httptest.NewRecorder()
+	handler.ServeHTTP(getRes, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.absoluteconfig/files/app.conf", nil))
+	if getRes.Code != http.StatusOK || !strings.Contains(getRes.Body.String(), "old=true") {
+		t.Fatalf("get status = %d, body = %s", getRes.Code, getRes.Body.String())
+	}
+
+	putRes := httptest.NewRecorder()
+	handler.ServeHTTP(putRes, httptest.NewRequest(http.MethodPut, "/api/plugins/vendor.absoluteconfig/files/app.conf", strings.NewReader(`{"content":"new=true\n"}`)))
+	if putRes.Code != http.StatusOK {
+		t.Fatalf("put status = %d, body = %s", putRes.Code, putRes.Body.String())
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "new=true\n" {
+		t.Fatalf("absolute plugin config file = %q", content)
+	}
+
+	unsafeReg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{},
+		Tools: map[string]*registry.Tool{
+			"vendor.absoluteconfig.bad": {
+				Entry: config.ToolEntry{ID: "vendor.absoluteconfig.bad"},
+				Config: &config.ToolConfig{
+					ID: "vendor.absoluteconfig.bad",
+					ConfigFileRefs: []config.ConfigFileRef{
+						{ID: "escape", ConfigDir: absoluteConfigDir, Path: "../secret.conf", Scope: config.ConfigFileScopePlugin, Access: config.ConfigFileAccessReadWrite, Create: true},
+					},
+					PluginConfig: config.PluginToolConfig{ID: "vendor.absoluteconfig", Dir: pluginDir},
+				},
+				Dir:    pluginDir,
+				Source: registry.Source{Type: "plugin", PluginID: "vendor.absoluteconfig"},
+			},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	unsafeHandler := NewHandler(unsafeReg)
+	unsafeGet := httptest.NewRecorder()
+	unsafeHandler.ServeHTTP(unsafeGet, httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.absoluteconfig/files/escape", nil))
+	if unsafeGet.Code != http.StatusBadRequest || !strings.Contains(unsafeGet.Body.String(), "不能逃逸") {
+		t.Fatalf("unsafe get status = %d, body = %s", unsafeGet.Code, unsafeGet.Body.String())
+	}
+}
+
 func TestPluginConfigFilesHostAbsoluteAccessControls(t *testing.T) {
 	dir := t.TempDir()
 	hostDir := filepath.Join(dir, "host")
@@ -1866,12 +2135,56 @@ func pluginZip(t *testing.T, id, version string, renamedTool bool) []byte {
 	return body.Bytes()
 }
 
+func pluginZipWithToolIDs(t *testing.T, id, version string, toolSuffixes []string) []byte {
+	t.Helper()
+	var body bytes.Buffer
+	writer := zip.NewWriter(&body)
+	var manifest strings.Builder
+	manifest.WriteString(`id: ` + id + `
+name: Upload Order Test
+version: ` + version + `
+contributes:
+  categories:
+    - id: upload
+      name: 上传插件
+  tools:
+`)
+	for _, suffix := range toolSuffixes {
+		manifest.WriteString(`    - id: ` + id + `.` + suffix + `
+      name: ` + suffix + `
+      category: upload
+      command: scripts/run.sh
+      workdir: .
+`)
+	}
+	writeZipFile(t, writer, id+"/plugin.yaml", manifest.String())
+	writeZipFile(t, writer, id+"/scripts/run.sh", "#!/usr/bin/env bash\necho uploaded\n")
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return body.Bytes()
+}
+
 func pluginZipWithMissingConfig(t *testing.T, id, version string) []byte {
 	t.Helper()
 	var body bytes.Buffer
 	writer := zip.NewWriter(&body)
 	manifest, script := pluginFiles(id, version, false)
 	manifest = strings.Replace(manifest, "      workdir: .\n", "      workdir: .\n      config_files:\n        - config/missing.conf\n", 1)
+	writeZipFile(t, writer, id+"/plugin.yaml", manifest)
+	writeZipFile(t, writer, id+"/scripts/run.sh", script)
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return body.Bytes()
+}
+
+func pluginZipWithCommand(t *testing.T, id, version, command string) []byte {
+	t.Helper()
+	var body bytes.Buffer
+	writer := zip.NewWriter(&body)
+	manifest, script := pluginFiles(id, version, false)
+	manifest = strings.Replace(manifest, "      command: scripts/run.sh\n", "      command: "+command+"\n", 1)
 	writeZipFile(t, writer, id+"/plugin.yaml", manifest)
 	writeZipFile(t, writer, id+"/scripts/run.sh", script)
 	if err := writer.Close(); err != nil {

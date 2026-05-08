@@ -40,6 +40,34 @@ echo danger
 	}
 }
 
+func TestRunToolUsesBarePathCommand(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := filepath.Join(dir, "plugins", "vendor.pathcmd")
+	if err := os.MkdirAll(toolDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := toolConfig("vendor.pathcmd.run")
+	cfg.Execution.Entry = "go"
+	cfg.Execution.Args = []string{"version"}
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"vendor.pathcmd.run": {Entry: config.ToolEntry{ID: "vendor.pathcmd.run", Category: "demo"}, Config: cfg, Dir: toolDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+
+	record, err := New(reg).RunTool(context.Background(), "vendor.pathcmd.run", nil, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunTool error: %v", err)
+	}
+	stdout := readFile(t, filepath.Join(dir, "runs", "logs", record.ID, "stdout.log"))
+	if !strings.Contains(stdout, "go version") {
+		t.Fatalf("stdout = %q, want go version", stdout)
+	}
+}
+
 func TestRunWorkflowPassesUpstreamParamsAndOutput(t *testing.T) {
 	dir := t.TempDir()
 	producerDir := writeTool(t, dir, "producer", `#!/usr/bin/env bash

@@ -10,7 +10,11 @@
 #     - /etc/myapp
 #     - C:\\ProgramData\\Vendor\\MyApp
 #
-# 白名单只支持目录；最终文件路径以及符号链接解析后的真实路径也必须仍在白名单内。
+# 如需映射工作区级 Ansible inventory/vars，也使用相同机制：
+# - host_config_files.allowed_dirs 指向受信任工作区目录
+# - mapping 使用 scope: host_absolute
+# - config_dir 写白名单内绝对目录，path 只写相对文件项
+# 不要在插件 plugin.yaml 中用 config_dir: ../.. 逃逸插件目录。
 
 tools:
   plugin.mycompany.mytool.action:

@@ -1203,6 +1203,7 @@ pre {
 .pluginConfigEditor { display: grid; gap: 16px; }
 .pluginConfigEditor label span { display: block; margin-bottom: 8px; color: var(--color-text); font-size: 14px; font-weight: 800; }
 .pluginConfigEditor textarea { min-height: 420px; }
+.pluginConfigEditor .smallTextarea { min-height: 104px; }
 
 .paginationBar {
   display: flex;

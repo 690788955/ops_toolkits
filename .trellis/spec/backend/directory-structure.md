@@ -105,7 +105,7 @@ contributes:
 Plugin rules:
 
 - Tool IDs must start with `<plugin-id>.`.
-- `command` and `workdir` must stay inside the plugin directory.
+- Path-like `command` values and `workdir` must stay inside the plugin directory; bare `command` names are allowed only when configured in `plugins.allowed_commands`.
 - `strict: false` skips bad plugins with warnings; `strict: true` fails validation/startup.
 - `disabled` accepts plugin IDs or plugin directory names.
 

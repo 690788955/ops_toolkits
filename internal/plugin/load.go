@@ -41,7 +41,7 @@ func Load(baseDir string, cfg config.PluginsConfig) (LoadResult, error) {
 				continue
 			}
 			if err == nil {
-				err = ValidatePackage(pkg)
+				err = ValidatePackageWithConfig(pkg, cfg)
 			}
 			if err != nil {
 				if loadErr := handleLoadError(&result, cfg.Strict, err); loadErr != nil {
@@ -74,6 +74,10 @@ func loadPackage(dir string) (Package, error) {
 }
 
 func ValidatePackage(pkg Package) error {
+	return ValidatePackageWithConfig(pkg, config.PluginsConfig{})
+}
+
+func ValidatePackageWithConfig(pkg Package, cfg config.PluginsConfig) error {
 	if err := validatePluginID(pkg.Manifest.ID, pkg.Path); err != nil {
 		return err
 	}
@@ -85,7 +89,7 @@ func ValidatePackage(pkg Package) error {
 	}
 	seenTools := map[string]bool{}
 	for _, tool := range pkg.Manifest.Contributes.Tools {
-		if err := validateTool(pkg, tool, seenTools); err != nil {
+		if err := validateTool(pkg, tool, seenTools, cfg); err != nil {
 			return err
 		}
 	}
@@ -109,7 +113,7 @@ func validatePluginID(id, path string) error {
 	return nil
 }
 
-func validateTool(pkg Package, tool Tool, seen map[string]bool) error {
+func validateTool(pkg Package, tool Tool, seen map[string]bool, cfg config.PluginsConfig) error {
 	if strings.TrimSpace(tool.ID) == "" {
 		return fmt.Errorf("插件 %s 的工具 ID 必填", pkg.Manifest.ID)
 	}
@@ -126,14 +130,19 @@ func validateTool(pkg Package, tool Tool, seen map[string]bool) error {
 	if strings.TrimSpace(tool.Command) == "" {
 		return fmt.Errorf("插件工具 %s 的 command 必填", tool.ID)
 	}
-	commandPath, err := SafePath(pkg.Dir, tool.Command)
-	if err != nil {
-		return fmt.Errorf("插件工具 %s 的 command 不安全: %w", tool.ID, err)
-	}
-	if info, err := os.Stat(commandPath); err != nil {
-		return fmt.Errorf("插件工具 %s 的 command 不存在: %w", tool.ID, err)
-	} else if info.IsDir() {
-		return fmt.Errorf("插件工具 %s 的 command 不能是目录", tool.ID)
+	if commandHasPath(tool.Command) {
+		if err := validatePluginCommandFile(pkg, tool); err != nil {
+			return err
+		}
+	} else if !commandAllowed(cfg, tool.Command) {
+		localTool := tool
+		localTool.Command = strings.TrimSpace(tool.Command)
+		if err := validatePluginCommandFile(pkg, localTool); err != nil {
+			if filepath.Ext(localTool.Command) != "" {
+				return err
+			}
+			return fmt.Errorf("插件工具 %s 的 PATH command %s 未在 plugins.allowed_commands 中允许", tool.ID, tool.Command)
+		}
 	}
 	if tool.Workdir != "" {
 		if _, err := SafePath(pkg.Dir, tool.Workdir); err != nil {
@@ -145,19 +154,13 @@ func validateTool(pkg Package, tool Tool, seen map[string]bool) error {
 	if configDir == "" {
 		configDir = "config"
 	}
-	if filepath.IsAbs(configDir) {
-		return fmt.Errorf("插件工具 %s 的 config_dir 不能是绝对路径", tool.ID)
-	}
-	configDirPath, err := SafePath(pkg.Dir, configDir)
+	configDirPath, err := ResolveConfigDir(pkg.Dir, configDir)
 	if err != nil {
 		return fmt.Errorf("插件工具 %s 的 config_dir 不安全: %w", tool.ID, err)
 	}
 	for _, cf := range tool.ConfigFiles {
-		if strings.TrimSpace(cf) == "" {
-			return fmt.Errorf("插件工具 %s 的 config_files 包含空文件名", tool.ID)
-		}
-		if filepath.IsAbs(cf) {
-			return fmt.Errorf("插件工具 %s 的 config_files 不能是绝对路径: %s", tool.ID, cf)
+		if err := validateConfigFileRelativeItem(cf); err != nil {
+			return fmt.Errorf("插件工具 %s 的 config_files 路径不安全: %w", tool.ID, err)
 		}
 		basePath := configDirPath
 		if !configDirSpecified && legacyConfigFilePath(cf) {
@@ -177,6 +180,55 @@ func validateTool(pkg Package, tool Tool, seen map[string]bool) error {
 func legacyConfigFilePath(path string) bool {
 	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
 	return clean == "config" || strings.HasPrefix(clean, "config/")
+}
+
+func validateConfigFileRelativeItem(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("不能为空")
+	}
+	if filepath.IsAbs(path) {
+		return fmt.Errorf("不能是绝对路径")
+	}
+	clean := filepath.Clean(filepath.FromSlash(path))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("不能逃逸 config_dir")
+	}
+	for _, part := range strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("包含不安全路径片段")
+		}
+	}
+	return nil
+}
+
+func validatePluginCommandFile(pkg Package, tool Tool) error {
+	commandPath, err := SafePath(pkg.Dir, tool.Command)
+	if err != nil {
+		return fmt.Errorf("插件工具 %s 的 command 不安全: %w", tool.ID, err)
+	}
+	if info, err := os.Stat(commandPath); err != nil {
+		return fmt.Errorf("插件工具 %s 的 command 不存在: %w", tool.ID, err)
+	} else if info.IsDir() {
+		return fmt.Errorf("插件工具 %s 的 command 不能是目录", tool.ID)
+	}
+	return nil
+}
+
+func commandHasPath(command string) bool {
+	return strings.ContainsAny(command, `/\\`)
+}
+
+func commandAllowed(cfg config.PluginsConfig, command string) bool {
+	command = strings.TrimSpace(command)
+	if command == "" || command == "." || command == ".." || commandHasPath(command) {
+		return false
+	}
+	for _, allowed := range cfg.AllowedCommands {
+		if strings.TrimSpace(allowed) == command {
+			return true
+		}
+	}
+	return false
 }
 
 func validateWorkflow(pkg Package, workflow Workflow, seen map[string]bool) error {
@@ -268,7 +320,7 @@ func toolWarnings(pkg Package, tool Tool) []Warning {
 	if configDir == "" {
 		configDir = "config"
 	}
-	configDirPath, err := SafePath(pkg.Dir, configDir)
+	configDirPath, err := ResolveConfigDir(pkg.Dir, configDir)
 	if err != nil {
 		return warnings
 	}
@@ -288,7 +340,7 @@ func toolWarnings(pkg Package, tool Tool) []Warning {
 				ToolID:     toolID,
 				Field:      "config_files",
 				Message:    fmt.Sprintf("插件工具 %s 声明的配置文件 %s 不存在", toolID, cf),
-				Suggestion: "请把该配置文件放入插件目录，或从 config_files 中移除未交付的声明。",
+				Suggestion: "请把该配置文件放入 config_dir 解析出的目录，或从 config_files 中移除未交付的声明。",
 			})
 		}
 	}
@@ -327,6 +379,34 @@ func SafePath(root, rel string) (string, error) {
 		return "", fmt.Errorf("路径逃逸插件目录 %s", rel)
 	}
 	return pathAbs, nil
+}
+
+func SafeRelativePath(root, rel string) (string, error) {
+	if strings.TrimSpace(rel) == "" {
+		return "", fmt.Errorf("相对路径不能为空")
+	}
+	if filepath.IsAbs(rel) {
+		return "", fmt.Errorf("不允许绝对路径 %s", rel)
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	pathAbs, err := filepath.Abs(filepath.Join(rootAbs, filepath.FromSlash(rel)))
+	if err != nil {
+		return "", err
+	}
+	return pathAbs, nil
+}
+
+func ResolveConfigDir(root, dir string) (string, error) {
+	if strings.TrimSpace(dir) == "" {
+		return "", fmt.Errorf("config_dir 不能为空")
+	}
+	if filepath.IsAbs(dir) {
+		return filepath.Abs(filepath.Clean(dir))
+	}
+	return SafeRelativePath(root, dir)
 }
 
 func disabledSet(values []string) map[string]bool {

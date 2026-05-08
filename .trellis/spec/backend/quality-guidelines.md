@@ -30,7 +30,7 @@ If the Web UI changes, `npm run build --prefix web` must be run so `internal/ser
 - Plugin ZIP extraction must accept normal directory entries such as `vendor.backup/` while still rejecting traversal, absolute paths, symlinks, and special files.
 - Plugin template/dev-kit documentation must focus on plugin authoring only: plugin structure, manifest fields, script parameters, workflows, confirmation, validation, packaging, upload, and troubleshooting.
 - Plugin template demo content must be a copyable standard plugin sample, not a toy hello-world: include complete manifest metadata, normal and high-risk tool examples, workflow contribution, robust script patterns, confirm metadata, README handoff notes, and examples.
-- Plugin `command` and `workdir` paths must be validated to stay inside the plugin directory.
+- Plugin path-like `command` values and `workdir` paths must be validated to stay inside the plugin directory; bare `command` names may run through PATH only when listed in `plugins.allowed_commands`.
 - High-risk tools must use `confirm.required`; runner must reject unconfirmed workflow tool nodes as a safety backstop.
 - Workflows stop on first failed step in MVP.
 - Interactive CLI menu may synthesize menu-only pseudo categories such as `__all__` (`全局/全部`) for operator navigation, but pseudo categories must not be written into `config.RootConfig`, plugin manifests, HTTP catalog output, or `opsctl list` data.

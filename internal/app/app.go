@@ -56,8 +56,8 @@ func listCommand(opts *options) *cobra.Command {
 			return err
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "工具:")
-		for id, tool := range reg.Tools {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s\t%s\n", id, tool.Entry.Description)
+		for _, tool := range reg.OrderedTools() {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s\t%s\n", tool.Entry.ID, tool.Entry.Description)
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "工作流:")
 		for id, wf := range reg.Workflows {

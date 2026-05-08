@@ -99,6 +99,68 @@ contributes:
 	}
 }
 
+func TestOrderedToolsKeepsBuiltinsThenPluginDeclarationOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeRoot(t, dir, `plugins:
+  paths: [plugins]
+  strict: true
+tools:
+  - path: tools/builtin/zeta
+  - path: tools/builtin/alpha
+`)
+	writeFile(t, filepath.Join(dir, "tools", "builtin", "zeta", "tool.yaml"), `id: builtin.zeta
+name: Builtin Zeta
+category: builtin
+execution:
+  entry: run.sh
+`, 0o644)
+	writeFile(t, filepath.Join(dir, "tools", "builtin", "alpha", "tool.yaml"), `id: builtin.alpha
+name: Builtin Alpha
+category: builtin
+execution:
+  entry: run.sh
+`, 0o644)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.first", "scripts", "run.sh"), "#!/usr/bin/env bash\necho first\n", 0o755)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.first", "plugin.yaml"), `id: vendor.first
+name: First
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.first.zeta
+      category: ordered
+      command: scripts/run.sh
+    - id: vendor.first.alpha
+      category: ordered
+      command: scripts/run.sh
+`, 0o644)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.second", "scripts", "run.sh"), "#!/usr/bin/env bash\necho second\n", 0o755)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.second", "plugin.yaml"), `id: vendor.second
+name: Second
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.second.beta
+      category: ordered
+      command: scripts/run.sh
+    - id: vendor.second.gamma
+      category: ordered
+      command: scripts/run.sh
+`, 0o644)
+
+	reg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	got := []string{}
+	for _, tool := range reg.OrderedTools() {
+		got = append(got, tool.Entry.ID)
+	}
+	want := []string{"builtin.zeta", "builtin.alpha", "vendor.first.zeta", "vendor.first.alpha", "vendor.second.beta", "vendor.second.gamma"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("OrderedTools = %v, want %v", got, want)
+	}
+}
+
 func TestLoadPluginLayeredConfigMetadata(t *testing.T) {
 	dir := t.TempDir()
 	writeRoot(t, dir, `config_defaults:
@@ -241,6 +303,112 @@ contributes:
 }
 */
 
+func TestLoadNormalizesExternalPluginConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	writeRoot(t, dir, `plugins:
+  paths: [plugins]
+  strict: true
+`)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.shared", "scripts", "run.sh"), "#!/usr/bin/env bash\necho run\n", 0o755)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.shared", "plugin.yaml"), `id: vendor.shared
+name: Shared
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.shared.run
+      category: shared
+      command: scripts/run.sh
+      config_dir: ../../shared-config
+      config_files:
+        - app.conf
+`, 0o644)
+
+	reg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	tool, err := reg.Tool("vendor.shared.run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tool.Config.ConfigDir != "../../shared-config" {
+		t.Fatalf("ConfigDir = %q, want ../../shared-config", tool.Config.ConfigDir)
+	}
+	if len(tool.Config.ConfigFileRefs) != 1 || tool.Config.ConfigFileRefs[0].ConfigDir != "../../shared-config" || tool.Config.ConfigFileRefs[0].Path != "app.conf" {
+		t.Fatalf("ConfigFileRefs = %#v", tool.Config.ConfigFileRefs)
+	}
+}
+
+func TestLoadNormalizesAbsolutePluginConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	absConfigDir := filepath.Join(dir, "absolute-config")
+	writeFile(t, filepath.Join(absConfigDir, "app.conf"), "old=true\n", 0o644)
+	writeRoot(t, dir, `plugins:
+  paths: [plugins]
+  strict: true
+`)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.absolute", "scripts", "run.sh"), "#!/usr/bin/env bash\necho run\n", 0o755)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.absolute", "plugin.yaml"), `id: vendor.absolute
+name: Absolute
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.absolute.run
+      category: absolute
+      command: scripts/run.sh
+      config_dir: `+absConfigDir+`
+      config_files:
+        - app.conf
+`, 0o644)
+
+	reg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	tool, err := reg.Tool("vendor.absolute.run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tool.Config.ConfigDir != absConfigDir {
+		t.Fatalf("ConfigDir = %q, want %q", tool.Config.ConfigDir, absConfigDir)
+	}
+	if len(tool.Config.ConfigFileRefs) != 1 || tool.Config.ConfigFileRefs[0].ConfigDir != absConfigDir || tool.Config.ConfigFileRefs[0].Path != "app.conf" {
+		t.Fatalf("ConfigFileRefs = %#v", tool.Config.ConfigFileRefs)
+	}
+}
+
+func TestLoadAcceptsConfiguredBarePluginCommand(t *testing.T) {
+	dir := t.TempDir()
+	writeRoot(t, dir, `plugins:
+  paths: [plugins]
+  strict: true
+  allowed_commands:
+    - java
+    - ansible-playbook
+`)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.pathcmd", "plugin.yaml"), `id: vendor.pathcmd
+name: Path Command
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.pathcmd.run
+      category: pathcmd
+      command: ansible-playbook
+`, 0o644)
+
+	reg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	tool, err := reg.Tool("vendor.pathcmd.run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tool.Config.Execution.Entry != "ansible-playbook" {
+		t.Fatalf("entry = %q, want ansible-playbook", tool.Config.Execution.Entry)
+	}
+}
+
 func TestLoadAppliesPluginConfigMappingOverride(t *testing.T) {
 	dir := t.TempDir()
 	writeRoot(t, dir, `plugins:
@@ -287,6 +455,48 @@ contributes:
 	}
 	if got := otherTool.Config.ConfigFiles; len(got) != 1 || got[0] != "other.conf" {
 		t.Fatalf("未配置工具不应受 mapping 影响: %#v", got)
+	}
+}
+
+func TestLoadAcceptsPluginScopeMappingWithAbsoluteConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	absConfigDir := filepath.Join(dir, "absolute-config")
+	writeFile(t, filepath.Join(absConfigDir, "mapped.conf"), "old=true\n", 0o644)
+	writeRoot(t, dir, `plugins:
+  paths: [plugins]
+  strict: true
+`)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.mapping", "scripts", "run.sh"), "#!/usr/bin/env bash\necho run\n", 0o755)
+	writeFile(t, filepath.Join(dir, "plugins", "vendor.mapping", "plugin.yaml"), `id: vendor.mapping
+name: Mapping
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.mapping.run
+      category: mapping
+      command: scripts/run.sh
+`, 0o644)
+	writeFile(t, filepath.Join(dir, "configs", "plugins", "vendor.mapping.mapping.yaml"), `tools:
+  vendor.mapping.run:
+    config_files:
+      - id: mapped
+        scope: plugin
+        config_dir: `+absConfigDir+`
+        path: mapped.conf
+        access: read_write
+        create: true
+`, 0o644)
+
+	reg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	runTool, err := reg.Tool("vendor.mapping.run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runTool.Config.ConfigFileRefs) != 1 || runTool.Config.ConfigFileRefs[0].ConfigDir != absConfigDir || runTool.Config.ConfigFileRefs[0].Path != "mapped.conf" {
+		t.Fatalf("mapping config refs = %#v", runTool.Config.ConfigFileRefs)
 	}
 }
 

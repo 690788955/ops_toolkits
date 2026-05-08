@@ -184,14 +184,14 @@ contributes:
 ### 插件规则
 
 - 插件工具 ID 必须以插件 ID 加点号开头，例如 `vendor.backup.full`。
-- `command` 和 `workdir` 必须位于插件目录内，避免路径逃逸。
+- 带路径的 `command` 和 `workdir` 必须位于插件目录内，避免路径逃逸；裸命令名（如 `java`、`ansible-playbook`）只有加入 `plugins.allowed_commands` 后才会通过运行环境 PATH 执行。
 - `strict: false` 时坏插件会被跳过并输出告警；`strict: true` 时任意插件加载失败都会阻断校验/启动。
 - `disabled` 可以按插件 ID 或插件目录名禁用插件。
 - `confirm.required: true` 的工具在 CLI、菜单和 Web 执行前都需要确认。
-- 插件 manifest 的 `config_files` 只声明插件包内配置文件；推荐用 `config_dir: config` + 短文件名，旧 `config/example.conf` 写法保持兼容。
-- 未声明 `config_dir` 时，新短文件名默认以插件 `config/` 作为基准；声明 `config_dir` 后，`config_files` / `path` 只写相对文件或相对目录项。
-- `config_files` 可以是相对文件或相对目录项；目录项在 Web/API 列表中只展开下一层普通文件，不递归。
-- 插件包不能直接声明任意宿主绝对路径。宿主文件编辑需由管理员在 `configs/ops.yaml` 配置 `host_config_files.allowed_dirs` 目录白名单，并在 `configs/plugins/<plugin-id>.mapping.yaml` 中用 `scope: host_absolute`、`config_dir`、相对 `path`、`access: read/read_write`、`create` 显式启用；最终路径及符号链接解析后的真实路径都必须仍在白名单目录内。
+- 插件 manifest 的 `config_dir` 是配置基准目录：相对路径按插件目录解析，也支持当前平台可识别的绝对路径。
+- 未声明 `config_dir` 时，新短文件名默认以插件 `config/` 作为基准；旧 `config/example.conf` 写法保持兼容。
+- `config_files` / 结构化 `path` 必须是相对文件或相对目录项，不能写绝对路径或使用 `..` 逃逸最终解析出的 `config_dir`；目录项在 Web/API 列表中只展开下一层普通文件，不递归。
+- 如需更细粒度地管控宿主绝对路径配置文件，由管理员在 `configs/ops.yaml` 配置 `host_config_files.allowed_dirs` 目录白名单，并在 `configs/plugins/<plugin-id>.mapping.yaml` 中用 `scope: host_absolute`、`config_dir`、相对 `path`、`access: read/read_write`、`create` 显式启用；最终路径及符号链接解析后的真实路径都必须仍在白名单目录内。
 
 宿主绝对路径配置文件映射示例（由管理员配置，不写入插件包默认清单）：
 

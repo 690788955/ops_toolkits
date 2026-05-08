@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"shell_ops/internal/config"
@@ -22,6 +23,7 @@ type Tool struct {
 	Config *config.ToolConfig
 	Dir    string
 	Source Source
+	Order  int `json:"-"`
 }
 
 type Workflow struct {
@@ -93,6 +95,20 @@ func (r *Registry) Tool(id string) (*Tool, error) {
 	return tool, nil
 }
 
+func (r *Registry) OrderedTools() []*Tool {
+	tools := make([]*Tool, 0, len(r.Tools))
+	for _, tool := range r.Tools {
+		tools = append(tools, tool)
+	}
+	sort.SliceStable(tools, func(i, j int) bool {
+		if tools[i].Order != tools[j].Order {
+			return tools[i].Order < tools[j].Order
+		}
+		return tools[i].Entry.ID < tools[j].Entry.ID
+	})
+	return tools
+}
+
 func (r *Registry) Workflow(id string) (*Workflow, error) {
 	wf, ok := r.Workflows[id]
 	if !ok {
@@ -124,7 +140,7 @@ func (r *Registry) loadToolsWithVersion(version string) error {
 		}
 		entries = discovered
 	}
-	for _, entry := range entries {
+	for index, entry := range entries {
 		toolDir := filepath.Join(r.BaseDir, filepath.FromSlash(entry.Path))
 		toolCfg, err := config.LoadTool(filepath.Join(toolDir, "tool.yaml"))
 		if err != nil {
@@ -134,7 +150,7 @@ func (r *Registry) loadToolsWithVersion(version string) error {
 		if _, exists := r.Tools[entry.ID]; exists {
 			return fmt.Errorf("工具 ID 重复: %s", entry.ID)
 		}
-		r.Tools[entry.ID] = &Tool{Entry: entry, Config: toolCfg, Dir: toolDir, Source: Source{Type: "builtin"}}
+		r.Tools[entry.ID] = &Tool{Entry: entry, Config: toolCfg, Dir: toolDir, Source: Source{Type: "builtin"}, Order: index}
 	}
 	return r.loadPluginContributionsWithVersion(version)
 }
@@ -208,7 +224,7 @@ func (r *Registry) buildPluginPackageWithVersion(pkg plugin.Package, version str
 		return nil, nil, nil, err
 	}
 	for _, contributed := range pkg.Manifest.Contributes.Tools {
-		toolCfg, toolDir, err := normalizePluginTool(pkg, contributed, packageDefaultConfig, hostConfig)
+		toolCfg, toolDir, err := normalizePluginTool(r.Root, pkg, contributed, packageDefaultConfig, hostConfig)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -230,7 +246,7 @@ func (r *Registry) buildPluginPackageWithVersion(pkg plugin.Package, version str
 		if _, exists := tools[entry.ID]; exists {
 			return nil, nil, nil, fmt.Errorf("插件 %s 的工具 ID 冲突: %s", pkg.Manifest.ID, entry.ID)
 		}
-		tools[entry.ID] = &Tool{Entry: entry, Config: toolCfg, Dir: toolDir, Source: pluginSource(pkg)}
+		tools[entry.ID] = &Tool{Entry: entry, Config: toolCfg, Dir: toolDir, Source: pluginSource(pkg), Order: len(r.Tools) + len(tools)}
 	}
 	for _, contributed := range pkg.Manifest.Contributes.Workflows {
 		workflowPath, err := plugin.SafePath(pkg.Dir, contributed.Path)
@@ -339,9 +355,22 @@ func (r *Registry) addCategory(category config.Category) {
 	r.Root.RuntimeCategories = append(r.Root.RuntimeCategories, category)
 }
 
-func normalizePluginTool(pkg plugin.Package, contributed plugin.Tool, packageDefaultConfig, hostConfig map[string]interface{}) (*config.ToolConfig, string, error) {
-	if _, err := plugin.SafePath(pkg.Dir, contributed.Command); err != nil {
-		return nil, "", err
+func normalizePluginTool(root *config.RootConfig, pkg plugin.Package, contributed plugin.Tool, packageDefaultConfig, hostConfig map[string]interface{}) (*config.ToolConfig, string, error) {
+	commandEntry := normalizePluginCommandEntry(contributed.Command)
+	if commandHasPath(contributed.Command) {
+		if _, err := plugin.SafePath(pkg.Dir, contributed.Command); err != nil {
+			return nil, "", err
+		}
+	} else if !pluginCommandAllowed(root, contributed.Command) {
+		localCommand := strings.TrimSpace(contributed.Command)
+		commandPath, err := plugin.SafePath(pkg.Dir, localCommand)
+		if err != nil {
+			return nil, "", fmt.Errorf("插件工具 %s 的 PATH command %s 未在 plugins.allowed_commands 中允许", contributed.ID, contributed.Command)
+		}
+		if info, err := os.Stat(commandPath); err != nil || info.IsDir() {
+			return nil, "", fmt.Errorf("插件工具 %s 的 PATH command %s 未在 plugins.allowed_commands 中允许", contributed.ID, contributed.Command)
+		}
+		commandEntry = filepath.ToSlash(filepath.Join(".", filepath.Clean(localCommand)))
 	}
 	workdir := contributed.Workdir
 	if workdir == "" {
@@ -379,7 +408,7 @@ func normalizePluginTool(pkg plugin.Package, contributed plugin.Tool, packageDef
 		Help:        contributed.Help,
 		Execution: config.ExecutionConfig{
 			Type:    "shell",
-			Entry:   filepath.ToSlash(filepath.Clean(contributed.Command)),
+			Entry:   commandEntry,
 			Args:    contributed.Args,
 			Timeout: contributed.Timeout,
 			Workdir: filepath.ToSlash(filepath.Clean(workdir)),
@@ -408,6 +437,33 @@ func normalizePluginTool(pkg plugin.Package, contributed plugin.Tool, packageDef
 func legacyConfigFilePath(path string) bool {
 	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
 	return clean == "config" || strings.HasPrefix(clean, "config/")
+}
+
+func commandHasPath(command string) bool {
+	return strings.ContainsAny(command, `/\\`)
+}
+
+func normalizePluginCommandEntry(command string) string {
+	if !commandHasPath(command) {
+		return strings.TrimSpace(command)
+	}
+	return filepath.ToSlash(filepath.Clean(command))
+}
+
+func pluginCommandAllowed(root *config.RootConfig, command string) bool {
+	command = strings.TrimSpace(command)
+	if command == "" || command == "." || command == ".." || strings.ContainsAny(command, `/\\`) {
+		return false
+	}
+	if root == nil {
+		return false
+	}
+	for _, allowed := range root.Plugins.AllowedCommands {
+		if strings.TrimSpace(allowed) == command {
+			return true
+		}
+	}
+	return false
 }
 
 func pluginPassMode(mode config.PassMode) config.PassMode {

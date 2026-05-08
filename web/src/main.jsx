@@ -728,6 +728,7 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
     serverPort: 8080,
     pluginsPaths: 'plugins',
     pluginsStrict: false,
+    pluginsAllowedCommands: '',
     pathsRuns: 'runs',
     pathsLogs: 'runs/logs',
     hostConfigAllowedDirs: ''
@@ -757,9 +758,10 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
             serverPort: config.server?.port || 8080,
             pluginsPaths: (config.plugins?.paths || ['plugins']).join(', '),
             pluginsStrict: config.plugins?.strict || false,
+            pluginsAllowedCommands: (config.plugins?.allowed_commands || []).join('\n'),
             pathsRuns: config.paths?.runs || 'runs',
             pathsLogs: config.paths?.logs || 'runs/logs',
-        hostConfigAllowedDirs: (config.host_config_files?.allowed_dirs || []).join('\n')
+            hostConfigAllowedDirs: (config.host_config_files?.allowed_dirs || []).join('\n')
           })
         } catch (parseErr) {
           console.warn('YAML 解析失败，使用默认表单值', parseErr)
@@ -780,32 +782,54 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
     setFormData(prev => ({...prev, [field]: value}))
   }
 
-  function switchToYaml() {
-    // 表单 → YAML：序列化当前表单值
-    const config = {
+  function formLines(value) {
+    return value.split('\n').map(item => item.trim()).filter(Boolean)
+  }
+
+  function buildConfigFromForm(sourceContent) {
+    let base = {}
+    try {
+      const parsed = yaml.load(sourceContent) || {}
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) base = parsed
+    } catch (err) {
+      base = {}
+    }
+
+    return {
+      ...base,
       app: {
+        ...(base.app || {}),
         name: formData.appName,
         description: formData.appDescription,
         version: formData.appVersion
       },
       server: {
+        ...(base.server || {}),
         enabled: formData.serverEnabled,
         host: formData.serverHost,
         port: formData.serverPort
       },
       plugins: {
+        ...(base.plugins || {}),
         paths: formData.pluginsPaths.split(',').map(p => p.trim()).filter(Boolean),
-        strict: formData.pluginsStrict
+        strict: formData.pluginsStrict,
+        allowed_commands: formLines(formData.pluginsAllowedCommands)
       },
       paths: {
+        ...(base.paths || {}),
         runs: formData.pathsRuns,
         logs: formData.pathsLogs
       },
       host_config_files: {
-        allowed_dirs: formData.hostConfigAllowedDirs.split('\n').map(p => p.trim()).filter(Boolean)
+        ...(base.host_config_files || {}),
+        allowed_dirs: formLines(formData.hostConfigAllowedDirs)
       }
     }
-    setContent(yaml.dump(config, {indent: 2, lineWidth: -1}))
+  }
+
+  function switchToYaml() {
+    // 表单 → YAML：把表单字段合并回当前 YAML，避免丢失 disabled 等未展示字段
+    setContent(yaml.dump(buildConfigFromForm(content), {indent: 2, lineWidth: -1}))
     setEditMode('yaml')
   }
 
@@ -822,6 +846,7 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
         serverPort: config.server?.port || 8080,
         pluginsPaths: (config.plugins?.paths || ['plugins']).join(', '),
         pluginsStrict: config.plugins?.strict || false,
+        pluginsAllowedCommands: (config.plugins?.allowed_commands || []).join('\n'),
         pathsRuns: config.paths?.runs || 'runs',
         pathsLogs: config.paths?.logs || 'runs/logs',
         hostConfigAllowedDirs: (config.host_config_files?.allowed_dirs || []).join('\n')
@@ -838,31 +863,8 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
     try {
       let yamlToSave = content
       if (editMode === 'form') {
-        // 表单模式：序列化表单为 YAML
-        const config = {
-          app: {
-            name: formData.appName,
-            description: formData.appDescription,
-            version: formData.appVersion
-          },
-          server: {
-            enabled: formData.serverEnabled,
-            host: formData.serverHost,
-            port: formData.serverPort
-          },
-          plugins: {
-            paths: formData.pluginsPaths.split(',').map(p => p.trim()).filter(Boolean),
-            strict: formData.pluginsStrict
-          },
-          paths: {
-            runs: formData.pathsRuns,
-            logs: formData.pathsLogs
-          },
-          host_config_files: {
-            allowed_dirs: formData.hostConfigAllowedDirs.split('\n').map(p => p.trim()).filter(Boolean)
-          }
-        }
-        yamlToSave = yaml.dump(config, {indent: 2, lineWidth: -1})
+        // 表单模式：把表单字段合并回当前 YAML，保留 plugins.disabled 等未在表单中编辑的配置
+        yamlToSave = yaml.dump(buildConfigFromForm(content), {indent: 2, lineWidth: -1})
       }
       const body = await putJSON('/api/config/global', {content: yamlToSave})
       setMessage('设置已保存')
@@ -932,6 +934,11 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
                   <input type="checkbox" checked={formData.pluginsStrict} disabled={loading || saving} onChange={e => updateFormField('pluginsStrict', e.target.checked)} />
                   <span>严格模式（插件加载失败时中断启动）</span>
                 </label>
+                <label>
+                  <span>允许 PATH 命令（每行一个命令）</span>
+                  <textarea className="smallTextarea" value={formData.pluginsAllowedCommands} disabled={loading || saving} placeholder="java&#10;ansible-playbook" onChange={e => updateFormField('pluginsAllowedCommands', e.target.value)} />
+                </label>
+                <div className="empty small">仅裸 command 命中此白名单时，才会通过运行环境 PATH 执行；带路径 command 仍必须位于插件目录内，参数请继续通过 args 数组声明。</div>
               </fieldset>
 
               <fieldset>

@@ -80,10 +80,7 @@ func validateMappingConfigFile(pkg plugin.Package, toolID string, index int, cf 
 	}
 	switch cf.Scope {
 	case config.ConfigFileScopePlugin:
-		if filepath.IsAbs(configDir) {
-			return fmt.Errorf("%s 的插件 config_dir 不能是绝对路径", prefix)
-		}
-		if _, err := plugin.SafePath(pkg.Dir, configDir); err != nil {
+		if _, err := plugin.ResolveConfigDir(pkg.Dir, configDir); err != nil {
 			return fmt.Errorf("%s 的 config_dir 不安全: %w", prefix, err)
 		}
 	case config.ConfigFileScopeHostAbsolute:

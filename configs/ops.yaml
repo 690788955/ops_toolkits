@@ -21,16 +21,17 @@ plugins:
     - plugins
   strict: false
   disabled: []
+  allowed_commands: []
 ui:
   enabled: true
   title: 运维工作流控制台
 host_config_files:
   allowed_dirs: []
 config_defaults: {}
-name: ""
-description: ""
+name: ''
+description: ''
 categories: []
 tools: []
 workflows: []
 http:
-  addr: ""
+  addr: ''

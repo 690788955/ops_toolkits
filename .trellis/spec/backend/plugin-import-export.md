@@ -195,10 +195,16 @@ func SaveRoot(path string, cfg *RootConfig) error {
   ```
   - `allowed_dirs` accepts directory prefixes only.
   - Single-file whitelist entries are invalid.
-- Plugin manifest `plugin.yaml` keeps legacy plugin-local string semantics:
+- Plugin manifest `plugin.yaml` may use a relative or absolute `config_dir` plus relative `config_files`; relative `config_dir` is resolved from the plugin directory and may intentionally point outside the plugin directory for internal shared-config scenarios, while absolute `config_dir` is used directly as the configuration base directory:
   ```yaml
+  config_dir: ../../shared-config
   config_files:
-    - config/example.conf
+    - app.conf
+  ```
+  ```yaml
+  config_dir: /etc/myapp
+  config_files:
+    - app.conf
   ```
 - Host-side plugin mapping may use structured entries. `config_dir` is the base directory and `path` is the relative `config_files` item:
   ```yaml
@@ -220,12 +226,16 @@ func SaveRoot(path string, cfg *RootConfig) error {
 
 ### 3. Contracts
 
-- Plugin package safety boundary remains plugin-local:
-  - `plugin.yaml` string `config_files` entries must be relative paths inside the plugin directory.
-  - Plugin packages must not directly grant arbitrary host absolute file access.
+- Plugin tool `command` supports two safe forms:
+  - Path-like commands containing `/` or `\\` must stay inside the plugin directory.
+  - Bare command names such as `java` or `ansible-playbook` may execute through the runtime PATH only when explicitly listed in `plugins.allowed_commands`.
+- Plugin package config-file safety boundary is based on the resolved `config_dir`:
+  - `plugin.yaml` `config_dir` may be relative to the plugin directory or an absolute path recognized by the current platform.
+  - Internal deployments may use `..` in relative `config_dir`, for example `../../shared-config`, with care.
+  - Absolute `config_dir` is used directly as the configuration base directory; plugin packages still cannot grant arbitrary file access through `config_files` because entries must stay under that final base.
 - `config_dir + config_files` is the only path construction rule:
   - `config_dir` defaults to plugin `config/` for new structured declarations.
-  - `path`/`config_files` entries are always relative file or directory items; absolute paths and `..` escape are invalid.
+  - `path`/`config_files` entries are always relative file or directory items; absolute paths and `..` escape from the resolved `config_dir` are invalid.
   - A directory item expands to one-level regular files only; recursion is not part of the MVP.
 - Host absolute files are enabled only by host-side mapping plus global whitelist:
   - `scope: host_absolute` requires `config_dir` to be an absolute directory recognized by the current platform.
@@ -250,8 +260,9 @@ func SaveRoot(path string, cfg *RootConfig) error {
 
 | Condition | Expected behavior |
 |---|---|
-| `plugin.yaml` config file is relative and inside plugin dir | load succeeds; file can be listed/read/written through plugin-local declaration |
-| `plugin.yaml` config file is absolute | reject as unsafe plugin-local path |
+| `plugin.yaml` config_dir is relative and config file stays inside that config_dir | load succeeds; file can be listed/read/written through plugin-scope declaration, even when config_dir points outside plugin dir |
+| `plugin.yaml` config_dir is absolute and config file stays inside that config_dir | load succeeds; file can be listed/read/written through plugin-scope declaration using the absolute base |
+| `plugin.yaml` config file is absolute or escapes resolved config_dir | reject as unsafe plugin config file path |
 | mapping structured host `config_dir` is inside whitelist and `path` is relative | registry registers it and API lists structured status |
 | mapping host `config_dir` is outside whitelist | registry rejects mapping with readable Chinese whitelist error |
 | whitelist entry points to a file | registry rejects; whitelist supports directories only |
@@ -276,7 +287,7 @@ func SaveRoot(path string, cfg *RootConfig) error {
 - Registry test for host mapping rejected outside whitelist and for single-file whitelist rejection when applicable.
 - Server test for structured list status including `scope`, `access`, `exists`, `readable`, `writable`, and `reason`.
 - Server tests for read-only GET/PUT rejection, read-write PUT success, `create:false` missing rejection, `create:true` creation, directory/special-file rejection, undeclared/encoded traversal rejection, and host DELETE rejection.
-- Existing plugin-local config file read/write tests must continue to pass.
+- Existing plugin-local config file read/write tests must continue to pass, including plugin-scope absolute `config_dir` list/read/write and escape rejection.
 - Web build test must pass after list API response shape changes.
 
 ---

@@ -326,7 +326,7 @@ func installUploadedPlugin(state *serverState, data []byte, replace bool) (plugi
 	}
 	pkg, err := plugin.LoadPackage(pkgDir)
 	if err == nil {
-		err = plugin.ValidatePackage(pkg)
+		err = plugin.ValidatePackageWithConfig(pkg, reg.Root.Plugins)
 	}
 	if err != nil {
 		return pluginUploadResult{}, err

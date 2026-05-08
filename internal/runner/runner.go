@@ -419,7 +419,7 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 	if err != nil {
 		return err
 	}
-	entry := filepath.Join(tool.Dir, filepath.FromSlash(tool.Config.Execution.Entry))
+	entry := resolveEntry(tool.Dir, tool.Config.Execution.Entry)
 	cmd := buildCommand(execCtx, entry, *tool.Config, params, paramFile)
 	cmd.Dir = resolveWorkdir(tool.Dir, tool.Config.Execution.Workdir)
 	cmd.Env = append(os.Environ(), encodeEnv(params)...)
@@ -450,6 +450,13 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 		return fmt.Errorf("执行工具 %s 失败: %w", tool.Config.ID, err)
 	}
 	return nil
+}
+
+func resolveEntry(toolDir, entry string) string {
+	if entry == "" || filepath.IsAbs(entry) || !strings.ContainsAny(entry, `/\\`) {
+		return entry
+	}
+	return filepath.Join(toolDir, filepath.FromSlash(entry))
 }
 
 func buildCommand(ctx context.Context, entry string, tool config.ToolConfig, params map[string]string, paramFile string) *exec.Cmd {

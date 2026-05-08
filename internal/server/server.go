@@ -119,13 +119,13 @@ const toolDevKitSpec = `# 插件开发规范
 
 - 工具 id 必须以插件 id 加点号开头，例如 vendor.backup.full。
 - category 应引用 contributes.categories 中的分类 ID。
-- command 必填，必须指向插件目录内部文件，例如 scripts/run.sh。
+- command 必填；带路径命令必须指向插件目录内部文件，例如 scripts/run.sh；裸命令名需由管理员加入 plugins.allowed_commands 后才会走运行环境 PATH。
 - workdir 可选，默认 .，也必须留在插件目录内部。
 - args 可选，支持 '{{ .参数名 }}' 模板；模板名应与 parameters 中的 name 一致。
 - timeout 建议显式填写，例如 1m、30m，避免长时间挂起。
 - tags 建议填写，便于接入方理解工具用途和风险类别。
 - parameters 必须列出脚本需要的输入，并包含 type、description、required、default。
-- config_dir 可选，推荐填写插件内配置基准目录，例如 config。
+- config_dir 可选，推荐填写相对插件目录的配置基准目录，例如 config；内部场景可谨慎填写 ../../shared-config 这类共享配置目录，也可以填写当前平台可识别的绝对路径。
 - config_files 可选，推荐声明相对 config_dir 的短文件名或相对目录项，例如 example.conf；脚本是否读取该文件由 args 或脚本默认逻辑决定。
 - confirm.required=true 用于高风险工具；message 应写清楚影响范围、目标环境和是否可回滚。
 
@@ -158,14 +158,13 @@ config_files:
 
 含义与约束：
 
-- config_dir 是插件内配置基准目录。上例中 example.conf 会按插件目录内的 config/example.conf 处理。
+- config_dir 是配置基准目录：相对路径按插件目录解析，上例中 example.conf 会按插件目录内的 config/example.conf 处理；内部共享配置也可以写成 ../../shared-config；当前平台可识别的绝对路径会直接作为配置基准目录。
 - 旧写法仍兼容：未声明 config_dir 时，config_files: [config/example.conf] 会继续按插件目录内路径识别，便于旧插件平滑升级；新模板推荐短文件名 + config_dir。
-- config_files 中的字符串条目，以及结构化条目的 path，只能是相对文件或相对目录项；禁止绝对路径，禁止使用 .. 或其他方式逃逸 config_dir。
+- config_files 中的字符串条目，以及结构化条目的 path，只能是相对文件或相对目录项，禁止绝对路径，禁止使用 .. 或其他方式逃逸最终解析出的 config_dir。
 - 如果 config_files/path 指向目录，目录项只会一级展开普通文件，不递归进入子目录，也不会包含目录、符号链接或特殊文件。
-- 插件包不能直接声明宿主绝对路径，也不能通过 config_files/path 获得任意宿主文件访问权。
-- 需要维护宿主绝对路径配置文件时，由管理员在宿主侧显式启用：先在全局配置 host_config_files.allowed_dirs 加入允许目录，再通过 host-side mapping 为具体工具声明 scope: host_absolute、config_dir 和 path。插件开发包只应声明插件内默认配置文件。
+- 需要更细粒度的宿主路径白名单、只读/可写权限或稳定文件 ID 管控时，可由管理员通过 host_config_files.allowed_dirs 与 host-side mapping 显式启用 scope: host_absolute。
 
-config_files 只用于声明哪些插件内文件可被配置维护；宿主不会自动生成、复制或传参。工具脚本应通过 args、默认路径或自己的逻辑读取这些文件。配置文件路径必须留在插件目录内部。
+config_files 只用于声明哪些文件可被配置维护；宿主不会自动生成、复制或传参。工具脚本应通过 args、默认路径或自己的逻辑读取这些文件。
 
 ## 5. 脚本可靠性
 
@@ -527,9 +526,9 @@ const samplePluginReadme = `# 规范插件模板
 
 ## 配置文件
 
-plugin.yaml 推荐使用 config_dir: config 作为插件内配置基准目录，再在 config_files 中声明相对该目录的短文件名或相对目录项，例如 example.conf 对应插件目录内的 config/example.conf。旧的 config_files: [config/example.conf] 写法仍兼容，但新模板推荐短文件名 + config_dir。
+plugin.yaml 推荐使用 config_dir: config 作为相对插件目录的配置基准目录，再在 config_files 中声明相对该目录的短文件名或相对目录项，例如 example.conf 对应插件目录内的 config/example.conf。内部共享配置场景可以谨慎使用 config_dir: ../../shared-config。旧的 config_files: [config/example.conf] 写法仍兼容，但新模板推荐短文件名 + config_dir。
 
-config_files 的字符串条目和结构化条目的 path 只能是相对文件或相对目录项，禁止绝对路径和 .. 逃逸。目录项只一级展开普通文件，不递归。插件包不能直接声明宿主绝对路径；宿主配置文件映射只能由管理员通过 host_config_files.allowed_dirs 和宿主侧 mapping 中的 scope: host_absolute、config_dir、path 显式启用。
+config_dir 支持相对插件目录或当前平台可识别的绝对路径；config_files 的字符串条目和结构化条目的 path 只能是相对文件或相对目录项，禁止绝对路径和 .. 逃逸最终解析出的 config_dir。目录项只一级展开普通文件，不递归。需要更细粒度的宿主绝对路径配置文件映射时，可由管理员通过 host_config_files.allowed_dirs 和宿主侧 mapping 中的 scope: host_absolute、config_dir、path 显式启用。
 
 ## 输出
 
@@ -1335,7 +1334,7 @@ func buildCatalog(reg *registry.Registry) catalogResponse {
 	for _, item := range catalogPluginEntries(reg) {
 		out.Plugins = append(out.Plugins, item)
 	}
-	for _, tool := range reg.Tools {
+	for _, tool := range reg.OrderedTools() {
 		out.Tools = append(out.Tools, toolCatalogEntry{ToolEntry: tool.Entry, Tags: tool.Config.Tags, Parameters: tool.Config.Parameters, ConfigFiles: tool.Config.ConfigFiles, ConfigFileRefs: declaredConfigFiles(tool.Config), Confirm: tool.Config.Confirm, Source: tool.Source})
 	}
 	for _, wf := range reg.Workflows {
@@ -2029,10 +2028,7 @@ func resolvedConfigDir(root *config.RootConfig, toolCfg *config.ToolConfig, entr
 	entry = normalizeServerConfigFileRef(entry)
 	switch entry.Scope {
 	case config.ConfigFileScopePlugin:
-		if filepath.IsAbs(entry.ConfigDir) {
-			return "", fmt.Errorf("插件 config_dir 不能是绝对路径")
-		}
-		baseDir, err := plugin.SafePath(toolCfg.PluginConfig.Dir, entry.ConfigDir)
+		baseDir, err := plugin.ResolveConfigDir(toolCfg.PluginConfig.Dir, entry.ConfigDir)
 		if err != nil {
 			return "", fmt.Errorf("config_dir 不安全: %w", err)
 		}

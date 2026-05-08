@@ -53,9 +53,10 @@ type RegistryConfig struct {
 }
 
 type PluginsConfig struct {
-	Paths    []string `yaml:"paths" json:"paths"`
-	Strict   bool     `yaml:"strict" json:"strict"`
-	Disabled []string `yaml:"disabled" json:"disabled"`
+	Paths           []string `yaml:"paths" json:"paths"`
+	Strict          bool     `yaml:"strict" json:"strict"`
+	Disabled        []string `yaml:"disabled" json:"disabled"`
+	AllowedCommands []string `yaml:"allowed_commands" json:"allowed_commands"`
 }
 
 type UIConfig struct {
