@@ -73,12 +73,18 @@ func TestNestedValuesDeepMergeSetPathAndRedaction(t *testing.T) {
 
 func TestPromptMissing(t *testing.T) {
 	params := map[string]string{}
-	err := PromptMissing([]Parameter{{Name: "name", Required: true}}, params, bytes.NewBufferString("ops\n"), &bytes.Buffer{})
+	var out bytes.Buffer
+	err := PromptMissing([]Parameter{{Name: "name", Type: "string", Description: "用户名称", Required: true}}, params, bytes.NewBufferString("ops\n"), &out)
 	if err != nil {
 		t.Fatalf("PromptMissing 返回错误: %v", err)
 	}
 	if params["name"] != "ops" {
 		t.Fatalf("name = %q, want ops", params["name"])
+	}
+	for _, want := range []string{"name", "用户名称", "类型=string", "必填"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("PromptMissing 提示缺少 %q: %s", want, out.String())
+		}
 	}
 }
 

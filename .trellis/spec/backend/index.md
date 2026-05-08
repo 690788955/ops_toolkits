@@ -15,11 +15,12 @@ This directory contains guidelines for backend development. Fill in each file wi
 | Guide | Description | Status |
 |-------|-------------|--------|
 | [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
+| [CLI Interaction Patterns](./cli-interaction-patterns.md) | Parameter prompts, interactive menus, output formatting, command evolution | Active |
 | [Plugin Import and Export](./plugin-import-export.md) | Plugin ZIP import/export API contracts, catalog payload, ZIP shape, and safety tests | Active |
 | [Workflow Conditional Nodes](./workflow-conditional-nodes.md) | Typed workflow condition nodes, branch edges, runner skip semantics, and API/editor round-trip contracts | Active |
 | [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
+| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | Active |
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
 
 ---

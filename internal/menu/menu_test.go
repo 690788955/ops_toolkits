@@ -74,6 +74,40 @@ func TestItemsForRealCategoryOnlyIncludesCategoryItems(t *testing.T) {
 	}
 }
 
+func TestSelectItemSearchFiltersVisibleItems(t *testing.T) {
+	var out bytes.Buffer
+	scanner := bufio.NewScanner(strings.NewReader("s\ncleanup\n1\n"))
+
+	selected, ok, err := selectItem(testRegistry(), allCategoryID, scanner, &out)
+	if err != nil {
+		t.Fatalf("selectItem returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("selectItem ok = false, want true")
+	}
+	if selected.id != "ops.cleanup" {
+		t.Fatalf("selected.id = %q, want ops.cleanup", selected.id)
+	}
+	text := out.String()
+	for _, want := range []string{"s) 搜索", "搜索关键词", "已匹配 1 项"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("搜索输出缺少 %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestFilterItemsMatchesIDNameAndDescription(t *testing.T) {
+	items := []item{
+		{kind: "tool", id: "demo.deploy", name: "部署工具", description: "发布应用"},
+		{kind: "tool", id: "ops.cleanup", name: "清理工具", description: "删除临时文件"},
+	}
+	for _, query := range []string{"deploy", "清理", "临时"} {
+		if got := filterItems(items, query); len(got) != 1 {
+			t.Fatalf("filterItems(%q) len = %d, want 1: %#v", query, len(got), got)
+		}
+	}
+}
+
 func testRegistry() *registry.Registry {
 	return &registry.Registry{
 		Root: &config.RootConfig{

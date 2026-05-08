@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
@@ -50,21 +52,95 @@ func Execute() error {
 }
 
 func listCommand(opts *options) *cobra.Command {
-	return &cobra.Command{Use: "list", Short: "列出已配置的工具和工作流", RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "list", Short: "按分类列出已配置的工具和工作流", RunE: func(cmd *cobra.Command, args []string) error {
 		reg, err := loadRegistry(opts)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), "工具:")
-		for _, tool := range reg.OrderedTools() {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s\t%s\n", tool.Entry.ID, tool.Entry.Description)
-		}
-		fmt.Fprintln(cmd.OutOrStdout(), "工作流:")
-		for id, wf := range reg.Workflows {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s\t%s\n", id, wf.Entry.Description)
-		}
+		printCatalogList(cmd.OutOrStdout(), reg)
 		return nil
 	}}
+}
+
+func printCatalogList(out io.Writer, reg *registry.Registry) {
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	for _, category := range listCategories(reg) {
+		fmt.Fprintf(w, "%s\n", fallbackText(category.Name, category.ID))
+		printCategoryTools(w, reg, category.ID)
+		printCategoryWorkflows(w, reg, category.ID)
+		fmt.Fprintln(w)
+	}
+	w.Flush()
+}
+
+func listCategories(reg *registry.Registry) []config.Category {
+	categories := append([]config.Category{}, reg.Root.DisplayCategories()...)
+	seen := map[string]bool{}
+	for _, category := range categories {
+		seen[category.ID] = true
+	}
+	extra := []config.Category{}
+	for _, tool := range reg.Tools {
+		categoryID := itemCategory(tool.Entry.Category)
+		if !seen[categoryID] {
+			extra = append(extra, config.Category{ID: categoryID, Name: categoryName(categoryID)})
+			seen[categoryID] = true
+		}
+	}
+	for _, wf := range reg.Workflows {
+		categoryID := itemCategory(wf.Entry.Category)
+		if !seen[categoryID] {
+			extra = append(extra, config.Category{ID: categoryID, Name: categoryName(categoryID)})
+			seen[categoryID] = true
+		}
+	}
+	sort.SliceStable(extra, func(i, j int) bool { return extra[i].ID < extra[j].ID })
+	return append(categories, extra...)
+}
+
+func categoryName(categoryID string) string {
+	if categoryID == "__uncategorized__" {
+		return "未分类"
+	}
+	return categoryID
+}
+
+func itemCategory(categoryID string) string {
+	if categoryID == "" {
+		return "__uncategorized__"
+	}
+	return categoryID
+}
+
+func printCategoryTools(out io.Writer, reg *registry.Registry, categoryID string) {
+	count := 0
+	for _, tool := range reg.OrderedTools() {
+		if itemCategory(tool.Entry.Category) != categoryID {
+			continue
+		}
+		if count == 0 {
+			fmt.Fprintln(out, "  工具")
+		}
+		fmt.Fprintf(out, "    %s\t%s\t%s\n", tool.Entry.ID, fallbackText(tool.Entry.Name, "-"), tool.Entry.Description)
+		count++
+	}
+}
+
+func printCategoryWorkflows(out io.Writer, reg *registry.Registry, categoryID string) {
+	ids := make([]string, 0, len(reg.Workflows))
+	for id, wf := range reg.Workflows {
+		if itemCategory(wf.Entry.Category) == categoryID {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) > 0 {
+		fmt.Fprintln(out, "  工作流")
+	}
+	for _, id := range ids {
+		wf := reg.Workflows[id]
+		fmt.Fprintf(out, "    %s\t%s\t%s\n", id, fallbackText(wf.Entry.Name, "-"), wf.Entry.Description)
+	}
 }
 
 func validateCommand(opts *options) *cobra.Command {
@@ -113,52 +189,62 @@ func runCommand(opts *options) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		tool, err := reg.Tool(args[0])
-		if err != nil {
-			return err
-		}
-		params, err := resolveToolParams(opts, reg, tool)
-		if err != nil {
-			return err
-		}
-		if err := config.PromptConfirmation(tool.Config.Confirm, os.Stdin, cmd.OutOrStdout()); err != nil {
-			return err
-		}
-		record, err := runner.New(reg).RunToolValues(context.Background(), args[0], params, cmd.OutOrStdout(), cmd.ErrOrStderr())
-		if record != nil {
-			fmt.Fprintf(cmd.OutOrStdout(), "\nrun_id=%s status=%s\n", record.ID, record.Status)
-		}
-		return err
+		return runToolCommand(cmd, opts, reg, args[0])
 	}})
 	cmd.AddCommand(&cobra.Command{Use: "workflow <id>", Short: "执行已配置的工作流", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		reg, err := loadRegistry(opts)
 		if err != nil {
 			return err
 		}
-		wf, err := reg.Workflow(args[0])
-		if err != nil {
-			return err
-		}
-		params, err := resolveParams(opts, wf.Config.Parameters)
-		if err != nil {
-			return err
-		}
-		if err := config.PromptConfirmation(wf.Config.Confirm, os.Stdin, cmd.OutOrStdout()); err != nil {
-			return err
-		}
-		confirmed, err := confirmWorkflowTools(reg, wf.Config, os.Stdin, cmd.OutOrStdout())
-		if err != nil {
-			return err
-		}
-		record, err := runner.New(reg).RunWorkflowWithConfirmation(context.Background(), args[0], params, confirmed, cmd.OutOrStdout(), cmd.ErrOrStderr())
-		printRunSummary(cmd.OutOrStdout(), record)
-		return err
+		return runWorkflowCommand(cmd, opts, reg, args[0])
 	}})
 	return cmd
 }
 
+func runToolCommand(cmd *cobra.Command, opts *options, reg *registry.Registry, id string) error {
+	tool, err := reg.Tool(id)
+	if err != nil {
+		return err
+	}
+	params, err := resolveToolParams(opts, reg, tool)
+	if err != nil {
+		return err
+	}
+	if err := config.PromptConfirmation(tool.Config.Confirm, os.Stdin, cmd.OutOrStdout()); err != nil {
+		return err
+	}
+	record, err := runner.New(reg).RunToolValues(context.Background(), id, params, cmd.OutOrStdout(), cmd.ErrOrStderr())
+	if record != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "\nrun_id=%s status=%s\n", record.ID, record.Status)
+	}
+	return err
+}
+
+func runWorkflowCommand(cmd *cobra.Command, opts *options, reg *registry.Registry, id string) error {
+	wf, err := reg.Workflow(id)
+	if err != nil {
+		return err
+	}
+	params, err := resolveParams(opts, wf.Config.Parameters)
+	if err != nil {
+		return err
+	}
+	if err := config.PromptConfirmation(wf.Config.Confirm, os.Stdin, cmd.OutOrStdout()); err != nil {
+		return err
+	}
+	confirmed, err := confirmWorkflowTools(reg, wf.Config, os.Stdin, cmd.OutOrStdout())
+	if err != nil {
+		return err
+	}
+	record, err := runner.New(reg).RunWorkflowWithConfirmation(context.Background(), id, params, confirmed, cmd.OutOrStdout(), cmd.ErrOrStderr())
+	printRunSummary(cmd.OutOrStdout(), record)
+	return err
+}
+
 func helpAutoCommand(opts *options) *cobra.Command {
-	return generatedHelpCommand(opts, "help-auto")
+	cmd := generatedHelpCommand(opts, "help-auto")
+	cmd.Short = "显示 YAML 元数据帮助（兼容命令，推荐使用 help）"
+	return cmd
 }
 
 func generatedHelpCommand(opts *options, use string) *cobra.Command {
@@ -198,20 +284,61 @@ func generatedHelpCommand(opts *options, use string) *cobra.Command {
 }
 
 func startCommand(opts *options) *cobra.Command {
-	return interactiveCommand(opts, "start", "启动交互式运维控制台")
+	cmd := interactiveCommand(opts, "start", "启动交互式运维控制台", false)
+	cmd.AddCommand(startToolCommand(opts), startWorkflowCommand(opts))
+	return cmd
 }
 
 func menuCommand(opts *options) *cobra.Command {
-	return interactiveCommand(opts, "menu", "打开编号菜单")
+	return interactiveCommand(opts, "menu", "打开编号菜单（start 的兼容别名）", true)
 }
 
-func interactiveCommand(opts *options, use, short string) *cobra.Command {
-	return &cobra.Command{Use: use, Short: short, RunE: func(cmd *cobra.Command, args []string) error {
+func interactiveCommand(opts *options, use, short string, alias bool) *cobra.Command {
+	cmd := &cobra.Command{Use: use + " [tool-or-workflow-id]", Short: short, Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		reg, err := loadRegistry(opts)
 		if err != nil {
 			return err
 		}
+		if len(args) == 1 {
+			return runCatalogIDCommand(cmd, opts, reg, args[0])
+		}
 		return menu.Run(context.Background(), reg, os.Stdin, cmd.OutOrStdout(), cmd.ErrOrStderr())
+	}}
+	if alias {
+		cmd.Long = "打开编号菜单。该命令为兼容保留；新用法推荐 opsctl start。"
+	} else {
+		cmd.Long = "启动交互式运维控制台。无参数时打开编号菜单，也可以使用子命令快捷执行工具或工作流。"
+	}
+	return cmd
+}
+
+func runCatalogIDCommand(cmd *cobra.Command, opts *options, reg *registry.Registry, id string) error {
+	if _, ok := reg.Tools[id]; ok {
+		return runToolCommand(cmd, opts, reg, id)
+	}
+	if _, ok := reg.Workflows[id]; ok {
+		return runWorkflowCommand(cmd, opts, reg, id)
+	}
+	return fmt.Errorf("未找到工具或工作流 %s", id)
+}
+
+func startToolCommand(opts *options) *cobra.Command {
+	return &cobra.Command{Use: "tool <id>", Short: "从交互入口快捷执行工具", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		reg, err := loadRegistry(opts)
+		if err != nil {
+			return err
+		}
+		return runToolCommand(cmd, opts, reg, args[0])
+	}}
+}
+
+func startWorkflowCommand(opts *options) *cobra.Command {
+	return &cobra.Command{Use: "workflow <id>", Short: "从交互入口快捷执行工作流", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		reg, err := loadRegistry(opts)
+		if err != nil {
+			return err
+		}
+		return runWorkflowCommand(cmd, opts, reg, args[0])
 	}}
 }
 

@@ -86,15 +86,17 @@ func selectItem(reg *registry.Registry, categoryID string, scanner *bufio.Scanne
 		fmt.Fprintln(out, "该分类下暂无工具或工作流。")
 		return item{}, false, nil
 	}
+	visible := items
 	for {
 		fmt.Fprintln(out, "\n请选择要执行的工具或工作流:")
-		for i, it := range items {
+		for i, it := range visible {
 			fmt.Fprintf(out, "%d) [%s] %s", i+1, labelKind(it.kind), title(it.name, it.id))
 			if it.description != "" {
 				fmt.Fprintf(out, " - %s", it.description)
 			}
 			fmt.Fprintln(out)
 		}
+		fmt.Fprintln(out, "s) 搜索")
 		fmt.Fprintln(out, "b) 返回上级")
 		fmt.Fprintln(out, "q) 退出")
 		fmt.Fprint(out, "选择: ")
@@ -103,17 +105,53 @@ func selectItem(reg *registry.Registry, categoryID string, scanner *bufio.Scanne
 		}
 		text := strings.TrimSpace(scanner.Text())
 		switch strings.ToLower(text) {
+		case "s":
+			filtered, err := searchItems(items, scanner, out)
+			if err != nil {
+				return item{}, false, err
+			}
+			visible = filtered
+			continue
 		case "b":
 			return item{}, false, nil
 		case "q":
 			return item{}, false, io.EOF
 		}
 		idx, err := strconv.Atoi(text)
-		if err == nil && idx >= 1 && idx <= len(items) {
-			return items[idx-1], true, nil
+		if err == nil && idx >= 1 && idx <= len(visible) {
+			return visible[idx-1], true, nil
 		}
 		fmt.Fprintln(out, "无效选择，请重新输入。")
 	}
+}
+
+func searchItems(items []item, scanner *bufio.Scanner, out io.Writer) ([]item, error) {
+	fmt.Fprint(out, "搜索关键词（空值显示全部）: ")
+	if !scanner.Scan() {
+		return nil, scanner.Err()
+	}
+	query := strings.TrimSpace(scanner.Text())
+	if query == "" {
+		return items, nil
+	}
+	filtered := filterItems(items, query)
+	if len(filtered) == 0 {
+		fmt.Fprintln(out, "未找到匹配项，已恢复显示全部。")
+		return items, nil
+	}
+	fmt.Fprintf(out, "已匹配 %d 项。\n", len(filtered))
+	return filtered, nil
+}
+
+func filterItems(items []item, query string) []item {
+	query = strings.ToLower(query)
+	filtered := []item{}
+	for _, it := range items {
+		if strings.Contains(strings.ToLower(it.id), query) || strings.Contains(strings.ToLower(it.name), query) || strings.Contains(strings.ToLower(it.description), query) {
+			filtered = append(filtered, it)
+		}
+	}
+	return filtered
 }
 
 func itemsForCategory(reg *registry.Registry, categoryID string) []item {

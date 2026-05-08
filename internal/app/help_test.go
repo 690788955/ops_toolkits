@@ -33,6 +33,42 @@ func TestPrintToolHelpIncludesParametersAndExamples(t *testing.T) {
 	}
 }
 
+func TestPrintCatalogListGroupsByCategory(t *testing.T) {
+	reg := &registry.Registry{
+		Root: &config.RootConfig{Menu: config.MenuConfig{Categories: []config.Category{{ID: "demo", Name: "演示"}, {ID: "ops", Name: "运维"}}}},
+		Tools: map[string]*registry.Tool{
+			"demo.deploy": {Entry: config.ToolEntry{ID: "demo.deploy", Category: "demo", Name: "部署工具", Description: "发布应用"}},
+			"ops.clean":   {Entry: config.ToolEntry{ID: "ops.clean", Category: "ops", Name: "清理工具", Description: "清理临时文件"}},
+		},
+		Workflows: map[string]*registry.Workflow{
+			"demo.release": {Entry: config.WorkflowRef{ID: "demo.release", Category: "demo", Name: "发布流程", Description: "发布应用流程"}},
+		},
+	}
+
+	var out bytes.Buffer
+	printCatalogList(&out, reg)
+	text := out.String()
+	for _, want := range []string{"演示", "  工具", "demo.deploy", "部署工具", "  工作流", "demo.release", "运维", "ops.clean"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("list 输出缺少 %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestInteractiveCommandsDescribeStartAsPrimaryEntry(t *testing.T) {
+	start := startCommand(&options{})
+	menu := menuCommand(&options{})
+	if !strings.Contains(start.Long, "快捷执行工具或工作流") {
+		t.Fatalf("start Long 未说明快捷执行: %s", start.Long)
+	}
+	if !strings.Contains(menu.Long, "兼容保留") || !strings.Contains(menu.Long, "推荐 opsctl start") {
+		t.Fatalf("menu Long 未说明兼容别名: %s", menu.Long)
+	}
+	if startUse := start.Use; !strings.Contains(startUse, "[tool-or-workflow-id]") {
+		t.Fatalf("start Use = %q, want direct ID usage", startUse)
+	}
+}
+
 func TestPrintWorkflowHelpIncludesDAG(t *testing.T) {
 	wf := &registry.Workflow{
 		Path: "plugins/plugin.demo/workflows/demo-condition.yaml",
