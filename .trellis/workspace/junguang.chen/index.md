@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 7
+- **Total Sessions**: 8
 - **Last Active**: 2026-05-08
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~241 | Active |
+| `journal-1.md` | ~274 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 8 | 2026-05-08 | 交互式参数输入引导改进 | `f530ccc` | `master` |
 | 7 | 2026-05-08 | 菜单导航选项视觉分隔 | `84d701d` | `master` |
 | 6 | 2026-05-08 | GitHub Actions 多平台打包质量检查 | `9c99638` | `master` |
 | 5 | 2026-05-08 | CLI/menu UX optimization | `dd85153` | `master` |
