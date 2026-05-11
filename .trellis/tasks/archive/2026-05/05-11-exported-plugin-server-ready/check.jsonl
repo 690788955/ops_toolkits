@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/plugin-import-export.md","reason":"检查插件标准 ZIP 和新增运行包未破坏导入导出安全契约。"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"检查 Go 构建、测试、validate/list 命令和运行结构。"}
+{"file":".trellis/spec/guides/cross-platform-runtime-thinking-guide.md","reason":"检查多平台二进制查找、命名、路径和验证命令。"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"检查后端 API、前端下拉下载和错误提示保持一致。"}
+{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"检查 Web 构建和插件管理交互没有回归。"}
