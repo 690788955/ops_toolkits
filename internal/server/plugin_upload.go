@@ -1,8 +1,10 @@
 package server
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"shell_ops/internal/config"
 	"shell_ops/internal/plugin"
@@ -590,20 +594,59 @@ func copyDir(src, dst string) error {
 }
 
 func buildPluginExportZip(reg *registry.Registry, pluginID string) ([]byte, error) {
-	if !isSafePluginExportID(pluginID) {
-		return nil, fmt.Errorf("插件 ID 包含不安全路径字符")
-	}
-	pkg, ok := installedPlugin(reg, pluginID)
-	if !ok {
-		return nil, fmt.Errorf("%w: %s", errPluginNotFound, pluginID)
-	}
-	if !registryKnowsPlugin(reg, pkg) {
-		return nil, fmt.Errorf("%w: %s", errPluginNotFound, pluginID)
-	}
-	if err := ensurePluginDirInConfiguredRoot(reg, pkg.Dir); err != nil {
+	pkg, err := exportablePluginPackage(reg, pluginID)
+	if err != nil {
 		return nil, err
 	}
 	return zipPluginDir(pkg.Dir)
+}
+
+func exportablePluginPackage(reg *registry.Registry, pluginID string) (plugin.Package, error) {
+	if !isSafePluginExportID(pluginID) {
+		return plugin.Package{}, fmt.Errorf("插件 ID 包含不安全路径字符")
+	}
+	pkg, ok := installedPlugin(reg, pluginID)
+	if !ok {
+		return plugin.Package{}, fmt.Errorf("%w: %s", errPluginNotFound, pluginID)
+	}
+	if !registryKnowsPlugin(reg, pkg) {
+		return plugin.Package{}, fmt.Errorf("%w: %s", errPluginNotFound, pluginID)
+	}
+	if err := ensurePluginDirInConfiguredRoot(reg, pkg.Dir); err != nil {
+		return plugin.Package{}, err
+	}
+	return pkg, nil
+}
+
+func buildPluginRuntimePackage(reg *registry.Registry, pluginID, goos, goarch, format string) ([]byte, error) {
+	pkg, err := exportablePluginPackage(reg, pluginID)
+	if err != nil {
+		return nil, err
+	}
+	if !isSupportedRuntimeTarget(goos, goarch) {
+		return nil, fmt.Errorf("不支持的目标平台: %s/%s", goos, goarch)
+	}
+	format = strings.TrimSpace(format)
+	if format != "zip" && format != "tar.gz" {
+		return nil, fmt.Errorf("不支持的运行包格式: %s", format)
+	}
+	exeName := runtimeBinaryName(goos, goarch)
+	exePath := filepath.Join(reg.BaseDir, "bin", exeName)
+	exeInfo, err := os.Stat(exePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("目标平台 opsctl 二进制不存在: bin/%s", exeName)
+		}
+		return nil, err
+	}
+	if exeInfo.IsDir() || exeInfo.Mode()&os.ModeSymlink != 0 || !exeInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("目标平台 opsctl 二进制不是普通文件: bin/%s", exeName)
+	}
+	entries := runtimePackageEntries(reg, pkg, exePath, exeInfo, goos, goarch)
+	if format == "zip" {
+		return buildRuntimeZip(entries)
+	}
+	return buildRuntimeTarGz(entries)
 }
 
 func isSafePluginExportID(pluginID string) bool {
@@ -620,6 +663,271 @@ func isSafePluginExportID(pluginID string) bool {
 		return false
 	}
 	return true
+}
+
+func isSupportedRuntimeTarget(goos, goarch string) bool {
+	switch goos + "/" + goarch {
+	case "linux/amd64", "linux/arm64", "windows/amd64", "windows/arm64", "darwin/amd64", "darwin/arm64":
+		return true
+	default:
+		return false
+	}
+}
+
+func runtimeBinaryName(goos, goarch string) string {
+	name := "opsctl_" + goos + "_" + goarch
+	if goos == "windows" {
+		name += ".exe"
+	}
+	return name
+}
+
+type runtimePackageEntry struct {
+	Name string
+	Path string
+	Data []byte
+	Mode os.FileMode
+}
+
+func runtimePackageEntries(reg *registry.Registry, pkg plugin.Package, exePath string, exeInfo os.FileInfo, goos, goarch string) []runtimePackageEntry {
+	binName := "opsctl"
+	if goos == "windows" {
+		binName += ".exe"
+	}
+	return []runtimePackageEntry{
+		{Name: "opsctl/bin/" + binName, Path: exePath, Mode: exeInfo.Mode()},
+		{Name: "opsctl/configs/ops.yaml", Data: minimalRuntimeConfig(reg), Mode: 0o644},
+		{Name: "opsctl/README.md", Data: runtimePackageReadme(pkg.Manifest, goos, goarch), Mode: 0o644},
+		{Name: "opsctl/plugins/" + filepath.Base(pkg.Dir), Path: pkg.Dir, Mode: 0o755},
+	}
+}
+
+func minimalRuntimeConfig(reg *registry.Registry) []byte {
+	name := reg.Root.App.Name
+	if strings.TrimSpace(name) == "" {
+		name = "Shell 运维框架"
+	}
+	description := reg.Root.App.Description
+	if strings.TrimSpace(description) == "" {
+		description = "运维自动化框架"
+	}
+	version := reg.Root.App.Version
+	if strings.TrimSpace(version) == "" {
+		version = "0.1.0"
+	}
+	serverHost := reg.Root.Server.Host
+	if strings.TrimSpace(serverHost) == "" {
+		serverHost = "0.0.0.0"
+	}
+	serverPort := reg.Root.Server.Port
+	if serverPort == 0 {
+		serverPort = 8080
+	}
+	uiTitle := reg.Root.UI.Title
+	if strings.TrimSpace(uiTitle) == "" {
+		uiTitle = "运维工作流控制台"
+	}
+	root := config.RootConfig{
+		App:             config.AppConfig{Name: name, Description: description, Version: version},
+		Paths:           config.PathsConfig{Tools: []string{}, Workflows: []string{}, Runs: "runs", Logs: "runs/logs"},
+		Server:          config.ServerConfig{Enabled: true, Host: serverHost, Port: serverPort},
+		Menu:            config.MenuConfig{Categories: []config.Category{}},
+		Registry:        config.RegistryConfig{IncludeTools: []string{}, IncludeWorkflows: []string{}},
+		Plugins:         config.PluginsConfig{Paths: []string{"plugins"}, Strict: reg.Root.Plugins.Strict, Disabled: []string{}, AllowedCommands: []string{}},
+		UI:              config.UIConfig{Enabled: true, Title: uiTitle},
+		HostConfigFiles: config.HostConfigFilesConfig{AllowedDirs: []string{}},
+		ConfigDefaults:  map[string]interface{}{},
+	}
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	_ = enc.Encode(root)
+	_ = enc.Close()
+	return buf.Bytes()
+}
+
+func runtimePackageReadme(manifest plugin.Manifest, goos, goarch string) []byte {
+	pluginName := manifest.Name
+	if strings.TrimSpace(pluginName) == "" {
+		pluginName = manifest.ID
+	}
+	binary := "./bin/opsctl"
+	if goos == "windows" {
+		binary = `.\\bin\\opsctl.exe`
+	}
+	content := fmt.Sprintf(`# %s 运行包
+
+本运行包包含插件 %s、最小运行配置和 %s/%s 平台的 opsctl。
+
+## 使用步骤
+
+1. 解压运行包并进入 opsctl 目录。
+2. 执行 %s validate 验证配置和插件。
+3. 执行 %s list 查看插件贡献的工具和工作流。
+4. 执行 %s start 或 %s serve --port 8080 启动服务。
+
+## 注意事项
+
+- 运行包只包含当前选择的插件，不包含其他插件。
+- 外部系统命令、语言运行时、Ansible、Java、Python 包等依赖需要在目标服务器自行安装。
+- 如插件使用宿主绝对路径配置文件，请在目标服务器按需编辑 configs/ops.yaml。
+`, pluginName, manifest.ID, goos, goarch, binary, binary, binary, binary)
+	return []byte(content)
+}
+
+func buildRuntimeZip(entries []runtimePackageEntry) ([]byte, error) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, entry := range entries {
+		if err := addRuntimeZipEntry(zw, entry); err != nil {
+			_ = zw.Close()
+			return nil, err
+		}
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func addRuntimeZipEntry(zw *zip.Writer, entry runtimePackageEntry) error {
+	if entry.Path == "" {
+		return addRuntimeZipFile(zw, entry.Name, entry.Data, entry.Mode)
+	}
+	info, err := os.Stat(entry.Path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return filepath.WalkDir(entry.Path, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			fileInfo, err := d.Info()
+			if err != nil {
+				return err
+			}
+			if fileInfo.Mode()&os.ModeSymlink != 0 || !fileInfo.Mode().IsRegular() {
+				return fmt.Errorf("运行包包含不支持的特殊文件: %s", path)
+			}
+			rel, err := filepath.Rel(entry.Path, path)
+			if err != nil {
+				return err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			return addRuntimeZipFile(zw, filepath.ToSlash(filepath.Join(entry.Name, rel)), data, fileInfo.Mode())
+		})
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("运行包包含不支持的特殊文件: %s", entry.Path)
+	}
+	data, err := os.ReadFile(entry.Path)
+	if err != nil {
+		return err
+	}
+	return addRuntimeZipFile(zw, entry.Name, data, entry.Mode)
+}
+
+func addRuntimeZipFile(zw *zip.Writer, name string, data []byte, mode os.FileMode) error {
+	if unsafeRuntimeArchiveName(name) {
+		return fmt.Errorf("运行包包含不安全路径: %s", name)
+	}
+	header := &zip.FileHeader{Name: filepath.ToSlash(name), Method: zip.Deflate}
+	header.SetMode(mode)
+	writer, err := zw.CreateHeader(header)
+	if err != nil {
+		return err
+	}
+	_, err = writer.Write(data)
+	return err
+}
+
+func buildRuntimeTarGz(entries []runtimePackageEntry) ([]byte, error) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	for _, entry := range entries {
+		if err := addRuntimeTarEntry(tw, entry); err != nil {
+			_ = tw.Close()
+			_ = gw.Close()
+			return nil, err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		_ = gw.Close()
+		return nil, err
+	}
+	if err := gw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func addRuntimeTarEntry(tw *tar.Writer, entry runtimePackageEntry) error {
+	if entry.Path == "" {
+		return addRuntimeTarFile(tw, entry.Name, entry.Data, entry.Mode)
+	}
+	info, err := os.Stat(entry.Path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return filepath.WalkDir(entry.Path, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			fileInfo, err := d.Info()
+			if err != nil {
+				return err
+			}
+			if fileInfo.Mode()&os.ModeSymlink != 0 || !fileInfo.Mode().IsRegular() {
+				return fmt.Errorf("运行包包含不支持的特殊文件: %s", path)
+			}
+			rel, err := filepath.Rel(entry.Path, path)
+			if err != nil {
+				return err
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			return addRuntimeTarFile(tw, filepath.ToSlash(filepath.Join(entry.Name, rel)), data, fileInfo.Mode())
+		})
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("运行包包含不支持的特殊文件: %s", entry.Path)
+	}
+	data, err := os.ReadFile(entry.Path)
+	if err != nil {
+		return err
+	}
+	return addRuntimeTarFile(tw, entry.Name, data, entry.Mode)
+}
+
+func addRuntimeTarFile(tw *tar.Writer, name string, data []byte, mode os.FileMode) error {
+	if unsafeRuntimeArchiveName(name) {
+		return fmt.Errorf("运行包包含不安全路径: %s", name)
+	}
+	header := &tar.Header{Name: filepath.ToSlash(name), Mode: int64(mode.Perm()), Size: int64(len(data))}
+	if err := tw.WriteHeader(header); err != nil {
+		return err
+	}
+	_, err := tw.Write(data)
+	return err
+}
+
+func unsafeRuntimeArchiveName(name string) bool {
+	name = filepath.ToSlash(name)
+	return name == "" || strings.HasPrefix(name, "/") || filepath.IsAbs(name) || hasUnsafeZipPathSegment(name)
 }
 
 func installedPluginPackages(reg *registry.Registry) []plugin.Package {

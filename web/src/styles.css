@@ -461,6 +461,31 @@ pre {
 .pluginExportItem span { margin-top: 4px; color: var(--color-link); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; font-weight: 800; }
 .pluginExportItem small { margin-top: 5px; color: var(--color-muted); font-size: 12px; line-height: 1.35; }
 .pluginExportItem a, .pluginExportItem button { text-align: center; text-decoration: none; }
+.runtimeTargetSelect { display: grid; gap: 8px; margin-bottom: 14px; }
+.runtimeTargetSelect span { color: var(--color-black); font-size: 13px; font-weight: 900; }
+.runtimeTargetSelect small { color: var(--color-muted); font-size: 12px; }
+.pluginExportDropdown { position: relative; }
+.pluginExportMenu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 70;
+  display: grid;
+  min-width: 220px;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+}
+.pluginExportMenu a {
+  padding: 10px 12px;
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 800;
+  text-align: left;
+}
+.pluginExportMenu a:hover { background: var(--color-surface-muted); }
 .pluginItemActions { justify-content: flex-end; }
 .pluginItemActions button { flex: 0 0 auto; }
 .pluginExportItem.pluginDisabled { border-color: var(--color-warning-border); background: var(--color-warning-bg); }

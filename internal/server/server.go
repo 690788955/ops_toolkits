@@ -1211,6 +1211,10 @@ func pluginDownloadHandler(state *serverState) http.HandlerFunc {
 			methodNotAllowed(w)
 			return
 		}
+		if strings.HasSuffix(name, "/runtime.zip") || strings.HasSuffix(name, "/runtime.tar.gz") {
+			handlePluginRuntimeDownload(w, req, state, name)
+			return
+		}
 		pluginID, ok := strings.CutSuffix(name, ".zip")
 		if !ok || strings.TrimSpace(pluginID) == "" {
 			writeJSON(w, http.StatusNotFound, response{Error: "not found"})
@@ -1230,6 +1234,40 @@ func pluginDownloadHandler(state *serverState) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
 	}
+}
+
+func handlePluginRuntimeDownload(w http.ResponseWriter, req *http.Request, state *serverState, name string) {
+	format := "zip"
+	pluginID, ok := strings.CutSuffix(name, "/runtime.zip")
+	if !ok {
+		format = "tar.gz"
+		pluginID, ok = strings.CutSuffix(name, "/runtime.tar.gz")
+	}
+	if !ok || strings.TrimSpace(pluginID) == "" {
+		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
+		return
+	}
+	goos := strings.TrimSpace(req.URL.Query().Get("goos"))
+	goarch := strings.TrimSpace(req.URL.Query().Get("goarch"))
+	data, err := buildPluginRuntimePackage(state.registry(), strings.Trim(pluginID, "/"), goos, goarch, format)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errPluginNotFound) {
+			status = http.StatusNotFound
+		}
+		writeJSON(w, status, response{Error: err.Error()})
+		return
+	}
+	contentType := "application/zip"
+	fileName := fmt.Sprintf("%s-opsctl-%s-%s.zip", pluginID, goos, goarch)
+	if format == "tar.gz" {
+		contentType = "application/gzip"
+		fileName = fmt.Sprintf("%s-opsctl-%s-%s.tar.gz", pluginID, goos, goarch)
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, fileName))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func loadRunDetail(reg *registry.Registry, id string) (runDetail, error) {

@@ -1388,16 +1388,35 @@ function PluginConfigFileEditor({pluginID, file, onBack}) {
 }
 
 function PluginExportModal({plugins, onClose}) {
+  const [target, setTarget] = useState('linux/amd64')
+  const [openPluginID, setOpenPluginID] = useState('')
+  const [goos, goarch] = target.split('/')
+  const targets = [
+    ['linux/amd64', 'Linux amd64'],
+    ['linux/arm64', 'Linux arm64'],
+    ['windows/amd64', 'Windows amd64'],
+    ['windows/arm64', 'Windows arm64'],
+    ['darwin/amd64', 'macOS amd64'],
+    ['darwin/arm64', 'macOS arm64']
+  ]
+  const runtimeBase = item => `/api/plugins/${encodeURIComponent(item.id)}/runtime`
   return (
     <div className="modalBackdrop modalBackdropNested" onClick={onClose}>
       <div className="modal pluginExportModal" onClick={event => event.stopPropagation()}>
         <div className="modalHeader">
           <div>
             <h3>导出已安装插件</h3>
-            <p>选择一个插件，将其下载为可再次上传安装的标准 ZIP 包。</p>
+            <p>选择插件导出标准 ZIP，或导出包含 opsctl 的单插件运行包。</p>
           </div>
           <button className="modalClose" onClick={onClose}>×</button>
         </div>
+        <label className="runtimeTargetSelect">
+          <span>运行包目标平台</span>
+          <select value={target} onChange={event => setTarget(event.target.value)}>
+            {targets.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+          <small>运行包会从服务端 base/bin 读取对应平台的 opsctl 二进制。</small>
+        </label>
         <div className="pluginExportList">
           {plugins.map(item => (
             <div className="pluginExportItem" key={item.id}>
@@ -1406,7 +1425,16 @@ function PluginExportModal({plugins, onClose}) {
                 <span>{item.id}@{item.version || '-'}</span>
                 {item.description && <small>{item.description}</small>}
               </div>
-              <a className="secondary" href={`/api/plugins/${encodeURIComponent(item.id)}.zip`}>导出</a>
+              <div className="pluginExportDropdown">
+                <button className="secondary" type="button" onClick={() => setOpenPluginID(openPluginID === item.id ? '' : item.id)}>导出</button>
+                {openPluginID === item.id && (
+                  <div className="pluginExportMenu">
+                    <a href={`/api/plugins/${encodeURIComponent(item.id)}.zip`}>标准插件包 ZIP</a>
+                    <a href={`${runtimeBase(item)}.tar.gz?goos=${encodeURIComponent(goos)}&goarch=${encodeURIComponent(goarch)}`}>含 opsctl 运行包 tar.gz</a>
+                    <a href={`${runtimeBase(item)}.zip?goos=${encodeURIComponent(goos)}&goarch=${encodeURIComponent(goarch)}`}>含 opsctl 运行包 ZIP</a>
+                  </div>
+                )}
+              </div>
             </div>
           ))}
           {plugins.length === 0 && <div className="empty small">当前没有可导出的已安装插件。</div>}

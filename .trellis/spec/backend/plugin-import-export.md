@@ -127,6 +127,136 @@ Why correct:
 
 ---
 
+## Scenario: Export a Single-Plugin Runtime Package
+
+### 1. Scope / Trigger
+
+- Trigger: adding or changing downloadable packages that are meant to run a selected plugin directly on another server.
+- This is a cross-layer contract: backend route + archive shape + generated runtime config + Web UI download links must stay aligned.
+- Runtime packages are not a replacement for standard plugin ZIPs. The upload-compatible `GET /api/plugins/{pluginID}.zip` route must remain available.
+
+### 2. Signatures
+
+- Runtime package ZIP API: `GET /api/plugins/{pluginID}/runtime.zip?goos={goos}&goarch={goarch}`
+- Runtime package tar.gz API: `GET /api/plugins/{pluginID}/runtime.tar.gz?goos={goos}&goarch={goarch}`
+- Required query parameters:
+  - `goos`: one of `linux`, `windows`, `darwin`
+  - `goarch`: one of `amd64`, `arm64`
+- Supported target pairs:
+  - `linux/amd64`
+  - `linux/arm64`
+  - `windows/amd64`
+  - `windows/arm64`
+  - `darwin/amd64`
+  - `darwin/arm64`
+- Target binary lookup:
+  - Linux/macOS: `<registry.BaseDir>/bin/opsctl_<goos>_<goarch>`
+  - Windows: `<registry.BaseDir>/bin/opsctl_windows_<goarch>.exe`
+- Success headers:
+  - ZIP: `Content-Type: application/zip`, filename `{pluginID}-opsctl-{goos}-{goarch}.zip`
+  - tar.gz: `Content-Type: application/gzip`, filename `{pluginID}-opsctl-{goos}-{goarch}.tar.gz`
+
+### 3. Contracts
+
+- Runtime archive root must be `opsctl/`.
+- Runtime archive entries must include:
+  - `opsctl/bin/opsctl` for Linux/macOS targets or `opsctl/bin/opsctl.exe` for Windows targets
+  - `opsctl/configs/ops.yaml`
+  - `opsctl/README.md`
+  - `opsctl/plugins/<selected-plugin-dir>/...`
+- Runtime archive must include exactly the selected plugin package and must not include other installed plugins.
+- `opsctl/configs/ops.yaml` must be a generated minimal runtime config:
+  - plugin loading points to `plugins`
+  - legacy root `tools` and `workflows` lists are empty
+  - runs/logs point to `runs` and `runs/logs`
+  - server and UI are enabled with safe defaults
+  - `host_config_files.allowed_dirs` is empty
+  - no plugin IDs are hard-coded into the generated config
+- `opsctl/README.md` must be Chinese and explain at least:
+  - unzip and enter `opsctl/`
+  - run `bin/opsctl validate`
+  - run `bin/opsctl list`
+  - start the service with `start` or `serve --port 8080`
+  - external system commands/runtimes must be installed on the target server
+  - host absolute config mappings must be edited for the target server when needed
+- Web plugin management must expose one export action per plugin and present three choices:
+  - standard plugin package ZIP
+  - runtime package tar.gz
+  - runtime package ZIP
+
+### 4. Validation & Error Matrix
+
+| Condition | Expected behavior |
+|---|---|
+| Non-GET request to a runtime package route | `405 method not allowed` |
+| Unknown installed plugin | `404` JSON error containing plugin ID |
+| Plugin ID contains path, URL, header, space, `.` or `..` unsafe characters | reject before filesystem lookup |
+| Missing or unsupported `goos/goarch` pair | `400` JSON error explaining the unsupported target |
+| Missing target binary under `bin/opsctl_<goos>_<goarch>[.exe]` | `400` JSON error explaining the binary is missing |
+| Target binary is a directory, symlink, or special file | `400` JSON error explaining it is not a regular file |
+| Plugin directory is outside configured plugin roots after symlink evaluation | reject with error |
+| Plugin package contains symlink or special file | reject export |
+| Runtime archive entry would be absolute, escaped, empty, or contain unsafe path segment | reject export |
+| Standard plugin ZIP route `/api/plugins/{pluginID}.zip` | remains upload-compatible and unchanged |
+| Reserved plugin routes such as `/api/plugins/upload` | remain unshadowed by runtime package routes |
+
+### 5. Good/Base/Bad Cases
+
+- Good: `GET /api/plugins/vendor.backup/runtime.zip?goos=linux&goarch=amd64` returns a ZIP containing `opsctl/bin/opsctl`, generated `opsctl/configs/ops.yaml`, `opsctl/README.md`, and only `opsctl/plugins/vendor.backup/...`.
+- Base: `GET /api/plugins/vendor.backup/runtime.tar.gz?goos=windows&goarch=amd64` returns a tar.gz containing `opsctl/bin/opsctl.exe` and the same runtime layout.
+- Bad: `GET /api/plugins/vendor.backup/runtime.zip?goos=freebsd&goarch=amd64` must not guess a binary name or fall back to the host platform.
+
+### 6. Tests Required
+
+- Runtime ZIP success test asserts status/headers or direct builder output and required entries.
+- Runtime tar.gz success test asserts Windows target maps to `opsctl/bin/opsctl.exe`.
+- Single-plugin isolation test asserts another installed plugin is not present in the runtime archive.
+- Generated config test asserts `plugins.paths: [plugins]`, empty legacy tool/workflow paths, empty host allowlist, and no selected plugin ID embedded in config.
+- README test asserts selected plugin ID/name and external dependency guidance are present.
+- Missing binary test asserts a readable Chinese error containing the expected `bin/opsctl_<goos>_<goarch>[.exe]` path.
+- Unsupported target test asserts no fallback to current runtime platform.
+- Route precedence test asserts standard plugin ZIP, runtime ZIP/tar.gz, upload, disable/enable/delete routes do not shadow one another.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+func buildRuntimePackage(reg *registry.Registry, pluginID string) ([]byte, error) {
+    exe, _ := os.Executable()
+    return zipFiles(exe, filepath.Join(reg.BaseDir, "plugins"))
+}
+```
+
+Why wrong:
+- It silently packages the current host binary instead of the requested target platform.
+- It risks including all installed plugins rather than the selected plugin.
+- It copies the host runtime environment instead of generating a portable minimal config.
+
+#### Correct
+
+```go
+func buildPluginRuntimePackage(reg *registry.Registry, pluginID, goos, goarch, format string) ([]byte, error) {
+    pkg, err := exportablePluginPackage(reg, pluginID)
+    if err != nil {
+        return nil, err
+    }
+    if !isSupportedRuntimeTarget(goos, goarch) {
+        return nil, fmt.Errorf("不支持的目标平台: %s/%s", goos, goarch)
+    }
+    exeName := runtimeBinaryName(goos, goarch)
+    exePath := filepath.Join(reg.BaseDir, "bin", exeName)
+    // verify exePath is an existing regular file, then archive only pkg.Dir
+}
+```
+
+Why correct:
+- The selected plugin is resolved through the same registry-known export safety path as standard ZIP export.
+- The target binary is explicit and comes from the server base directory build outputs.
+- The archive contains a predictable `opsctl/` runtime root and generated config.
+
+---
+
 ## Design Decision: Plugin Export Reuses Upload Package Shape
 
 **Context**: The platform already imports ZIPs by scanning for exactly one `plugin.yaml`; export should create packages that the same importer accepts.

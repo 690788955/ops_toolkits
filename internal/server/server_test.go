@@ -1,8 +1,10 @@
 package server
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -723,6 +725,110 @@ func TestPluginExportZipCanBeDiscoveredByUploadRoot(t *testing.T) {
 	}
 	if filepath.Base(root) != "vendor.roundtrip" {
 		t.Fatalf("root = %s, want vendor.roundtrip", root)
+	}
+}
+
+func TestPluginRuntimePackageZipContainsSinglePluginRuntime(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPluginWithWorkflow(t, baseReg.BaseDir, "vendor.runtime", "1.0.0")
+	installTestPluginWithWorkflow(t, baseReg.BaseDir, "vendor.other", "1.0.0")
+	writeRuntimeBinary(t, baseReg.BaseDir, "linux", "amd64")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+
+	data, err := buildPluginRuntimePackage(reg, "vendor.runtime", "linux", "amd64", "zip")
+	if err != nil {
+		t.Fatalf("构建运行包失败: %v", err)
+	}
+	entries := zipEntries(t, data)
+	for _, name := range []string{
+		"opsctl/bin/opsctl",
+		"opsctl/configs/ops.yaml",
+		"opsctl/README.md",
+		"opsctl/plugins/vendor.runtime/plugin.yaml",
+		"opsctl/plugins/vendor.runtime/scripts/run.sh",
+		"opsctl/plugins/vendor.runtime/workflows/flow.yaml",
+	} {
+		if !entries[name] {
+			t.Fatalf("运行包缺少文件 %s，entries=%v", name, entries)
+		}
+	}
+	if entries["opsctl/plugins/vendor.other/plugin.yaml"] {
+		t.Fatalf("运行包不应包含未选择插件: entries=%v", entries)
+	}
+	configData := zipEntryData(t, data, "opsctl/configs/ops.yaml")
+	for _, want := range []string{"plugins:", "paths:", "- plugins", "host_config_files:", "allowed_dirs: []"} {
+		if !strings.Contains(string(configData), want) {
+			t.Fatalf("最小配置缺少 %q:\n%s", want, string(configData))
+		}
+	}
+	if strings.Contains(string(configData), "vendor.other") || strings.Contains(string(configData), "vendor.runtime") {
+		t.Fatalf("最小配置不应写入插件 ID: %s", string(configData))
+	}
+	readme := string(zipEntryData(t, data, "opsctl/README.md"))
+	if !strings.Contains(readme, "vendor.runtime") || !strings.Contains(readme, "外部系统命令") {
+		t.Fatalf("README 内容不完整: %s", readme)
+	}
+}
+
+func TestPluginRuntimePackageTarGzContainsRuntime(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPluginWithWorkflow(t, baseReg.BaseDir, "vendor.runtime", "1.0.0")
+	writeRuntimeBinary(t, baseReg.BaseDir, "windows", "amd64")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+
+	data, err := buildPluginRuntimePackage(reg, "vendor.runtime", "windows", "amd64", "tar.gz")
+	if err != nil {
+		t.Fatalf("构建运行包失败: %v", err)
+	}
+	entries := tarGzEntries(t, data)
+	for _, name := range []string{"opsctl/bin/opsctl.exe", "opsctl/configs/ops.yaml", "opsctl/plugins/vendor.runtime/plugin.yaml"} {
+		if !entries[name] {
+			t.Fatalf("运行包 tar.gz 缺少文件 %s，entries=%v", name, entries)
+		}
+	}
+}
+
+func TestPluginRuntimePackageRejectsMissingBinary(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPluginWithWorkflow(t, baseReg.BaseDir, "vendor.runtime", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+
+	_, err = buildPluginRuntimePackage(reg, "vendor.runtime", "linux", "amd64", "zip")
+	if err == nil || !strings.Contains(err.Error(), "二进制不存在") {
+		t.Fatalf("err = %v, want 二进制不存在", err)
+	}
+}
+
+func TestPluginRuntimeDownloadRoute(t *testing.T) {
+	baseReg := testRegistry(t)
+	installTestPluginWithWorkflow(t, baseReg.BaseDir, "vendor.runtime", "1.0.0")
+	writeRuntimeBinary(t, baseReg.BaseDir, "linux", "amd64")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/plugins/vendor.runtime/runtime.zip?goos=linux&goarch=amd64", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if contentType := res.Header().Get("Content-Type"); contentType != "application/zip" {
+		t.Fatalf("Content-Type = %q", contentType)
+	}
+	if disposition := res.Header().Get("Content-Disposition"); !strings.Contains(disposition, "vendor.runtime-opsctl-linux-amd64.zip") {
+		t.Fatalf("Content-Disposition = %s", disposition)
 	}
 }
 
@@ -2368,6 +2474,78 @@ contributes:
 func buildPluginExportZipMustFail(reg *registry.Registry, pluginID string) error {
 	_, err := buildPluginExportZip(reg, pluginID)
 	return err
+}
+
+func writeRuntimeBinary(t *testing.T, baseDir, goos, goarch string) {
+	t.Helper()
+	name := runtimeBinaryName(goos, goarch)
+	path := filepath.Join(baseDir, "bin", name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("opsctl binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func zipEntries(t *testing.T, data []byte) map[string]bool {
+	t.Helper()
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("无法读取 zip: %v", err)
+	}
+	entries := map[string]bool{}
+	for _, file := range reader.File {
+		entries[file.Name] = true
+	}
+	return entries
+}
+
+func zipEntryData(t *testing.T, data []byte, name string) []byte {
+	t.Helper()
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("无法读取 zip: %v", err)
+	}
+	for _, file := range reader.File {
+		if file.Name != name {
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rc.Close()
+		content, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return content
+	}
+	t.Fatalf("zip entry %s not found", name)
+	return nil
+}
+
+func tarGzEntries(t *testing.T, data []byte) map[string]bool {
+	t.Helper()
+	gz, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("无法读取 gzip: %v", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	entries := map[string]bool{}
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries[header.Name] = true
+	}
+	return entries
 }
 
 func installTestPluginWithWorkflow(t *testing.T, baseDir, id, version string) {
