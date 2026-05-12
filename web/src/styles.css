@@ -248,7 +248,7 @@ button { cursor: pointer; }
 .entry strong, .entry span, .entry em { display: block; }
 .entry strong { color: var(--color-black); font-size: 16px; font-weight: 800; }
 .entry span { margin-top: 6px; color: var(--color-muted); line-height: 1.4; }
-.entry em, .mappingRow em, .paletteItem:not(.controlPaletteItem) > em, .conditionInputSummary, .toolNode span {
+.entry em, .mappingRow em, .paletteItem:not(.controlPaletteItem) > em, .conditionInputSummary, .toolNode .nodeHoverMeta {
   color: var(--color-link);
   font-family: "JetBrains Mono", ui-monospace, monospace;
   font-size: 12px;
@@ -641,7 +641,9 @@ pre {
 }
 
 .toolNode {
-  min-width: 188px;
+  display: grid;
+  min-width: 196px;
+  gap: 5px;
   border: 1.5px solid var(--color-black);
   border-radius: 16px;
   padding: 14px 34px 14px 16px;
@@ -844,10 +846,30 @@ pre {
 }
 .toolNode strong, .toolNode span { display: block; }
 .toolNode strong { overflow: hidden; font-size: 14px; letter-spacing: -.2px; text-overflow: ellipsis; white-space: nowrap; }
+.toolNode .toolTypeLine {
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.toolParamStatus {
+  overflow: hidden;
+  border-top: 1px solid rgba(12,18,32,.08);
+  padding-top: 5px;
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.toolParamStatus.warning { color: var(--color-warning-text); }
 .toolNode .nodeHoverMeta { margin-top: 0; }
 .toolNode:hover .nodeHoverMeta,
 .toolNode.selected .nodeHoverMeta,
-.react-flow__node.selected .toolNode .nodeHoverMeta { margin-top: 5px; }
+.react-flow__node.selected .toolNode .nodeHoverMeta { margin-top: 1px; }
 
 .runStatusBadge {
   position: absolute;
@@ -1029,8 +1051,8 @@ pre {
   top: 50%;
   left: 50%;
   display: grid;
-  width: min(420px, calc(100% - 40px));
-  max-height: min(620px, calc(100% - 116px));
+  width: min(440px, calc(100% - 40px));
+  max-height: min(640px, calc(100% - 116px));
   gap: 14px;
   overflow: auto;
   border: 1px solid var(--color-border);
@@ -1067,6 +1089,7 @@ pre {
   gap: 8px;
   padding-right: 2px;
 }
+.nodePickerList.compact { max-height: 176px; }
 .nodePickerItem {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -1082,26 +1105,39 @@ pre {
   transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease, background .15s ease;
 }
 .nodePickerItem:hover { border-color: var(--color-black); background: var(--color-panel); box-shadow: var(--shadow-whisper); transform: translateY(-1px); }
+.nodePickerItemText {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
 .nodePickerItem b { overflow: hidden; color: var(--color-black); font-size: 14px; font-weight: 900; letter-spacing: -.2px; text-overflow: ellipsis; white-space: nowrap; }
+.nodePickerItem small {
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .nodePickerItem .paletteShape { width: 28px; height: 28px; font-size: 13px; }
 .nodePickerItem .paletteShape.tool { height: 22px; }
 
 .canvasDock {
   position: absolute;
-  right: 50%;
+  right: 18px;
   bottom: 18px;
   z-index: 7;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
+  max-width: min(720px, calc(100% - 168px));
   gap: 8px;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-pill);
+  border-radius: 22px;
   padding: 8px;
   background: rgba(255,255,255,.96);
   box-shadow: var(--shadow-standard);
-  transform: translateX(50%);
 }
 .canvasDock button {
   min-width: 38px;

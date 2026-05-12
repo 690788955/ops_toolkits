@@ -98,13 +98,17 @@ function controlShapeLabel(type) {
 
 function ToolNode({id, data, selected}) {
   const runTitle = formatNodeRunTitle(data.run)
-  const nodeTitle = [data.name || id, data.tool, runTitle].filter(Boolean).join('\n')
+  const paramStatus = data.paramStatus || toolParamStatus(null, data.params || {})
+  const sourceLabel = data.toolMeta?.sourceLabel || '插件工具'
+  const nodeTitle = [data.name || id, sourceLabel, data.tool, paramStatus.title, runTitle].filter(Boolean).join('\n')
   return (
     <div className={nodeRunClass('toolNode', selected, data.run)} title={nodeTitle}>
       <Handle type="target" position={Position.Left} />
       <RunStatusBadge run={data.run} />
       <button className="nodeDelete nodrag nopan" onMouseDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); data.onRemove(id) }} title="删除节点">×</button>
       <strong>{data.name || id}</strong>
+      <span className="toolTypeLine">{sourceLabel}</span>
+      <span className={paramStatus.missingRequired > 0 || paramStatus.toolMissing ? 'toolParamStatus warning' : 'toolParamStatus'}>{paramStatus.label}</span>
       {data.tool && <span className="nodeHoverMeta">{data.tool}</span>}
       <Handle type="source" position={Position.Right} />
     </div>
@@ -1638,7 +1642,8 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   const [paletteTab, setPaletteTab] = useState('tools')
   const [flowInstance, setFlowInstance] = useState(null)
   const canvasCardRef = useRef(null)
-  const [nodePicker, setNodePicker] = useState({open: false, position: null})
+  const quickConnectRef = useRef(null)
+  const [nodePicker, setNodePicker] = useState({open: false, position: null, panelPosition: null, connection: null})
   const [nodePickerSearchText, setNodePickerSearchText] = useState('')
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
@@ -1682,7 +1687,7 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   const nodePickerToolOptions = useMemo(() => filterEntries(toolOptions, nodePickerSearchText, ''), [toolOptions, nodePickerSearchText])
   const workflowParameters = useMemo(() => parseJSONList(workflowParamsText), [workflowParamsText])
   const mappingSources = useMemo(() => buildMappingSources(workflowParameters, selectedNodeID, nodes, edges), [workflowParameters, selectedNodeID, nodes, edges])
-  const displayNodes = useMemo(() => buildDisplayNodes(nodes, canvasRunState), [nodes, canvasRunState])
+  const displayNodes = useMemo(() => buildDisplayNodes(nodes, canvasRunState, catalog.tools || []), [nodes, canvasRunState, catalog.tools])
   const displayEdges = useMemo(() => buildDisplayEdges(edges, displayNodes, canvasRunState), [edges, displayNodes, canvasRunState])
 
   useEffect(() => {
@@ -1729,29 +1734,8 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
   const onConnect = useCallback(
     params => {
       clearCanvasRunOverlay()
-      setEdges(current => {
-        const isDuplicate = current.some(edge => (
-          edge.source === params.source &&
-          edge.target === params.target &&
-          (edge.sourceHandle || null) === (params.sourceHandle || null) &&
-          (edge.targetHandle || null) === (params.targetHandle || null)
-        ))
-        if (isDuplicate) return current
-        const sourceNode = nodes.find(node => node.id === params.source)
-        const edgeCase = edgeCaseFromHandle(sourceNode, params.sourceHandle)
-        const label = edgeCase ? conditionCaseLabel(sourceNode?.data.condition, edgeCase) : ''
-        return [
-          ...current,
-          {
-            ...params,
-            id: `${params.source}-${params.target}-${params.sourceHandle || 'source'}-${params.targetHandle || 'target'}-${Date.now()}`,
-            type: 'smoothstep',
-            animated: true,
-            label,
-            data: edgeCase ? {case: edgeCase} : {}
-          }
-        ]
-      })
+      if (quickConnectRef.current) quickConnectRef.current.completed = true
+      setEdges(current => appendFlowEdge(current, params, nodes))
     },
     [clearCanvasRunOverlay, nodes, setEdges]
   )
@@ -1814,44 +1798,49 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     setSelectedEdgeID('')
   }, [clearCanvasRunOverlay, setEdges, setNodes, setResult])
 
-  function addToolNode(tool, position) {
+  function addToolNode(tool, position, options = {}) {
     clearCanvasRunOverlay()
     const nodeID = uniqueNodeID(tool.id, nodes)
-    const nextNode = newToolFlowNode(tool, nodeID, position || {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}, removeNode)
-    setNodes(current => [...current, nextNode])
-    setSelectedNodeID(nodeID)
-    setSelectedEdgeID('')
-    setEditorValidation(null)
-    closeNodePicker()
-    setNodeConfigModalOpen(false)
-    setEdgeConfigModalOpen(false)
+    const nextPosition = position || {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}
+    const nextNode = newToolFlowNode(tool, nodeID, nextPosition, removeNode)
+    addNodeAndMaybeConnect(nextNode, options.connection)
   }
 
-  function addConditionNode(position) {
+  function addConditionNode(position, options = {}) {
     clearCanvasRunOverlay()
     const nodeID = uniqueNodeID('condition', nodes)
-    const nextNode = newConditionFlowNode(nodeID, position || {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}, removeNode)
-    setNodes(current => [...current, nextNode])
-    setSelectedNodeID(nodeID)
-    setSelectedEdgeID('')
-    setEditorValidation(null)
-    closeNodePicker()
-    setNodeConfigModalOpen(false)
-    setEdgeConfigModalOpen(false)
+    const nextPosition = position || {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}
+    const nextNode = newConditionFlowNode(nodeID, nextPosition, removeNode)
+    addNodeAndMaybeConnect(nextNode, options.connection)
   }
 
-  function addControlNode(controlType, position) {
+  function addControlNode(controlType, position, options = {}) {
     if (controlType === 'condition') {
-      addConditionNode(position)
+      addConditionNode(position, options)
       return
     }
     clearCanvasRunOverlay()
     const control = controlNodeCatalog.find(item => item.type === controlType && item.enabled)
     if (!control) return
     const nodeID = uniqueNodeID(controlType, nodes)
-    const nextNode = newControlFlowNode(control, nodeID, position || {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}, removeNode)
+    const nextPosition = position || {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}
+    const nextNode = newControlFlowNode(control, nodeID, nextPosition, removeNode)
+    addNodeAndMaybeConnect(nextNode, options.connection)
+  }
+
+  function addNodeAndMaybeConnect(nextNode, pendingConnection = null) {
     setNodes(current => [...current, nextNode])
-    setSelectedNodeID(nodeID)
+    if (pendingConnection?.source) {
+      const sourceNodes = [...nodes, nextNode]
+      setEdges(current => appendFlowEdge(current, {
+        source: pendingConnection.source,
+        sourceHandle: pendingConnection.sourceHandle || undefined,
+        target: nextNode.id,
+        targetHandle: undefined
+      }, sourceNodes))
+      setResult({message: `已添加下游节点 ${nextNode.id} 并建立依赖。`})
+    }
+    setSelectedNodeID(nextNode.id)
     setSelectedEdgeID('')
     setEditorValidation(null)
     closeNodePicker()
@@ -1869,26 +1858,58 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
     return {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}
   }
 
-  function openNodePicker(position) {
+  function openNodePicker(position, options = {}) {
     clearCanvasRunOverlay()
     setSelectedNodeID('')
     setSelectedEdgeID('')
     setNodeConfigModalOpen(false)
     setEdgeConfigModalOpen(false)
-    setNodePicker({open: true, position: position || defaultCanvasInsertPosition()})
+    setNodePicker({
+      open: true,
+      position: position || defaultCanvasInsertPosition(),
+      panelPosition: options.panelPosition || null,
+      connection: options.connection || null
+    })
     setNodePickerSearchText('')
   }
 
   function openNodePickerFromEvent(event) {
     event.stopPropagation()
-    const position = flowInstance
-      ? flowInstance.screenToFlowPosition({x: event.clientX, y: event.clientY})
+    const point = eventPoint(event)
+    const position = point && flowInstance
+      ? flowInstance.screenToFlowPosition(point)
       : defaultCanvasInsertPosition()
-    openNodePicker(position)
+    openNodePicker(position, {panelPosition: panelPositionFromPoint(point, canvasCardRef.current)})
   }
 
   function closeNodePicker() {
-    setNodePicker({open: false, position: null})
+    setNodePicker({open: false, position: null, panelPosition: null, connection: null})
+  }
+
+  function handleConnectStart(_, params) {
+    if (params?.handleType !== 'source' || !params?.nodeId) {
+      quickConnectRef.current = null
+      return
+    }
+    quickConnectRef.current = {
+      source: params.nodeId,
+      sourceHandle: params.handleId || '',
+      completed: false
+    }
+  }
+
+  function handleConnectEnd(event) {
+    const pending = quickConnectRef.current
+    quickConnectRef.current = null
+    if (!pending?.source || pending.completed) return
+    const point = eventPoint(event)
+    const position = point && flowInstance
+      ? flowInstance.screenToFlowPosition(point)
+      : defaultCanvasInsertPosition()
+    openNodePicker(position, {
+      panelPosition: panelPositionFromPoint(point, canvasCardRef.current),
+      connection: {source: pending.source, sourceHandle: pending.sourceHandle || ''}
+    })
   }
 
   function zoomCanvas(direction) {
@@ -2353,6 +2374,8 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
           onNodesChange={handleNodesChange}
           onEdgesChange={handleEdgesChange}
           onConnect={onConnect}
+          onConnectStart={handleConnectStart}
+          onConnectEnd={handleConnectEnd}
           onNodeClick={(_, node) => openNodeConfigModal(node.id)}
           onEdgeClick={(_, edge) => openEdgeConfigModal(edge.id)}
           onPaneClick={() => { clearSelection(); closeNodePicker() }}
@@ -2376,8 +2399,11 @@ function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog}) {
               tools={nodePickerToolOptions}
               totalTools={toolOptions.length}
               position={nodePicker.position}
-              onAddTool={tool => addToolNode(tool, nodePicker.position)}
-              onAddControl={controlType => addControlNode(controlType, nodePicker.position)}
+              panelPosition={nodePicker.panelPosition}
+              canvasElement={canvasCardRef.current}
+              connection={nodePicker.connection}
+              onAddTool={tool => addToolNode(tool, nodePicker.position, {connection: nodePicker.connection})}
+              onAddControl={controlType => addControlNode(controlType, nodePicker.position, {connection: nodePicker.connection})}
               onClose={closeNodePicker}
             />
           )}
@@ -2501,8 +2527,10 @@ function ToolNodeConfigEditor({node, tool, sources, paramsText, setParamsText, o
   )
 }
 
-function NodePickerPanel({searchText, setSearchText, tools, totalTools, onAddTool, onAddControl, onClose}) {
+function NodePickerPanel({searchText, setSearchText, tools, totalTools, panelPosition, canvasElement, connection, onAddTool, onAddControl, onClose}) {
   const keyword = searchText.trim().toLowerCase()
+  const quickAdd = Boolean(connection?.source)
+  const panelStyle = pickerPanelStyle(panelPosition, canvasElement)
   const matchingControls = controlNodeCatalog
     .filter(control => control.enabled)
     .filter(control => !keyword || [control.title, control.secondary, control.description, control.help]
@@ -2510,36 +2538,43 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, onAddToo
       .some(value => String(value).toLowerCase().includes(keyword)))
   return (
     <div className="nodePickerLayer nodrag nopan" onMouseDown={event => event.stopPropagation()}>
-      <div className="nodePickerPanel">
+      <div className="nodePickerPanel" style={panelStyle}>
         <div className="nodePickerHeader">
           <div>
-            <strong>添加节点</strong>
-            <span>选择工具或编排节点</span>
+            <strong>{quickAdd ? '添加下游节点' : '添加节点'}</strong>
+            <span>{quickAdd ? `选择后会自动连接到 ${connection.source}` : '搜索插件工具，或插入条件/并行/合流/循环节点'}</span>
           </div>
           <button type="button" className="modalClose" onClick={onClose}>×</button>
         </div>
-        <input value={searchText} placeholder="搜索工具名称、描述或 ID" onChange={event => setSearchText(event.target.value)} autoFocus />
-        {matchingControls.length > 0 && (
-          <div className="nodePickerSection">
-            <span>编排节点</span>
+        <input value={searchText} placeholder="搜索工具、编排节点、描述或 ID" onChange={event => setSearchText(event.target.value)} autoFocus />
+        <div className="nodePickerSection">
+          <span>编排节点 · {matchingControls.length} / {controlNodeCatalog.filter(control => control.enabled).length}</span>
+          <div className="nodePickerList compact">
             {matchingControls.map(control => (
               <button key={control.type} type="button" className="nodePickerItem control" onClick={() => onAddControl(control.type)} title={`${control.title}\n${control.secondary}\n${control.help || control.description}`}>
                 <span className={`paletteShape ${control.type}`} data-symbol={controlShapeMarker(control.type)} aria-hidden="true" />
-                <b>{control.title}</b>
+                <span className="nodePickerItemText">
+                  <b>{control.title}</b>
+                  <small>{control.secondary}</small>
+                </span>
               </button>
             ))}
+            {matchingControls.length === 0 && <div className="empty small">没有匹配的编排节点；可尝试搜索 Switch、Parallel、Join 或 Loop。</div>}
           </div>
-        )}
+        </div>
         <div className="nodePickerSection">
           <span>插件工具 · {tools.length} / {totalTools}</span>
           <div className="nodePickerList">
             {tools.map(tool => (
               <button key={tool.id} type="button" className="nodePickerItem" onClick={() => onAddTool(tool)} title={`${tool.name || tool.id}\n${tool.id}${tool.description ? `\n${tool.description}` : ''}`}>
                 <span className="paletteShape tool" aria-hidden="true" />
-                <b>{tool.name || tool.id}</b>
+                <span className="nodePickerItemText">
+                  <b>{tool.name || tool.id}</b>
+                  <small>{toolPickerMeta(tool)}</small>
+                </span>
               </button>
             ))}
-            {tools.length === 0 && <div className="empty small">没有匹配的插件工具。</div>}
+            {tools.length === 0 && <div className="empty small">没有匹配的插件工具；可换用工具名称、描述、ID 或标签继续搜索。</div>}
           </div>
         </div>
       </div>
@@ -2549,13 +2584,13 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, onAddToo
 
 function CanvasDock({onZoomIn, onZoomOut, onFitView, onAutoLayout, onAddNode, onRunWorkflow}) {
   return (
-    <div className="canvasDock nodrag nopan" onMouseDown={event => event.stopPropagation()}>
-      <button type="button" onClick={onZoomOut} title="缩小">−</button>
-      <button type="button" onClick={onZoomIn} title="放大">+</button>
-      <button type="button" onClick={onFitView}>适配视图</button>
-      <button type="button" onClick={onAutoLayout}>优化排版</button>
-      <button type="button" onClick={onAddNode}>添加节点</button>
-      <button type="button" className="canvasDockPrimary" onClick={onRunWorkflow}>运行工作流</button>
+    <div className="canvasDock nodrag nopan" onMouseDown={event => event.stopPropagation()} aria-label="画布操作">
+      <button type="button" onClick={onZoomOut} title="缩小画布" aria-label="缩小画布">−</button>
+      <button type="button" onClick={onZoomIn} title="放大画布" aria-label="放大画布">+</button>
+      <button type="button" onClick={onFitView} title="将全部节点适配到当前视图">适配</button>
+      <button type="button" onClick={onAutoLayout} title="按依赖关系重新排列当前画布节点">自动排版</button>
+      <button type="button" onClick={onAddNode} title="在当前视图中心添加节点">添加节点</button>
+      <button type="button" className="canvasDockPrimary" onClick={onRunWorkflow} title="执行当前工作流草稿">运行工作流</button>
     </div>
   )
 }
@@ -2936,15 +2971,128 @@ function parseLoopIterationStepID(id) {
   return {loopID: match[1], iteration: Number(match[2]) || 0, targetID: match[3]}
 }
 
-function buildDisplayNodes(nodes, runState) {
-  const overlayNodes = runState?.nodes || {}
-  return (nodes || []).map(node => ({
-    ...node,
-    data: {
-      ...node.data,
-      run: overlayNodes[node.id] || null
+function appendFlowEdge(edges, params, nodes) {
+  const isDuplicate = (edges || []).some(edge => (
+    edge.source === params.source &&
+    edge.target === params.target &&
+    (edge.sourceHandle || null) === (params.sourceHandle || null) &&
+    (edge.targetHandle || null) === (params.targetHandle || null)
+  ))
+  if (isDuplicate) return edges
+  const sourceNode = (nodes || []).find(node => node.id === params.source)
+  const edgeCase = edgeCaseFromHandle(sourceNode, params.sourceHandle)
+  const label = edgeCase ? conditionCaseLabel(sourceNode?.data.condition, edgeCase) : ''
+  return [
+    ...(edges || []),
+    {
+      ...params,
+      id: `${params.source}-${params.target}-${params.sourceHandle || 'source'}-${params.targetHandle || 'target'}-${Date.now()}`,
+      type: 'smoothstep',
+      animated: true,
+      label,
+      data: edgeCase ? {case: edgeCase} : {}
     }
-  }))
+  ]
+}
+
+function eventPoint(event) {
+  const source = event?.changedTouches?.[0] || event?.touches?.[0] || event
+  if (typeof source?.clientX !== 'number' || typeof source?.clientY !== 'number') return null
+  return {x: source.clientX, y: source.clientY}
+}
+
+function panelPositionFromPoint(point, element) {
+  if (!point || !element) return null
+  const bounds = element.getBoundingClientRect()
+  return {
+    x: point.x - bounds.left,
+    y: point.y - bounds.top
+  }
+}
+
+function pickerPanelStyle(position, element) {
+  if (!position) return undefined
+  const viewportWidth = element?.clientWidth || window.innerWidth || position.x
+  const viewportHeight = element?.clientHeight || window.innerHeight || position.y
+  const x = Math.max(220, Math.min(position.x, Math.max(220, viewportWidth - 220)))
+  const y = Math.max(120, Math.min(position.y, Math.max(120, viewportHeight - 120)))
+  return {
+    left: `${x}px`,
+    top: `${y}px`
+  }
+}
+
+function toolPickerMeta(tool) {
+  const paramCount = (tool.parameters || []).length
+  const source = tool.source?.plugin_name || tool.source?.plugin_id || tool.category || '插件工具'
+  return `${source} · ${paramCount} 参数`
+}
+
+function toolSourceLabel(tool) {
+  if (!tool) return '未知工具'
+  if (tool.source?.type === 'plugin') return tool.source.plugin_name || tool.source.plugin_id || '插件工具'
+  return tool.category || '插件工具'
+}
+
+function toolParamStatus(tool, params = {}) {
+  if (!tool) {
+    return {
+      total: 0,
+      configured: 0,
+      required: 0,
+      missingRequired: 0,
+      toolMissing: true,
+      label: '工具未注册，无法检查参数',
+      title: '参数状态：工具未注册，无法检查参数定义'
+    }
+  }
+  const parameters = tool.parameters || []
+  const total = parameters.length
+  const required = parameters.filter(param => param.required).length
+  const configured = parameters.filter(param => hasConfiguredParamValue(params?.[param.name])).length
+  const missingRequired = parameters.filter(param => param.required && !hasConfiguredParamValue(params?.[param.name])).length
+  const label = total === 0
+    ? '无需参数'
+    : missingRequired > 0
+      ? `参数 ${configured}/${total} · 缺 ${missingRequired} 必填`
+      : `参数 ${configured}/${total} · 必填已就绪`
+  return {
+    total,
+    configured,
+    required,
+    missingRequired,
+    toolMissing: false,
+    label,
+    title: `参数状态：共 ${total} 个，已配置 ${configured} 个，必填 ${required} 个，缺失必填 ${missingRequired} 个`
+  }
+}
+
+function hasConfiguredParamValue(value) {
+  if (value === undefined || value === null) return false
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value === 'object') return Object.keys(value).length > 0
+  return String(value).trim() !== ''
+}
+
+function buildDisplayNodes(nodes, runState, tools = []) {
+  const overlayNodes = runState?.nodes || {}
+  const toolMap = new Map((tools || []).map(tool => [tool.id, tool]))
+  return (nodes || []).map(node => {
+    const tool = node.type === 'toolNode' ? toolMap.get(node.data?.tool) : null
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        run: overlayNodes[node.id] || null,
+        ...(node.type === 'toolNode' ? {
+          paramStatus: toolParamStatus(tool, node.data?.params || {}),
+          toolMeta: {
+            sourceLabel: toolSourceLabel(tool)
+          }
+        } : {})
+      }
+    }
+  })
 }
 
 function buildDisplayEdges(edges, displayNodes, runState) {

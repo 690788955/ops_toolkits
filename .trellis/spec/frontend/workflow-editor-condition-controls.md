@@ -317,3 +317,117 @@ Why wrong:
 Why correct:
 
 - Delete remains a node-local action and does not trigger selection/configuration side effects.
+
+## Scenario: Canvas node picker and display-only tool metadata
+
+### 1. Scope / Trigger
+
+- Trigger: workflow editor shows compact tool metadata on canvas nodes and supports adding a downstream node from a dangling connection.
+- Applies when changing `ToolNode`, `NodePickerPanel`, `buildDisplayNodes`, connection handlers, or workflow draft serialization.
+- This is a frontend interaction/display contract only; it must not change saved workflow schema or backend runner semantics.
+
+### 2. Signatures
+
+Display-only React Flow tool node shape may include derived metadata:
+
+```js
+{
+  id: 'notify_user',
+  type: 'toolNode',
+  data: {
+    tool: 'plugin.demo.notify',
+    name: '通知用户',
+    params: {message: '{{ .steps.inspect.stdout }}'},
+    paramStatus: {total: 1, configured: 1, required: 1, missingRequired: 0},
+    toolMeta: {source: '插件开发模板'},
+    onRemove
+  }
+}
+```
+
+Node picker state for downstream insertion:
+
+```js
+{
+  open: true,
+  mode: 'connect',
+  position: {x: 320, y: 240},
+  connection: {source: 'inspect', sourceHandle: 'ok'}
+}
+```
+
+Saved workflow draft must remain free of display-only fields:
+
+```js
+{
+  nodes: [{id, type: 'tool', tool, params}],
+  edges: [{from: 'inspect', to: 'notify_user', case: 'ok'}]
+}
+```
+
+### 3. Contracts
+
+- `buildDisplayNodes(nodes, canvasRunState, tools)` may inject `data.paramStatus` and `data.toolMeta` for rendering only.
+- `buildWorkflowDraft()` must not persist `paramStatus`, `toolMeta`, `data.run`, React Flow positions introduced by display operations, or node-picker state.
+- The node picker must be reusable for normal add and downstream add; downstream mode must carry its connection context into the item selection callback instead of reading it after picker state is cleared.
+- Downstream insertion must create the selected node and one edge from `connection.source` to the new node.
+- If `connection.sourceHandle` identifies a condition case/default branch, the created edge must keep the same `data.case` and visible label behavior as normal condition edges.
+- Picker placement must be bounded by the workflow canvas container, not just by `window`, so it stays visible near canvas edges.
+- Tool nodes may show compact always-visible source and parameter readiness, but detailed tool IDs should stay hover/focus/selection-level secondary text.
+
+### 4. Validation & Error Matrix
+
+| UI condition | Expected behavior |
+|---|---|
+| normal add node from dock | open picker without connection and add one unconnected node |
+| drag connection to empty canvas then choose a tool/control node | add node and create one dependency edge from source to target |
+| condition case handle uses downstream add | created edge carries the selected case/default metadata and label |
+| picker closes before selection | no node or edge is created |
+| source node no longer exists before downstream selection | do not create a dangling edge; close picker or surface a readable failure |
+| display-only metadata exists on React Flow node | save/run/validate payload excludes the metadata |
+
+### 5. Good/Base/Bad Cases
+
+- Good: user drags from a condition case handle to empty canvas, selects a tool, and the new edge keeps that case label after save/reload.
+- Base: user opens the dock picker, adds a tool node, and sees compact source/parameter status without saving those fields.
+- Bad: downstream add reads `nodePicker.connection` after `closeNodePicker()` and loses the source handle, creating an unlabeled or dangling edge.
+
+### 6. Tests Required
+
+- Production build must pass: `npm run build --prefix web`.
+- Source review must confirm `buildWorkflowDraft()` does not serialize `paramStatus`, `toolMeta`, `run`, or node-picker state.
+- Manual browser verification should cover:
+  - dock add opens the picker and creates an unconnected node
+  - node click still opens the node configuration modal
+  - downstream add creates a node plus dependency edge
+  - condition case/default downstream add preserves edge case labels
+  - save/reload does not include display-only metadata
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```js
+function addNodeFromPicker(item) {
+  const connection = nodePicker.connection
+  closeNodePicker()
+  addNode(item, connection)
+}
+```
+
+Why wrong:
+
+- The callback depends on mutable picker state and can lose connection data when React batches state updates or another context switch closes the picker.
+
+#### Correct
+
+```js
+function addNodeFromPicker(item, connection) {
+  closeNodePicker()
+  addNode(item, connection)
+}
+```
+
+Why correct:
+
+- The downstream connection is captured at render/click time and passed explicitly into the action that creates the node and edge.
