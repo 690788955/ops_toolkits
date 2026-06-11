@@ -6,5 +6,5 @@ graphify-out/
 .claude/worktrees/
 /workflows/
 .ace-tool/
-./agents/
-./codex/
+.agents/
+.codex/
