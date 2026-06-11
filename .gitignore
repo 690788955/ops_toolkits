@@ -5,3 +5,6 @@ web/node_modules/
 graphify-out/
 .claude/worktrees/
 /workflows/
+.ace-tool/
+./agents/
+./codex/
