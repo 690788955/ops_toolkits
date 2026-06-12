@@ -5,7 +5,10 @@ description: Web 页面创建和维护的用户工作流集合
 author: ""
 compatibility:
   opsctl: ""
+shared_config: {}
+sensitive_paths: []
 contributes:
   categories: []
   tools: []
-  workflows: []
+  workflows:
+    - path: workflows/demo.test.yaml

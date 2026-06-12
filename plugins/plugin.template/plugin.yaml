@@ -58,3 +58,15 @@ contributes:
         - example.conf
       confirm:
         required: false
+
+    - id: plugin.template.sleep-30s
+      name: Sleep 30 秒示例
+      category: example
+      description: 等待 30 秒后完成，用于验证工作流顺序和运行态展示
+      tags: [example, template, sleep]
+      command: scripts/sleep-30s.sh
+      workdir: .
+      timeout: 45s
+      parameters: []
+      confirm:
+        required: false

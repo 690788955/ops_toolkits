@@ -1,0 +1,78 @@
+id: demo.test
+name: 测试
+description: ttrr
+version: 1.0.0
+category: example
+tags: []
+parameters: []
+nodes:
+  - id: plugin_template_simple_1
+    type: tool
+    name: 简单工具示例
+    tool: plugin.template.simple
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    depends_on: []
+    params:
+      message: Hello World
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+  - id: plugin_template_with_config_2
+    type: tool
+    name: 配置文件工具示例
+    tool: plugin.template.with-config
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    depends_on: []
+    params:
+      action: check
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+  - id: plugin_template_sleep_30s_3
+    type: tool
+    name: Sleep 30 秒示例
+    tool: plugin.template.sleep-30s
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    depends_on: []
+    params: {}
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+edges:
+  - from: plugin_template_simple_1
+    to: plugin_template_sleep_30s_3
+    case: ""
+  - from: plugin_template_sleep_30s_3
+    to: plugin_template_with_config_2
+    case: ""
+steps: []
+confirm:
+  required: false
+  message: ""

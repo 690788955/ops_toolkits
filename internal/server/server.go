@@ -1044,6 +1044,11 @@ func handleWorkflowRun(w http.ResponseWriter, req *http.Request, reg *registry.R
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 		return
 	}
+	if isAsyncRunRequest(req) {
+		record, err := r.StartWorkflowConfigWithConfirmation(context.Background(), workflowConfig, params, reqBody.Confirm, io.Discard, io.Discard)
+		writeRunResponse(w, record, err)
+		return
+	}
 	if reqBody.Workflow != nil {
 		record, err := r.RunWorkflowConfigWithConfirmation(context.Background(), workflowConfig, params, reqBody.Confirm, io.Discard, io.Discard)
 		writeRunResponse(w, record, err)
@@ -1051,6 +1056,11 @@ func handleWorkflowRun(w http.ResponseWriter, req *http.Request, reg *registry.R
 	}
 	record, err := r.RunWorkflowWithConfirmation(context.Background(), id, params, reqBody.Confirm, io.Discard, io.Discard)
 	writeRunResponse(w, record, err)
+}
+
+func isAsyncRunRequest(req *http.Request) bool {
+	value := strings.ToLower(strings.TrimSpace(req.URL.Query().Get("async")))
+	return value == "1" || value == "true" || value == "yes"
 }
 
 func confirmWorkflowTools(reg *registry.Registry, wf *config.WorkflowConfig, confirmed bool) error {

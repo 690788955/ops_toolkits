@@ -95,19 +95,47 @@ func (r *Runner) RunWorkflowWithConfirmation(ctx context.Context, id string, par
 }
 
 func (r *Runner) RunWorkflowConfigWithConfirmation(ctx context.Context, wf *config.WorkflowConfig, params map[string]string, confirmed bool, out, errOut io.Writer) (*RunRecord, error) {
+	record, finalParams, runDir, err := r.prepareWorkflowRun(wf, params)
+	if err != nil {
+		return record, err
+	}
+	return r.runWorkflowPrepared(ctx, wf, finalParams, confirmed, out, errOut, record, runDir)
+}
+
+func (r *Runner) StartWorkflowConfigWithConfirmation(ctx context.Context, wf *config.WorkflowConfig, params map[string]string, confirmed bool, out, errOut io.Writer) (*RunRecord, error) {
+	record, finalParams, runDir, err := r.prepareWorkflowRun(wf, params)
+	if err != nil {
+		return record, err
+	}
+	if err := r.saveRecord(runDir, record); err != nil {
+		return record, err
+	}
+	response := *record
+	go func() {
+		_, _ = r.runWorkflowPrepared(ctx, wf, finalParams, confirmed, out, errOut, record, runDir)
+	}()
+	return &response, nil
+}
+
+func (r *Runner) prepareWorkflowRun(wf *config.WorkflowConfig, params map[string]string) (*RunRecord, map[string]string, string, error) {
 	if wf == nil {
-		return nil, fmt.Errorf("工作流不能为空")
+		return nil, nil, "", fmt.Errorf("工作流不能为空")
 	}
 	config.NormalizeWorkflow(wf)
 	finalParams := config.MergeParams(wf.Parameters, nil, params)
 	if err := config.ValidateRequired(wf.Parameters, finalParams); err != nil {
-		return nil, err
+		return nil, nil, "", err
 	}
 	record := newRecord("workflow", wf.ID, config.StringMapToValues(finalParams))
 	runDir, err := r.prepareRun(record.ID)
 	if err != nil {
-		return nil, err
+		return record, nil, "", err
 	}
+	return record, finalParams, runDir, nil
+}
+
+func (r *Runner) runWorkflowPrepared(ctx context.Context, wf *config.WorkflowConfig, finalParams map[string]string, confirmed bool, out, errOut io.Writer, record *RunRecord, runDir string) (*RunRecord, error) {
+	_ = r.saveRecord(runDir, record)
 	ordered, err := registry.OrderWorkflow(wf)
 	if err != nil {
 		finishRecord(record, err)
@@ -150,22 +178,27 @@ func (r *Runner) RunWorkflowConfigWithConfirmation(ctx context.Context, wf *conf
 		if legacyLoopTargets[node.ID] {
 			reason := "循环目标工具由循环节点内嵌执行"
 			record.Steps = append(record.Steps, skippedStepRecord(node, nodeType, reason))
+			_ = r.saveRecord(runDir, record)
 			continue
 		}
 		if !active[node.ID] {
 			reason := "条件分支未激活"
 			record.Steps = append(record.Steps, skippedStepRecord(node, nodeType, reason))
+			_ = r.saveRecord(runDir, record)
 			continue
 		}
 		if nodeType == config.WorkflowNodeTypeCondition {
 			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "running", StartedAt: time.Now()}
+			stepIndex := appendStepRecord(record, stepRecord)
+			_ = r.saveRecord(runDir, record)
 			inputValue := renderTemplate(node.Condition.Input, workflowContext)
 			matchedCase := matchConditionCase(inputValue, node.Condition)
 			stepRecord.ConditionInput = inputValue
 			stepRecord.MatchedCase = matchedCase
 			stepRecord.EndedAt = time.Now()
 			stepRecord.Status = "succeeded"
-			record.Steps = append(record.Steps, stepRecord)
+			record.Steps[stepIndex] = stepRecord
+			_ = r.saveRecord(runDir, record)
 			activateConditionBranches(node.ID, matchedCase, edgesByFrom, active)
 			workflowContext["steps."+node.ID+".condition.input"] = inputValue
 			workflowContext["steps."+node.ID+".condition.case"] = matchedCase
@@ -174,23 +207,28 @@ func (r *Runner) RunWorkflowConfigWithConfirmation(ctx context.Context, wf *conf
 		if nodeType == config.WorkflowNodeTypeParallel || nodeType == config.WorkflowNodeTypeJoin {
 			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "succeeded", StartedAt: time.Now(), EndedAt: time.Now()}
 			record.Steps = append(record.Steps, stepRecord)
+			_ = r.saveRecord(runDir, record)
 			activatePlainBranches(node.ID, edgesByFrom, active)
 			continue
 		}
 		if nodeType == config.WorkflowNodeTypeLoop {
 			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Tool: loopToolID(node, nodeByID), Status: "running", StartedAt: time.Now(), LoopTarget: node.Loop.Target, LoopIterations: node.Loop.MaxIterations}
+			stepIndex := appendStepRecord(record, stepRecord)
+			_ = r.saveRecord(runDir, record)
 			loopErr := r.executeLoop(ctx, node, nodeByID, finalParams, workflowContext, runDir, out, errOut)
 			stepRecord.EndedAt = time.Now()
 			if loopErr != nil {
 				stepRecord.Status = "failed"
 				stepRecord.Error = loopErr.Error()
-				record.Steps = append(record.Steps, stepRecord)
+				record.Steps[stepIndex] = stepRecord
+				_ = r.saveRecord(runDir, record)
 				err = loopErr
 				break
 			}
 			addLoopContext(workflowContext, node.ID, node.Loop.MaxIterations, runDir)
 			stepRecord.Status = "succeeded"
-			record.Steps = append(record.Steps, stepRecord)
+			record.Steps[stepIndex] = stepRecord
+			_ = r.saveRecord(runDir, record)
 			activatePlainBranches(node.ID, edgesByFrom, active)
 			continue
 		}
@@ -198,6 +236,8 @@ func (r *Runner) RunWorkflowConfigWithConfirmation(ctx context.Context, wf *conf
 		tool, toolErr := r.Registry.Tool(node.Tool)
 		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Tool: node.Tool, Status: "running", StartedAt: time.Now()}
 		stepRunDir := filepath.Join(runDir, node.ID)
+		stepIndex := appendStepRecord(record, stepRecord)
+		_ = r.saveRecord(runDir, record)
 		if toolErr == nil {
 			stepValues, stepFlat, _, resolveErr := r.resolveToolValues(tool, config.StringMapToValues(stepParams))
 			if resolveErr != nil {
@@ -211,13 +251,15 @@ func (r *Runner) RunWorkflowConfigWithConfirmation(ctx context.Context, wf *conf
 		if toolErr != nil {
 			stepRecord.Status = "failed"
 			stepRecord.Error = toolErr.Error()
-			record.Steps = append(record.Steps, stepRecord)
+			record.Steps[stepIndex] = stepRecord
+			_ = r.saveRecord(runDir, record)
 			err = toolErr
 			break
 		}
 		addStepContext(workflowContext, node.ID, stepParams, stepRunDir)
 		stepRecord.Status = "succeeded"
-		record.Steps = append(record.Steps, stepRecord)
+		record.Steps[stepIndex] = stepRecord
+		_ = r.saveRecord(runDir, record)
 		activatePlainBranches(node.ID, edgesByFrom, active)
 	}
 	finishRecord(record, err)
@@ -225,6 +267,11 @@ func (r *Runner) RunWorkflowConfigWithConfirmation(ctx context.Context, wf *conf
 		err = saveErr
 	}
 	return record, err
+}
+
+func appendStepRecord(record *RunRecord, step StepRecord) int {
+	record.Steps = append(record.Steps, step)
+	return len(record.Steps) - 1
 }
 
 func (r *Runner) validateWorkflowConfirmations(nodes []config.WorkflowNode, confirmed bool) error {
@@ -420,18 +467,22 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 		return err
 	}
 	entry := resolveEntry(tool.Dir, tool.Config.Execution.Entry)
-	cmd := buildCommand(execCtx, entry, *tool.Config, params, paramFile)
-	cmd.Dir = resolveWorkdir(tool.Dir, tool.Config.Execution.Workdir)
-	cmd.Env = append(os.Environ(), encodeEnv(params)...)
+	workdir := resolveWorkdir(tool.Dir, tool.Config.Execution.Workdir)
+	extraEnv := encodeEnv(params)
 	if paramFile != "" {
-		cmd.Env = append(cmd.Env, "OPS_PARAM_FILE="+paramFile)
+		extraEnv = append(extraEnv, "OPS_PARAM_FILE="+paramFile)
 	}
 	globalEnvPath := config.GlobalEnvPath(r.Registry.BaseDir)
 	if absPath, err := filepath.Abs(globalEnvPath); err == nil {
-		cmd.Env = append(cmd.Env, "OPS_GLOBAL_ENV_FILE="+absPath)
+		extraEnv = append(extraEnv, "OPS_GLOBAL_ENV_FILE="+absPath)
 	}
 	for k, v := range tool.Config.Env {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+		extraEnv = append(extraEnv, fmt.Sprintf("%s=%s", k, v))
+	}
+	cmd := buildCommand(execCtx, entry, *tool.Config, params, paramFile, workdir, extraEnv)
+	if !usesWSLBash(entry) {
+		cmd.Dir = workdir
+		cmd.Env = append(os.Environ(), extraEnv...)
 	}
 
 	stdoutFile, err := os.Create(filepath.Join(runDir, "stdout.log"))
@@ -459,7 +510,18 @@ func resolveEntry(toolDir, entry string) string {
 	return filepath.Join(toolDir, filepath.FromSlash(entry))
 }
 
-func buildCommand(ctx context.Context, entry string, tool config.ToolConfig, params map[string]string, paramFile string) *exec.Cmd {
+func buildCommand(ctx context.Context, entry string, tool config.ToolConfig, params map[string]string, paramFile, workdir string, extraEnv []string) *exec.Cmd {
+	args := commandArgs(tool, params, paramFile)
+	if usesWSLBash(entry) {
+		return exec.CommandContext(ctx, "bash", "-lc", wslBashScript(entry, workdir, extraEnv, args))
+	}
+	if runtime.GOOS == "windows" && strings.EqualFold(filepath.Ext(entry), ".sh") {
+		return exec.CommandContext(ctx, "bash", append([]string{windowsBashPath(entry)}, args...)...)
+	}
+	return exec.CommandContext(ctx, entry, args...)
+}
+
+func commandArgs(tool config.ToolConfig, params map[string]string, paramFile string) []string {
 	args := renderArgs(tool.Execution.Args, params)
 	if len(args) == 0 && tool.PassMode.Args {
 		for _, k := range sortedKeys(params) {
@@ -469,10 +531,89 @@ func buildCommand(ctx context.Context, entry string, tool config.ToolConfig, par
 	if tool.PassMode.ParamFile && paramFile != "" {
 		args = append(args, "--params-file", paramFile)
 	}
-	if runtime.GOOS == "windows" && strings.HasSuffix(entry, ".sh") {
-		return exec.CommandContext(ctx, "bash", append([]string{entry}, args...)...)
+	return args
+}
+
+func usesWSLBash(entry string) bool {
+	return runtime.GOOS == "windows" && strings.EqualFold(filepath.Ext(entry), ".sh") && isWSLBash()
+}
+
+func windowsBashPath(path string) string {
+	if isWSLBash() {
+		if converted := windowsPathToWSL(path); converted != "" {
+			return converted
+		}
 	}
-	return exec.CommandContext(ctx, entry, args...)
+	return filepath.ToSlash(path)
+}
+
+func wslBashScript(entry, workdir string, env []string, args []string) string {
+	parts := []string{}
+	if converted := windowsPathToWSL(workdir); converted != "" {
+		parts = append(parts, "cd "+shellQuote(converted))
+	}
+	for _, item := range env {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok || !isShellEnvName(key) {
+			continue
+		}
+		if converted := windowsPathToWSL(value); converted != "" {
+			value = converted
+		}
+		parts = append(parts, "export "+key+"="+shellQuote(value))
+	}
+	command := "exec " + shellQuote(windowsPathToWSLOrSlash(entry))
+	for _, arg := range args {
+		command += " " + shellQuote(windowsPathToWSLOrSlash(arg))
+	}
+	parts = append(parts, command)
+	return strings.Join(parts, " && ")
+}
+
+func windowsPathToWSLOrSlash(path string) string {
+	if converted := windowsPathToWSL(path); converted != "" {
+		return converted
+	}
+	return filepath.ToSlash(path)
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func isShellEnvName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index, char := range value {
+		if char == '_' || char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' || index > 0 && char >= '0' && char <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isWSLBash() bool {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		return false
+	}
+	normalized := strings.ToLower(filepath.ToSlash(bashPath))
+	return strings.Contains(normalized, "/windows/system32/bash.exe") || strings.Contains(normalized, "/windowsapps/bash.exe")
+}
+
+func windowsPathToWSL(path string) string {
+	volume := filepath.VolumeName(path)
+	if len(volume) != 2 || volume[1] != ':' {
+		return ""
+	}
+	drive := strings.ToLower(volume[:1])
+	rest := strings.TrimLeft(path[len(volume):], `\/`)
+	if rest == "" {
+		return "/mnt/" + drive
+	}
+	return "/mnt/" + drive + "/" + filepath.ToSlash(rest)
 }
 
 func renderArgs(templates []string, params map[string]string) []string {

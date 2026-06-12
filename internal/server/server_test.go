@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"shell_ops/internal/config"
 	"shell_ops/internal/registry"
@@ -200,6 +201,48 @@ func TestWorkflowRunAPIRunsUnsavedDraftWithoutPersisting(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(reg.BaseDir, "plugins", "user.workflows", "workflows", "demo.unsaved.yaml")); !os.IsNotExist(err) {
 		t.Fatalf("未保存草稿不应写入 workflow 文件，stat err = %v", err)
+	}
+}
+
+func TestWorkflowRunAPIAsyncReturnsRunningRecordAndPersistsLogs(t *testing.T) {
+	reg := testRegistry(t)
+	toolDir := reg.Tools["demo.hello"].Dir
+	if err := os.MkdirAll(filepath.Join(toolDir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(toolDir, "bin", "run.sh"), []byte("#!/usr/bin/env bash\necho async-run\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"params":{},"workflow":{"id":"demo.async","name":"异步草稿","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.async/run?async=true", strings.NewReader(body))
+	res := httptest.NewRecorder()
+
+	handler := NewHandler(reg)
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var started response
+	if err := json.Unmarshal(res.Body.Bytes(), &started); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if started.ID == "" || started.Status != "running" {
+		t.Fatalf("async response = %#v, want running id", started)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		runReq := httptest.NewRequest(http.MethodGet, "/api/runs/"+started.ID, nil)
+		runRes := httptest.NewRecorder()
+		handler.ServeHTTP(runRes, runReq)
+		if runRes.Code == http.StatusOK && strings.Contains(runRes.Body.String(), `"status":"succeeded"`) && strings.Contains(runRes.Body.String(), "async-run") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("异步运行未在超时内完成，last status=%d body=%s", runRes.Code, runRes.Body.String())
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

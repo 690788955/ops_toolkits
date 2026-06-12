@@ -8,3 +8,7 @@ graphify-out/
 .ace-tool/
 .agents/
 .codex/
+.tmp-build/go-cache/README
+.tmp-build/go-cache/trim.txt
+.tmp-build/go-cache/
+.tmp-build/gocache/

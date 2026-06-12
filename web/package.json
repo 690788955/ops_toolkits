@@ -1,14 +1,18 @@
 {
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "vitest run"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
+    "@vitejs/plugin-react": "6.0.1",
     "@xyflow/react": "^12.10.2",
     "js-yaml": "^4.1.1",
-    "react": "latest",
-    "react-dom": "latest",
-    "vite": "latest"
+    "react": "19.2.5",
+    "react-dom": "19.2.5",
+    "vite": "8.0.10"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.15"
   }
 }

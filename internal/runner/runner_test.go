@@ -492,6 +492,33 @@ func readFile(t *testing.T, path string) string {
 	return string(data)
 }
 
+func TestWindowsPathToWSLConvertsDrivePath(t *testing.T) {
+	got := windowsPathToWSL(`F:\ccb\ops_toolkits\plugins\plugin.template\scripts\sleep-30s.sh`)
+	want := `/mnt/f/ccb/ops_toolkits/plugins/plugin.template/scripts/sleep-30s.sh`
+	if got != want {
+		t.Fatalf("windowsPathToWSL() = %q, want %q", got, want)
+	}
+}
+
+func TestWSLBashScriptConvertsPathsAndExportsEnv(t *testing.T) {
+	got := wslBashScript(
+		`F:\ccb\ops_toolkits\plugins\plugin.template\scripts\run.sh`,
+		`F:\ccb\ops_toolkits\plugins\plugin.template`,
+		[]string{`OPS_PARAM_FILE=F:\ccb\ops_toolkits\runs\logs\tool-1\params.yaml`, `OPS_PARAM_NAME=demo`},
+		[]string{`--params-file`, `F:\ccb\ops_toolkits\runs\logs\tool-1\params.yaml`},
+	)
+	for _, want := range []string{
+		`cd '/mnt/f/ccb/ops_toolkits/plugins/plugin.template'`,
+		`export OPS_PARAM_FILE='/mnt/f/ccb/ops_toolkits/runs/logs/tool-1/params.yaml'`,
+		`export OPS_PARAM_NAME='demo'`,
+		`exec '/mnt/f/ccb/ops_toolkits/plugins/plugin.template/scripts/run.sh' '--params-file' '/mnt/f/ccb/ops_toolkits/runs/logs/tool-1/params.yaml'`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("wslBashScript() = %q, missing %q", got, want)
+		}
+	}
+}
+
 type nilWriter struct{}
 
 func (nilWriter) Write(p []byte) (int, error) {
