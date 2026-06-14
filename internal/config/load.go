@@ -223,7 +223,7 @@ func normalizeRoot(cfg *RootConfig) {
 		cfg.Paths.Logs = filepath.ToSlash(filepath.Join(cfg.Paths.Runs, "logs"))
 	}
 	if cfg.Server.Host == "" {
-		cfg.Server.Host = "0.0.0.0"
+		cfg.Server.Host = "127.0.0.1"
 	}
 	if cfg.Server.Port == 0 && cfg.HTTP.Addr == "" {
 		cfg.Server.Port = 8080

@@ -162,6 +162,10 @@ func RedactSensitive(in map[string]interface{}, explicitPaths []string) Values {
 	return out
 }
 
+func IsSensitivePath(path string) bool {
+	return isSensitivePath(path, path, nil)
+}
+
 func ParseSetValuesNested(values []string) (Values, error) {
 	out := Values{}
 	for _, item := range values {

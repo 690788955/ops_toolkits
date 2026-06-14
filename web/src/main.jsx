@@ -190,6 +190,7 @@ function App() {
           <button className={activeTab === 'tools' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('tools'); setSelected(null); setActiveTag(''); resetResult() }}>工具</button>
           <button className={activeTab === 'workflows' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('workflows'); setSelected(null); setActiveTag(''); resetResult() }}>工作流</button>
           {hasConfigTab && <button className={activeTab === 'config' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('config'); setSelected(null); setActiveTag(''); setConfigSelectedPlugin(null); resetResult() }}>配置</button>}
+          <button className={activeTab === 'runs' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('runs'); setSelected(null); setActiveTag(''); resetResult() }}>运行记录</button>
         </div>
 
         {activeTab === 'workflows' ? (
@@ -207,6 +208,8 @@ function App() {
               )}
             />
           </React.Suspense>
+        ) : activeTab === 'runs' ? (
+          <RunHistoryPanel />
         ) : (activeTab === 'config' && hasConfigTab) ? (
           <ConfigPanel catalog={catalog} activeCategory={activeCategory} configSelectedPlugin={configSelectedPlugin} setConfigSelectedPlugin={setConfigSelectedPlugin} refreshCatalog={refreshCatalog} />
         ) : (
@@ -272,6 +275,115 @@ function App() {
       )}
     </div>
   )
+}
+
+function RunHistoryPanel() {
+  const [runs, setRuns] = useState([])
+  const [selectedRunID, setSelectedRunID] = useState('')
+  const [selectedDetail, setSelectedDetail] = useState(null)
+  const [statusFilter, setStatusFilter] = useState('')
+  const [message, setMessage] = useState('正在加载运行记录...')
+  const [loading, setLoading] = useState(false)
+
+  async function loadRuns() {
+    setLoading(true)
+    setMessage('正在加载运行记录...')
+    try {
+      const body = await fetchJSON('/api/runs/')
+      const items = body.data?.runs || []
+      setRuns(items)
+      setMessage(items.length ? `已加载 ${items.length} 条运行记录。` : '暂无运行记录。')
+    } catch (err) {
+      setMessage(readableAPIError(err, '加载运行记录失败。'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadRuns()
+  }, [])
+
+  const visibleRuns = useMemo(() => {
+    if (!statusFilter) return runs
+    return runs.filter(item => item.status === statusFilter)
+  }, [runs, statusFilter])
+
+  async function selectRun(runID) {
+    setSelectedRunID(runID)
+    setSelectedDetail(null)
+    setMessage(`正在读取运行记录 ${runID}...`)
+    try {
+      const body = await fetchRunDetail(runID)
+      setSelectedDetail(body.data)
+      setMessage(`已加载运行记录 ${runID}。`)
+    } catch (err) {
+      setMessage(readableAPIError(err, '读取运行详情失败。'))
+    }
+  }
+
+  const statusOptions = [
+    ['', '全部'],
+    ['failed', '失败'],
+    ['running', '运行中'],
+    ['succeeded', '成功']
+  ]
+
+  return (
+    <div className="runHistoryLayout">
+      <section className="card runHistoryListCard">
+        <div className="cardHeader">
+          <h3>运行记录</h3>
+          <button className="secondary" type="button" disabled={loading} onClick={loadRuns}>刷新</button>
+        </div>
+        <div className="tagFilters runStatusFilters">
+          {statusOptions.map(([value, label]) => (
+            <button key={value || 'all'} className={statusFilter === value ? 'tagChip active' : 'tagChip'} onClick={() => setStatusFilter(value)}>{label}</button>
+          ))}
+        </div>
+        <div className="runHistoryList">
+          {visibleRuns.map(item => (
+            <button key={item.id} className={selectedRunID === item.id ? 'runHistoryItem active' : 'runHistoryItem'} onClick={() => selectRun(item.id)}>
+              <div>
+                <strong>{item.target || item.id}</strong>
+                <span>{item.id}</span>
+              </div>
+              <small className={`runStatusText ${item.status || 'unknown'}`}>{runStatusText(item.status)}</small>
+              <em>{formatRunTime(item.started_at)}</em>
+            </button>
+          ))}
+          {visibleRuns.length === 0 && <div className="empty">没有匹配的运行记录。</div>}
+        </div>
+        <pre className="modalResult compactResult">{message}</pre>
+      </section>
+      <section className="card runHistoryDetailCard">
+        <div className="cardHeader">
+          <h3>记录详情</h3>
+          {selectedRunID && <a className="secondary" href={`/api/runs/${encodeURIComponent(selectedRunID)}/support.zip`}>导出支持包</a>}
+        </div>
+        {selectedDetail ? (
+          <RunDetail detail={selectedDetail} run={{id: selectedRunID, status: selectedDetail.record?.status}} />
+        ) : (
+          <div className="empty">选择一条运行记录查看日志和支持包。</div>
+        )}
+      </section>
+    </div>
+  )
+}
+
+function runStatusText(status) {
+  if (status === 'succeeded') return '成功'
+  if (status === 'failed') return '失败'
+  if (status === 'running') return '运行中'
+  if (status === 'skipped') return '跳过'
+  return status || '未知'
+}
+
+function formatRunTime(value) {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString()
 }
 
 function ConfigPanel({catalog, activeCategory, configSelectedPlugin, setConfigSelectedPlugin, refreshCatalog}) {
@@ -413,10 +525,19 @@ function ConfigItemsList({items, onSelect}) {
 function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onChanged}) {
   const [file, setFile] = useState(null)
   const [uploading, setUploading] = useState(false)
-  const [exportModalOpen, setExportModalOpen] = useState(false)
   const [pluginActionID, setPluginActionID] = useState('')
+  const [target, setTarget] = useState('windows/amd64')
   const plugins = useMemo(() => [...(catalog?.plugins || [])].sort((left, right) => String(left.id || '').localeCompare(String(right.id || ''), 'zh-CN')), [catalog])
-  const exportablePlugins = useMemo(() => plugins.filter(item => !item.disabled), [plugins])
+  const [goos, goarch] = target.split('/')
+  const targets = [
+    ['windows/amd64', 'Windows amd64'],
+    ['windows/arm64', 'Windows arm64'],
+    ['linux/amd64', 'Linux amd64'],
+    ['linux/arm64', 'Linux arm64'],
+    ['darwin/amd64', 'macOS amd64'],
+    ['darwin/arm64', 'macOS arm64']
+  ]
+  const runtimeBase = item => `/api/plugins/${encodeURIComponent(item.id)}/runtime`
 
   async function uploadPlugin(replace = false) {
     if (!file) {
@@ -489,36 +610,41 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
 
   return (
     <div className="modalBackdrop" onClick={onClose}>
-      <div className="modal" onClick={event => event.stopPropagation()}>
+      <div className="modal pluginManagerModal" onClick={event => event.stopPropagation()}>
         <div className="modalHeader">
           <div>
             <h3>插件管理</h3>
-            <p>下载插件模板、上传插件 ZIP，或按“先禁用、再删除”的流程管理已安装插件。</p>
+            <p>上传插件、下载模板，并管理本机已安装插件。</p>
           </div>
           <button className="modalClose" onClick={onClose}>×</button>
         </div>
         <div className="pluginModalActions">
-          <a className="primary downloadTemplate" href="/api/dev/toolkit.zip">下载插件模板</a>
-          <label>
-            <span>上传插件 ZIP</span>
-            <input type="file" accept=".zip,application/zip" onChange={event => { setFile(event.target.files?.[0] || null); setState({message: '已选择插件 ZIP，点击上传开始安装。'}) }} />
-          </label>
-          <div className="buttonRow">
-            <button className="primary" disabled={!file || uploading} onClick={() => uploadPlugin(false)}>上传插件 ZIP</button>
-            {state.duplicate && <button className="secondary" disabled={uploading} onClick={() => uploadPlugin(true)}>确认更新</button>}
-          </div>
-          <section className="pluginSecondaryOptions">
-            <div>
-              <strong>其他选项</strong>
-              <span>导出用户工作流插件，或将已安装插件打包为可再次上传的 ZIP。</span>
+          <section className="pluginQuickActions">
+            <a className="primary downloadTemplate" href="/api/dev/toolkit.zip">下载插件模板</a>
+            <a className="secondary downloadTemplate" href="/api/plugins/user-workflows.zip">导出用户工作流</a>
+          </section>
+          <section className="pluginUploadBox">
+            <label>
+              <span>安装插件 ZIP</span>
+              <input type="file" accept=".zip,application/zip" onChange={event => { setFile(event.target.files?.[0] || null); setState({message: '已选择插件 ZIP，点击上传开始安装。'}) }} />
+            </label>
+            <div className="buttonRow">
+              <button className="primary" disabled={!file || uploading} onClick={() => uploadPlugin(false)}>上传</button>
+              {state.duplicate && <button className="secondary" disabled={uploading} onClick={() => uploadPlugin(true)}>确认更新</button>}
             </div>
-            <a className="secondary downloadTemplate" href="/api/plugins/user-workflows.zip">导出用户工作流插件</a>
-            <button className="secondary downloadTemplate" type="button" onClick={() => setExportModalOpen(true)}>导出已安装插件</button>
           </section>
           <section className="pluginInstalledListSection">
-            <div>
-              <strong>已安装插件</strong>
-              <span>启用插件需先禁用；禁用后可执行删除。</span>
+            <div className="pluginInstalledHeader">
+              <div>
+                <strong>已安装插件</strong>
+                <span>{plugins.length} 个插件，删除前需要先禁用。</span>
+              </div>
+              <label className="runtimeTargetSelect compact">
+                <span>运行包平台</span>
+                <select value={target} onChange={event => setTarget(event.target.value)}>
+                  {targets.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+              </label>
             </div>
             <div className="pluginExportList">
               {plugins.map(item => (
@@ -529,7 +655,13 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
                     <small>{item.disabled ? '状态：已禁用' : '状态：启用中'}</small>
                     {item.description && <small>{item.description}</small>}
                   </div>
-                  <div className="buttonRow pluginItemActions">
+                  <div className="pluginItemActions">
+                    {!item.disabled && (
+                      <div className="pluginExportLinks">
+                        <a className="secondary" href={`/api/plugins/${encodeURIComponent(item.id)}.zip`}>插件 ZIP</a>
+                        <a className="secondary" href={`${runtimeBase(item)}.zip?goos=${encodeURIComponent(goos)}&goarch=${encodeURIComponent(goarch)}`}>运行包 ZIP</a>
+                      </div>
+                    )}
                     {item.disabled ? (
                       <>
                         <button className="secondary" disabled={pluginActionID === item.id} onClick={() => enablePlugin(item.id)}>启用</button>
@@ -547,9 +679,6 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
         </div>
         <pre className="modalResult">{state.response ? JSON.stringify(state.response, null, 2) : state.message}</pre>
       </div>
-      {exportModalOpen && (
-        <PluginExportModal plugins={exportablePlugins} onClose={() => setExportModalOpen(false)} />
-      )}
     </div>
   )
 }
@@ -595,12 +724,15 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('正在加载配置...')
   const [editMode, setEditMode] = useState('form') // 'form' | 'yaml'
+  const [cleanupKeep, setCleanupKeep] = useState(20)
+  const [cleanupRunning, setCleanupRunning] = useState(false)
+  const [cleanupMessage, setCleanupMessage] = useState('点击“预览清理”查看会被清理的旧运行记录。')
   const [formData, setFormData] = useState({
     appName: '',
     appDescription: '',
     appVersion: '',
     serverEnabled: true,
-    serverHost: '0.0.0.0',
+    serverHost: '127.0.0.1',
     serverPort: 8080,
     pluginsPaths: 'plugins',
     pluginsStrict: false,
@@ -630,7 +762,7 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
             appDescription: config.app?.description || '',
             appVersion: config.app?.version || '',
             serverEnabled: config.server?.enabled !== false,
-            serverHost: config.server?.host || '0.0.0.0',
+            serverHost: config.server?.host || '127.0.0.1',
             serverPort: config.server?.port || 8080,
             pluginsPaths: (config.plugins?.paths || ['plugins']).join(', '),
             pluginsStrict: config.plugins?.strict || false,
@@ -718,7 +850,7 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
         appDescription: config.app?.description || '',
         appVersion: config.app?.version || '',
         serverEnabled: config.server?.enabled !== false,
-        serverHost: config.server?.host || '0.0.0.0',
+        serverHost: config.server?.host || '127.0.0.1',
         serverPort: config.server?.port || 8080,
         pluginsPaths: (config.plugins?.paths || ['plugins']).join(', '),
         pluginsStrict: config.plugins?.strict || false,
@@ -749,6 +881,28 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
       setMessage(readableAPIError(err, '保存失败'))
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function cleanupRuns(dryRun) {
+    const keep = Math.max(0, Number(cleanupKeep) || 0)
+    if (!dryRun) {
+      const ok = window.confirm(`将清理旧的工具/工作流运行记录，仅保留最近 ${keep} 条。该操作不可撤销，是否继续？`)
+      if (!ok) return
+    }
+    setCleanupRunning(true)
+    setCleanupMessage(dryRun ? '正在预览可清理的运行记录...' : '正在清理旧运行记录...')
+    try {
+      const body = await postJSON('/api/runs/cleanup', {keep, dry_run: dryRun})
+      const result = body.data || {}
+      const ids = (result.deleted_ids || []).slice(0, 8).join('\n')
+      const suffix = result.deleted > 8 ? `\n... 另有 ${result.deleted - 8} 条` : ''
+      const action = dryRun ? '可清理' : '已清理'
+      setCleanupMessage(`${action} ${result.deleted || 0} / ${result.total || 0} 条运行记录，保留最近 ${result.keep ?? keep} 条。${ids ? `\n${ids}${suffix}` : ''}`)
+    } catch (err) {
+      setCleanupMessage(readableAPIError(err, dryRun ? '预览清理失败。' : '清理运行记录失败。'))
+    } finally {
+      setCleanupRunning(false)
     }
   }
 
@@ -792,7 +946,7 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
                 </label>
                 <label>
                   <span>监听地址</span>
-                  <input type="text" value={formData.serverHost} disabled={loading || saving} placeholder="0.0.0.0" onChange={e => updateFormField('serverHost', e.target.value)} />
+                  <input type="text" value={formData.serverHost} disabled={loading || saving} placeholder="127.0.0.1" onChange={e => updateFormField('serverHost', e.target.value)} />
                 </label>
                 <label>
                   <span>监听端口</span>
@@ -827,6 +981,22 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
                   <span>日志目录</span>
                   <input type="text" value={formData.pathsLogs} disabled={loading || saving} placeholder="runs/logs" onChange={e => updateFormField('pathsLogs', e.target.value)} />
                 </label>
+                <div className="runCleanupBox">
+                  <div>
+                    <strong>运行日志清理</strong>
+                    <span>清理工具和工作流的旧运行记录，支持包导出目录会保留。</span>
+                  </div>
+                  <label className="inlineNumberField">
+                    <span>保留最近</span>
+                    <input type="number" min="0" value={cleanupKeep} disabled={loading || saving || cleanupRunning} onChange={e => setCleanupKeep(e.target.value)} />
+                    <span>条</span>
+                  </label>
+                  <div className="buttonRow compactButtonRow">
+                    <button className="secondary" type="button" disabled={loading || saving || cleanupRunning} onClick={() => cleanupRuns(true)}>预览清理</button>
+                    <button className="secondary danger" type="button" disabled={loading || saving || cleanupRunning} onClick={() => cleanupRuns(false)}>清理旧记录</button>
+                  </div>
+                  <pre className="runCleanupResult" aria-live="polite">{cleanupMessage}</pre>
+                </div>
               </fieldset>
 
               <fieldset>
@@ -1263,63 +1433,6 @@ function PluginConfigFileEditor({pluginID, file, onBack}) {
   )
 }
 
-function PluginExportModal({plugins, onClose}) {
-  const [target, setTarget] = useState('linux/amd64')
-  const [openPluginID, setOpenPluginID] = useState('')
-  const [goos, goarch] = target.split('/')
-  const targets = [
-    ['linux/amd64', 'Linux amd64'],
-    ['linux/arm64', 'Linux arm64'],
-    ['windows/amd64', 'Windows amd64'],
-    ['windows/arm64', 'Windows arm64'],
-    ['darwin/amd64', 'macOS amd64'],
-    ['darwin/arm64', 'macOS arm64']
-  ]
-  const runtimeBase = item => `/api/plugins/${encodeURIComponent(item.id)}/runtime`
-  return (
-    <div className="modalBackdrop modalBackdropNested" onClick={onClose}>
-      <div className="modal pluginExportModal" onClick={event => event.stopPropagation()}>
-        <div className="modalHeader">
-          <div>
-            <h3>导出已安装插件</h3>
-            <p>选择插件导出标准 ZIP，或导出包含 opsctl 的单插件运行包。</p>
-          </div>
-          <button className="modalClose" onClick={onClose}>×</button>
-        </div>
-        <label className="runtimeTargetSelect">
-          <span>运行包目标平台</span>
-          <select value={target} onChange={event => setTarget(event.target.value)}>
-            {targets.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-          </select>
-          <small>运行包会从服务端 base/bin 读取对应平台的 opsctl 二进制。</small>
-        </label>
-        <div className="pluginExportList">
-          {plugins.map(item => (
-            <div className="pluginExportItem" key={item.id}>
-              <div>
-                <strong>{item.name || item.id}</strong>
-                <span>{item.id}@{item.version || '-'}</span>
-                {item.description && <small>{item.description}</small>}
-              </div>
-              <div className="pluginExportDropdown">
-                <button className="secondary" type="button" onClick={() => setOpenPluginID(openPluginID === item.id ? '' : item.id)}>导出</button>
-                {openPluginID === item.id && (
-                  <div className="pluginExportMenu">
-                    <a href={`/api/plugins/${encodeURIComponent(item.id)}.zip`}>标准插件包 ZIP</a>
-                    <a href={`${runtimeBase(item)}.tar.gz?goos=${encodeURIComponent(goos)}&goarch=${encodeURIComponent(goarch)}`}>含 opsctl 运行包 tar.gz</a>
-                    <a href={`${runtimeBase(item)}.zip?goos=${encodeURIComponent(goos)}&goarch=${encodeURIComponent(goarch)}`}>含 opsctl 运行包 ZIP</a>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-          {plugins.length === 0 && <div className="empty small">当前没有可导出的已安装插件。</div>}
-        </div>
-      </div>
-    </div>
-  )
-}
-
 function ResultView({result, expanded = false}) {
   const className = expanded ? 'resultView resultViewExpanded' : 'resultView'
   if (typeof result === 'string') {
@@ -1350,13 +1463,19 @@ function RunDetail({detail, run}) {
   const record = detail.record || {}
   const logs = detail.logs || {}
   const combinedStepLogs = combineWorkflowStepLogs(logs.steps, record)
+  const runID = record.id || run?.id
   return (
     <div className="runDetail">
       <div className="runSummary">
-        <span>运行 ID：{record.id || run?.id}</span>
+        <span>运行 ID：{runID}</span>
         <span>状态：{record.status || run?.status}</span>
         <span>目标：{record.target || '-'}</span>
       </div>
+      {runID && (
+        <div className="buttonRow">
+          <a className="secondary" href={`/api/runs/${encodeURIComponent(runID)}/support.zip`}>导出支持包</a>
+        </div>
+      )}
       {combinedStepLogs ? (
         <LogBlock title="工作流日志" value={combinedStepLogs} />
       ) : (

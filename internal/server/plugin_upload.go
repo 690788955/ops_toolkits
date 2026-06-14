@@ -717,7 +717,7 @@ func minimalRuntimeConfig(reg *registry.Registry) []byte {
 	}
 	serverHost := reg.Root.Server.Host
 	if strings.TrimSpace(serverHost) == "" {
-		serverHost = "0.0.0.0"
+		serverHost = "127.0.0.1"
 	}
 	serverPort := reg.Root.Server.Port
 	if serverPort == 0 {

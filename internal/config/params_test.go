@@ -234,6 +234,21 @@ server:
 	}
 }
 
+func TestLoadRootDefaultsServerHostToLocalhost(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ops.yaml")
+	if err := os.WriteFile(path, []byte("plugins:\n  paths: [plugins]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadRoot(path)
+	if err != nil {
+		t.Fatalf("LoadRoot 返回错误: %v", err)
+	}
+	if cfg.ListenAddr() != "127.0.0.1:8080" {
+		t.Fatalf("默认监听地址 = %q, want 127.0.0.1:8080", cfg.ListenAddr())
+	}
+}
+
 func TestLoadRootDoesNotDefaultLegacyPaths(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ops.yaml")

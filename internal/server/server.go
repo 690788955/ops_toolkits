@@ -23,6 +23,7 @@ import (
 	"shell_ops/internal/config"
 	"shell_ops/internal/plugin"
 	"shell_ops/internal/registry"
+	"shell_ops/internal/runbundle"
 	"shell_ops/internal/runner"
 )
 
@@ -716,6 +717,10 @@ func ListenAndServe(addr string, reg *registry.Registry) error {
 	return http.ListenAndServe(addr, NewHandler(reg))
 }
 
+func ListenAndServeWithToken(addr string, reg *registry.Registry, token string) error {
+	return http.ListenAndServe(addr, tokenMiddleware(NewHandler(reg), token))
+}
+
 func NewHandler(reg *registry.Registry) http.Handler {
 	state := newServerState(reg)
 	mux := http.NewServeMux()
@@ -751,6 +756,39 @@ func NewHandler(reg *registry.Registry) http.Handler {
 	mux.HandleFunc("/api/workflows/", workflowsHandler(state))
 	mux.HandleFunc("/api/runs/", runsHandler(state))
 	return mux
+}
+
+func tokenMiddleware(next http.Handler, token string) http.Handler {
+	if strings.TrimSpace(token) == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if tokenAuthorized(req, token) {
+			if req.URL.Query().Get("token") == token {
+				http.SetCookie(w, &http.Cookie{Name: "ops_token", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode})
+			}
+			next.ServeHTTP(w, req)
+			return
+		}
+		if req.URL.Path == "/" {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte("缺少或无效的本地访问 token，请使用启动命令输出的 Web UI 地址访问。"))
+			return
+		}
+		writeJSON(w, http.StatusUnauthorized, response{Error: "unauthorized"})
+	})
+}
+
+func tokenAuthorized(req *http.Request, token string) bool {
+	if req.URL.Query().Get("token") == token {
+		return true
+	}
+	if req.Header.Get("X-Ops-Token") == token {
+		return true
+	}
+	cookie, err := req.Cookie("ops_token")
+	return err == nil && cookie.Value == token
 }
 
 func catalogHandler(state *serverState) http.HandlerFunc {
@@ -1129,11 +1167,28 @@ func handleWorkflowSave(w http.ResponseWriter, req *http.Request, reg *registry.
 func runsHandler(state *serverState) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		reg := state.registry()
+		id := strings.TrimPrefix(req.URL.Path, "/api/runs/")
+		if req.Method == http.MethodPost && strings.Trim(id, "/") == "cleanup" {
+			handleRunsCleanup(w, req, reg)
+			return
+		}
 		if req.Method != http.MethodGet {
 			methodNotAllowed(w)
 			return
 		}
-		id := strings.TrimPrefix(req.URL.Path, "/api/runs/")
+		if strings.Trim(id, "/") == "" {
+			items, err := runbundle.List(reg)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"runs": items}})
+			return
+		}
+		if runID, ok := strings.CutSuffix(id, "/support.zip"); ok {
+			handleRunSupportZip(w, reg, strings.Trim(runID, "/"))
+			return
+		}
 		detail, err := loadRunDetail(reg, id)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
@@ -1141,6 +1196,32 @@ func runsHandler(state *serverState) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, response{Data: detail})
 	}
+}
+
+func handleRunsCleanup(w http.ResponseWriter, req *http.Request, reg *registry.Registry) {
+	var body runbundle.CleanupOptions
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	result, err := runbundle.Cleanup(reg, body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, response{Status: "ok", Data: result})
+}
+
+func handleRunSupportZip(w http.ResponseWriter, reg *registry.Registry, id string) {
+	data, err := runbundle.ExportZip(reg, id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, runbundle.Filename(id)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func toolDevKitHandler() http.HandlerFunc {
@@ -1281,17 +1362,12 @@ func handlePluginRuntimeDownload(w http.ResponseWriter, req *http.Request, state
 }
 
 func loadRunDetail(reg *registry.Registry, id string) (runDetail, error) {
-	cleanID := filepath.Clean(id)
-	if cleanID == "." || cleanID == ".." || strings.ContainsAny(cleanID, `/\\`) {
-		return runDetail{}, os.ErrNotExist
-	}
-	runDir := filepath.Join(reg.BaseDir, filepath.FromSlash(reg.Root.Paths.Logs), cleanID)
-	data, err := os.ReadFile(filepath.Join(runDir, "result.json"))
+	record, err := runbundle.LoadRecord(reg, id)
 	if err != nil {
 		return runDetail{}, err
 	}
-	var record runner.RunRecord
-	if err := json.Unmarshal(data, &record); err != nil {
+	runDir, err := runbundle.RunDir(reg, id)
+	if err != nil {
 		return runDetail{}, err
 	}
 	return runDetail{Record: record, Logs: loadRunLogs(runDir, record)}, nil

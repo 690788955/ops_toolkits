@@ -1661,6 +1661,112 @@ func TestRunDetailAPIIncludesLogs(t *testing.T) {
 	}
 }
 
+func TestRunsListAPI(t *testing.T) {
+	reg := testRegistry(t)
+	writeRunFixture(t, reg.BaseDir, "run-1", `{"id":"run-1","kind":"tool","target":"demo.hello","status":"succeeded","started_at":"2026-06-14T10:00:00Z"}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `"runs"`) || !strings.Contains(res.Body.String(), "run-1") {
+		t.Fatalf("响应缺少运行列表: %s", res.Body.String())
+	}
+}
+
+func TestRunsCleanupAPIKeepsNewestRuns(t *testing.T) {
+	reg := testRegistry(t)
+	writeRunFixture(t, reg.BaseDir, "run-old", `{"id":"run-old","kind":"tool","target":"demo.old","status":"succeeded","started_at":"2026-06-14T09:00:00Z"}`)
+	writeRunFixture(t, reg.BaseDir, "run-new", `{"id":"run-new","kind":"workflow","target":"demo.new","status":"succeeded","started_at":"2026-06-14T11:00:00Z"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/cleanup", strings.NewReader(`{"keep":1}`))
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "run-old") || !strings.Contains(res.Body.String(), `"deleted":1`) {
+		t.Fatalf("响应缺少清理结果: %s", res.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "runs", "logs", "run-old")); !os.IsNotExist(err) {
+		t.Fatalf("旧运行记录未清理: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "runs", "logs", "run-new")); err != nil {
+		t.Fatalf("最新运行记录不应被清理: %v", err)
+	}
+}
+
+func TestRunSupportZipAPI(t *testing.T) {
+	reg := testRegistry(t)
+	writeRunFixture(t, reg.BaseDir, "run-1", `{"id":"run-1","kind":"tool","target":"demo.hello","status":"failed","params":{"api.token":"secret"},"error":"boom"}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/run-1/support.zip", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Content-Type"); got != "application/zip" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(res.Body.Bytes()), int64(res.Body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := map[string]string{}
+	for _, file := range zr.File {
+		rc, err := file.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries[file.Name] = string(data)
+	}
+	for _, want := range []string{"support-summary.json", "support-report.md", "doctor-report.json", "run/result.json", "run/stdout.log", "run/stderr.log"} {
+		if _, ok := entries[want]; !ok {
+			t.Fatalf("支持包缺少 %s，实际: %#v", want, entries)
+		}
+	}
+	if !strings.Contains(entries["support-report.md"], "运行支持报告") || !strings.Contains(entries["support-report.md"], "诊断摘要") {
+		t.Fatalf("支持报告内容不完整: %s", entries["support-report.md"])
+	}
+	if strings.Contains(entries["support-summary.json"], "secret") || !strings.Contains(entries["support-summary.json"], "******") {
+		t.Fatalf("支持包摘要未脱敏: %s", entries["support-summary.json"])
+	}
+	if strings.Contains(entries["run/result.json"], "secret") || !strings.Contains(entries["run/result.json"], "******") {
+		t.Fatalf("支持包运行记录未脱敏: %s", entries["run/result.json"])
+	}
+}
+
+func TestTokenMiddlewareRequiresLocalToken(t *testing.T) {
+	reg := testRegistry(t)
+	handler := tokenMiddleware(NewHandler(reg), "abc")
+
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("未带 token status = %d", res.Code)
+	}
+
+	res = httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/catalog?token=abc", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("带 token status = %d, body = %s", res.Code, res.Body.String())
+	}
+}
+
 func TestWorkflowSaveAPIPreservesConditionRoundTrip(t *testing.T) {
 	reg := testRegistry(t)
 	payload := `{"workflow":{"id":"demo.condition","name":"条件流程","category":"demo","nodes":[{"id":"inspect","tool":"demo.hello"},{"id":"route","type":"condition","condition":{"input":"{{ .steps.inspect.stdout }}","cases":[{"id":"ok","name":"正常","operator":"contains","values":["OK"]}],"default_case":"default"}},{"id":"notify","tool":"demo.hello"}],"edges":[{"from":"inspect","to":"route"},{"from":"route","to":"notify","case":"ok"}]}}`
@@ -2244,6 +2350,23 @@ func writeTestRootConfigWithCategories(t *testing.T, dir string, categories []co
 		}
 	}
 	if err := os.WriteFile(filepath.Join(configDir, "ops.yaml"), []byte(builder.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeRunFixture(t *testing.T, baseDir, id, result string) {
+	t.Helper()
+	runDir := filepath.Join(baseDir, "runs", "logs", id)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "result.json"), []byte(result), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "stdout.log"), []byte("标准输出\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "stderr.log"), []byte("错误输出\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -274,7 +274,7 @@ func (c RootConfig) ListenAddr() string {
 	if c.Server.Port > 0 {
 		host := c.Server.Host
 		if host == "" {
-			host = "0.0.0.0"
+			host = "127.0.0.1"
 		}
 		return host + ":" + fmtInt(c.Server.Port)
 	}

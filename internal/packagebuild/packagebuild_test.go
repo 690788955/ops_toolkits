@@ -25,6 +25,9 @@ func TestBuildCopiesPackageContents(t *testing.T) {
 		filepath.Join("configs", "ops.yaml"),
 		filepath.Join("plugins", "vendor.demo", "plugin.yaml"),
 		exePath,
+		"start-web.bat",
+		"doctor.bat",
+		filepath.Join("docs", "故障反馈说明.md"),
 	} {
 		if _, err := os.Stat(filepath.Join(outDir, path)); err != nil {
 			t.Fatalf("交付包文件 %s 缺失: %v", path, err)
@@ -40,6 +43,9 @@ func TestBuildCopiesPackageContents(t *testing.T) {
 		"opsctl/plugins/vendor.demo/plugin.yaml",
 		"opsctl/plugins/vendor.demo/scripts/check.sh",
 		"opsctl/" + filepath.ToSlash(exePath),
+		"opsctl/start-web.bat",
+		"opsctl/doctor.bat",
+		"opsctl/docs/故障反馈说明.md",
 	})
 }
 
@@ -87,4 +93,3 @@ func assertTarGzEntries(t *testing.T, tarPath string, paths []string) {
 		}
 	}
 }
-

@@ -3,6 +3,9 @@ package app
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -14,10 +17,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"shell_ops/internal/config"
+	"shell_ops/internal/doctor"
 	"shell_ops/internal/menu"
 	"shell_ops/internal/packagebuild"
 	"shell_ops/internal/plugin"
 	"shell_ops/internal/registry"
+	"shell_ops/internal/runbundle"
 	"shell_ops/internal/runner"
 	"shell_ops/internal/scaffold"
 	"shell_ops/internal/server"
@@ -44,7 +49,7 @@ func NewRootCommand() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&opts.configVersion, "config-version", "", "配置版本名称")
 	cmd.SetHelpCommand(generatedHelpCommand(opts, "help"))
 
-	cmd.AddCommand(listCommand(opts), validateCommand(opts), runCommand(opts), helpAutoCommand(opts), startCommand(opts), menuCommand(opts), serveCommand(opts), newCommand(opts), packageCommand(opts))
+	cmd.AddCommand(listCommand(opts), validateCommand(opts), runCommand(opts), runsCommand(opts), doctorCommand(opts), helpAutoCommand(opts), startCommand(opts), menuCommand(opts), serveCommand(opts), newCommand(opts), packageCommand(opts))
 	return cmd
 }
 
@@ -362,13 +367,119 @@ func serveCommand(opts *options) *cobra.Command {
 			return err
 		}
 		listenAddr := resolveListenAddr(addr, port, reg.Root.ListenAddr())
+		token := generateToken()
 		fmt.Fprintf(cmd.OutOrStdout(), "监听地址: %s\n", listenAddr)
-		fmt.Fprintf(cmd.OutOrStdout(), "Web UI: http://127.0.0.1%s/\n", displayPort(listenAddr))
-		return server.ListenAndServe(listenAddr, reg)
+		fmt.Fprintf(cmd.OutOrStdout(), "运行目录: %s\n", filepath.Join(reg.BaseDir, filepath.FromSlash(reg.Root.Paths.Runs)))
+		fmt.Fprintf(cmd.OutOrStdout(), "日志目录: %s\n", filepath.Join(reg.BaseDir, filepath.FromSlash(reg.Root.Paths.Logs)))
+		fmt.Fprintf(cmd.OutOrStdout(), "Web UI: http://127.0.0.1%s/?token=%s\n", displayPort(listenAddr), token)
+		return server.ListenAndServeWithToken(listenAddr, reg, token)
 	}}
 	cmd.Flags().StringVar(&addr, "addr", "", "监听地址，例如 0.0.0.0:8080")
 	cmd.Flags().StringVar(&port, "port", "", "监听端口，例如 8080")
 	return cmd
+}
+
+func runsCommand(opts *options) *cobra.Command {
+	cmd := &cobra.Command{Use: "runs", Short: "查看和导出运行记录"}
+	var cleanupKeep int
+	var cleanupDryRun bool
+	cmd.AddCommand(&cobra.Command{Use: "list", Short: "列出运行记录", RunE: func(cmd *cobra.Command, args []string) error {
+		reg, err := loadRegistry(opts)
+		if err != nil {
+			return err
+		}
+		items, err := runbundle.List(reg)
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\t类型\t目标\t状态\t开始时间")
+		for _, item := range items {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", item.ID, item.Kind, item.Target, item.Status, item.StartedAt.Format("2006-01-02 15:04:05"))
+		}
+		return w.Flush()
+	}})
+	cmd.AddCommand(&cobra.Command{Use: "show <run-id>", Short: "显示运行记录详情", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		reg, err := loadRegistry(opts)
+		if err != nil {
+			return err
+		}
+		record, err := runbundle.LoadRecord(reg, args[0])
+		if err != nil {
+			return err
+		}
+		data, err := json.MarshalIndent(record, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), string(data))
+		return nil
+	}})
+	cmd.AddCommand(&cobra.Command{Use: "export <run-id>", Short: "导出运行支持包", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		reg, err := loadRegistry(opts)
+		if err != nil {
+			return err
+		}
+		data, err := runbundle.ExportZip(reg, args[0])
+		if err != nil {
+			return err
+		}
+		outDir := filepath.Join(reg.BaseDir, filepath.FromSlash(reg.Root.Paths.Runs), "exports")
+		if err := os.MkdirAll(outDir, 0o755); err != nil {
+			return err
+		}
+		path := filepath.Join(outDir, runbundle.Filename(args[0]))
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "支持包已生成: %s\n", path)
+		return nil
+	}})
+	cleanupCmd := &cobra.Command{Use: "cleanup", Short: "清理旧运行记录", RunE: func(cmd *cobra.Command, args []string) error {
+		reg, err := loadRegistry(opts)
+		if err != nil {
+			return err
+		}
+		result, err := runbundle.Cleanup(reg, runbundle.CleanupOptions{Keep: cleanupKeep, DryRun: cleanupDryRun})
+		if err != nil {
+			return err
+		}
+		action := "将清理"
+		if !cleanupDryRun {
+			action = "已清理"
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s %d / %d 条运行记录，保留最近 %d 条。\n", action, result.Deleted, result.Total, result.Keep)
+		for _, id := range result.DeletedIDs {
+			fmt.Fprintf(cmd.OutOrStdout(), "- %s\n", id)
+		}
+		return nil
+	}}
+	cleanupCmd.Flags().IntVar(&cleanupKeep, "keep", 20, "保留最近 N 条运行记录")
+	cleanupCmd.Flags().BoolVar(&cleanupDryRun, "dry-run", false, "仅预览将被清理的记录")
+	cmd.AddCommand(cleanupCmd)
+	return cmd
+}
+
+func doctorCommand(opts *options) *cobra.Command {
+	return &cobra.Command{Use: "doctor", Short: "检查本地运行环境并生成诊断报告", RunE: func(cmd *cobra.Command, args []string) error {
+		reg, err := loadRegistry(opts)
+		if err != nil {
+			return err
+		}
+		report := doctor.Run(reg)
+		path, err := doctor.WriteReport(reg, report)
+		if err != nil {
+			return err
+		}
+		for _, check := range report.Checks {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\n", check.Status, check.Name, check.Message)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "诊断报告已生成: %s\n", path)
+		if doctor.HasFailure(report) {
+			return fmt.Errorf("诊断发现失败项")
+		}
+		return nil
+	}}
 }
 
 func resolveListenAddr(addr, port, fallback string) string {
@@ -390,6 +501,14 @@ func displayPort(addr string) string {
 		return ":8080"
 	}
 	return addr[idx:]
+}
+
+func generateToken() string {
+	var data [16]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return fmt.Sprintf("%d", os.Getpid())
+	}
+	return hex.EncodeToString(data[:])
 }
 
 func newCommand(opts *options) *cobra.Command {

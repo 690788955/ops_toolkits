@@ -351,7 +351,8 @@ input:disabled { color: var(--color-muted); background: var(--color-bg); }
 .primary:hover, .secondary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: var(--shadow-whisper); }
 .primary:disabled, .secondary:disabled { cursor: not-allowed; opacity: .45; }
 .buttonRow { display: flex; flex-wrap: wrap; gap: 10px; }
-.buttonRow button { flex: 1; min-width: 88px; }
+.buttonRow button, .buttonRow a { flex: 1; min-width: 88px; text-align: center; text-decoration: none; }
+.compactButtonRow button, .compactButtonRow a { flex: 0 1 auto; }
 .empty { color: var(--color-muted); padding: 18px; line-height: 1.4; }
 .empty.small { padding: 12px; }
 .resultCard { margin-top: 28px; }
@@ -385,6 +386,69 @@ input:disabled { color: var(--color-muted); background: var(--color-bg); }
 .runDetail { display: grid; gap: 16px; }
 .runSummary { display: flex; flex-wrap: wrap; gap: 10px; }
 .runSummary span { padding: 8px 12px; font-size: 13px; font-weight: 700; }
+.runHistoryLayout {
+  display: grid;
+  grid-template-columns: minmax(340px, 440px) minmax(0, 1fr);
+  gap: 20px;
+}
+.runHistoryListCard, .runHistoryDetailCard { min-width: 0; }
+.runStatusFilters { margin-bottom: 14px; }
+.runHistoryList {
+  display: grid;
+  max-height: min(620px, 64vh);
+  overflow: auto;
+  gap: 10px;
+  padding-right: 2px;
+}
+.runHistoryItem {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 12px;
+  align-items: start;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 13px;
+  text-align: left;
+  background: var(--color-surface);
+}
+.runHistoryItem:hover, .runHistoryItem.active {
+  border-color: var(--color-black);
+  box-shadow: var(--shadow-whisper);
+}
+.runHistoryItem strong,
+.runHistoryItem span,
+.runHistoryItem em,
+.runHistoryItem small { display: block; }
+.runHistoryItem strong {
+  color: var(--color-black);
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  font-weight: 900;
+}
+.runHistoryItem span,
+.runHistoryItem em {
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.45;
+}
+.runHistoryItem em { grid-column: 1 / -1; }
+.runStatusText {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  padding: 4px 8px;
+  color: var(--color-muted);
+  background: var(--color-panel);
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+.runStatusText.succeeded { color: var(--color-success); border-color: var(--color-success-border); background: var(--color-success-bg); }
+.runStatusText.failed { color: var(--color-danger); border-color: var(--color-danger-border); background: var(--color-danger-bg); }
+.runStatusText.running { color: var(--color-link); border-color: #0d74ce52; background: #eef7ff; }
+.compactResult { min-height: 74px; margin-top: 14px; font-size: 12px; }
 .logBlock, .stepLogs { display: grid; gap: 8px; }
 .logBlock h4, .stepLogs h4 { margin: 0; color: var(--color-text); font-size: 14px; font-weight: 800; }
 details summary { cursor: pointer; color: var(--color-link); font-weight: 800; }
@@ -455,23 +519,30 @@ pre {
   border-top: 1px solid var(--color-border);
   padding-top: 16px;
 }
+.pluginManagerModal { width: min(840px, 100%); }
 .pluginModalActions { display: grid; gap: 16px; }
 .downloadTemplate { display: inline-block; text-align: center; text-decoration: none; }
-.pluginSecondaryOptions,
+.pluginQuickActions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.pluginUploadBox,
 .pluginInstalledListSection {
   display: grid;
   gap: 12px;
-  margin-top: 8px;
   border-top: 1px solid var(--color-border);
   padding-top: 16px;
 }
-.pluginSecondaryOptions > div:first-child strong,
-.pluginSecondaryOptions > div:first-child span,
+.pluginInstalledHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+  gap: 14px;
+  align-items: end;
+}
 .pluginInstalledListSection > div:first-child strong,
 .pluginInstalledListSection > div:first-child span { display: block; }
-.pluginSecondaryOptions > div:first-child strong,
 .pluginInstalledListSection > div:first-child strong { color: var(--color-black); font-size: 15px; font-weight: 900; }
-.pluginSecondaryOptions > div:first-child span,
 .pluginInstalledListSection > div:first-child span { margin-top: 5px; color: var(--color-muted); font-size: 13px; line-height: 1.4; }
 .modalBackdropNested { z-index: 60; background: rgba(0,0,0,.45); }
 
@@ -500,7 +571,6 @@ pre {
   font-size: 13px;
   line-height: 1.6;
 }
-.pluginExportModal { width: min(560px, 100%); }
 .pluginExportItem strong,
 .pluginExportItem span,
 .pluginExportItem small { display: block; }
@@ -526,32 +596,23 @@ pre {
 .pluginExportItem small { margin-top: 5px; color: var(--color-muted); font-size: 12px; line-height: 1.35; }
 .pluginExportItem a, .pluginExportItem button { text-align: center; text-decoration: none; }
 .runtimeTargetSelect { display: grid; gap: 8px; margin-bottom: 14px; }
+.runtimeTargetSelect.compact { margin-bottom: 0; gap: 6px; }
 .runtimeTargetSelect span { color: var(--color-black); font-size: 13px; font-weight: 900; }
 .runtimeTargetSelect small { color: var(--color-muted); font-size: 12px; }
-.pluginExportDropdown { position: relative; }
-.pluginExportMenu {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 8px);
-  z-index: 70;
-  display: grid;
-  min-width: 220px;
-  overflow: hidden;
-  border: 1px solid var(--color-border);
-  border-radius: 14px;
-  background: var(--color-surface);
-  box-shadow: var(--shadow-card);
+.pluginItemActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
-.pluginExportMenu a {
-  padding: 10px 12px;
-  color: var(--color-text);
-  font-size: 13px;
-  font-weight: 800;
-  text-align: left;
+.pluginItemActions button,
+.pluginItemActions a {
+  flex: 0 0 auto;
+  min-width: 92px;
+  padding: 9px 12px;
+  font-size: 12px;
 }
-.pluginExportMenu a:hover { background: var(--color-surface-muted); }
-.pluginItemActions { justify-content: flex-end; }
-.pluginItemActions button { flex: 0 0 auto; }
+.pluginExportLinks { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .pluginExportItem.pluginDisabled { border-color: var(--color-warning-border); background: var(--color-warning-bg); }
 .nodeConfigModal { width: min(760px, 100%); }
 .edgeConfigModal { width: min(520px, 100%); }
@@ -1745,6 +1806,61 @@ fieldset legend {
   margin-bottom: 0;
 }
 
+.runCleanupBox {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.runCleanupBox strong,
+.runCleanupBox span {
+  display: block;
+}
+
+.runCleanupBox strong {
+  margin-bottom: 4px;
+  font-size: 14px;
+}
+
+.runCleanupBox span {
+  color: var(--color-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.inlineNumberField {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inlineNumberField span {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.inlineNumberField input {
+  width: 96px;
+  margin: 0;
+}
+
+.runCleanupResult {
+  max-height: 172px;
+  min-height: 48px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  color: var(--color-text);
+  background: var(--color-panel);
+  white-space: pre-wrap;
+}
+
 .configTabs {
   display: flex;
   gap: 4px;
@@ -1832,9 +1948,12 @@ fieldset legend {
 @media (max-width: 980px) {
   .app { padding: 18px; gap: 20px; }
   .content { padding: 16px 0 48px; }
-  .grid { grid-template-columns: 1fr; }
+  .grid, .runHistoryLayout { grid-template-columns: 1fr; }
   .topbar { align-items: flex-start; flex-direction: column; gap: 14px; }
   .topbarActions { flex-wrap: wrap; }
+  .pluginInstalledHeader { grid-template-columns: 1fr; }
+  .pluginExportItem { grid-template-columns: 1fr; }
+  .pluginItemActions, .pluginExportLinks { justify-content: flex-start; }
 }
 
 @media (max-width: 640px) {
@@ -1843,6 +1962,8 @@ fieldset legend {
   .card, .sidebar { border-radius: var(--radius-card); padding: 16px; }
   .topbar h2 { font-size: 30px; }
   .buttonRow { flex-direction: column; }
+  .pluginQuickActions { grid-template-columns: 1fr; }
+  .runHistoryItem { grid-template-columns: 1fr; }
   .canvasDock {
     top: 10px;
     right: 10px;
