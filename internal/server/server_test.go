@@ -246,6 +246,51 @@ func TestWorkflowRunAPIAsyncReturnsRunningRecordAndPersistsLogs(t *testing.T) {
 	}
 }
 
+func TestRunCancelAPIStopsAsyncWorkflow(t *testing.T) {
+	reg := testRegistry(t)
+	toolDir := reg.Tools["demo.hello"].Dir
+	if err := os.MkdirAll(filepath.Join(toolDir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(toolDir, "bin", "run.sh"), []byte("#!/usr/bin/env bash\nsleep 10\necho should-not-finish\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"params":{},"workflow":{"id":"demo.cancel","name":"取消草稿","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`
+	handler := NewHandler(reg)
+	startReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.cancel/run?async=true", strings.NewReader(body))
+	startRes := httptest.NewRecorder()
+
+	handler.ServeHTTP(startRes, startReq)
+
+	if startRes.Code != http.StatusOK {
+		t.Fatalf("start status = %d, body = %s", startRes.Code, startRes.Body.String())
+	}
+	var started response
+	if err := json.Unmarshal(startRes.Body.Bytes(), &started); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/runs/"+started.ID+"/cancel", strings.NewReader(`{}`))
+	cancelRes := httptest.NewRecorder()
+	handler.ServeHTTP(cancelRes, cancelReq)
+	if cancelRes.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d, body = %s", cancelRes.Code, cancelRes.Body.String())
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		runReq := httptest.NewRequest(http.MethodGet, "/api/runs/"+started.ID, nil)
+		runRes := httptest.NewRecorder()
+		handler.ServeHTTP(runRes, runReq)
+		if runRes.Code == http.StatusOK && strings.Contains(runRes.Body.String(), `"status":"cancelled"`) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("异步运行未在超时内取消，last status=%d body=%s", runRes.Code, runRes.Body.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestWorkflowSaveAPI(t *testing.T) {
 	reg := testRegistry(t)
 	body := `{"workflow":{"id":"demo.saved","name":"已保存","category":"demo","tags":["自定义","迁移"],"nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`

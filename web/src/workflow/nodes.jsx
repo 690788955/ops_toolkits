@@ -119,12 +119,18 @@ function ToolNode({id, data, selected}) {
     <div className={nodeRunClass('toolNode', selected, data.run)} title={nodeTitle}>
       <Handle type="target" position={Position.Left} />
       <RunStatusBadge run={data.run} />
-      <button className="nodeDelete nodrag nopan" onMouseDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); data.onRemove(id) }} title="删除节点">×</button>
-      <strong>{data.name || id}</strong>
-      <span className="toolTypeLine">{sourceLabel}</span>
-      <span className={paramStatus.missingRequired > 0 || paramStatus.toolMissing ? 'toolParamStatus warning' : 'toolParamStatus'}>{paramStatus.label}</span>
-      {data.tool && <span className="nodeHoverMeta">{data.tool}</span>}
+      <NodeDeleteButton id={id} onRemove={data.onRemove} />
+      <div className="nodeTopBar">
+        <span className="nodeHeaderShape process" aria-hidden="true" />
+        <strong>{data.name || id}</strong>
+      </div>
+      <div className="nodeContent">
+        <span className="toolTypeLine">{sourceLabel}</span>
+        <span className={paramStatus.missingRequired > 0 || paramStatus.toolMissing ? 'toolParamStatus warning' : 'toolParamStatus'}>{paramStatus.label}</span>
+        {data.tool && <span className="nodeHoverMeta">{data.tool}</span>}
+      </div>
       <Handle type="source" position={Position.Right} />
+      <QuickAddDownstreamButton id={id} onAddDownstream={data.onAddDownstream} />
     </div>
   )
 }
@@ -140,13 +146,17 @@ function ConditionNode({id, data, selected}) {
     <div className={nodeRunClass('conditionNode', selected, data.run)} title={nodeTitle}>
       <Handle type="target" position={Position.Left} />
       <RunStatusBadge run={data.run} />
-      <div className="conditionDiamond" aria-hidden="true"><span>?</span></div>
-      <button className="nodeDelete nodrag nopan" onMouseDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); data.onRemove(id) }} title="删除节点">×</button>
-      <div className="conditionInfoCard">
-        <strong>{data.name || id}</strong>
-        <div className="conditionInputSummary">{conditionSummary(condition)}</div>
-        <small>{conditionCaseSummary(condition)}</small>
-        <small className={status.ready ? 'conditionState ready' : 'conditionState warning'}>{status.label}</small>
+      <NodeDeleteButton id={id} onRemove={data.onRemove} />
+      <div className="conditionNodeMain">
+        <div className="nodeTopBar conditionTopBar">
+          <span className="conditionDiamond" aria-hidden="true"><span>?</span></span>
+          <strong>{data.name || id}</strong>
+        </div>
+        <div className="conditionInfoCard">
+          <div className="conditionInputSummary">{conditionSummary(condition)}</div>
+          <small>{conditionCaseSummary(condition)}</small>
+          <small className={status.ready ? 'conditionState ready' : 'conditionState warning'}>{status.label}</small>
+        </div>
       </div>
       <div className="conditionBranchList" aria-label="条件分支出口">
         {branches.map(branch => (
@@ -185,14 +195,50 @@ function ControlNode({id, data, selected}) {
     <div className={nodeRunClass(`controlNode ${data.controlType || ''}`, selected, data.run)} title={nodeTitle}>
       <Handle type="target" position={Position.Left} />
       <RunStatusBadge run={data.run} />
-      <button className="nodeDelete nodrag nopan" onMouseDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); data.onRemove(id) }} title="删除节点">×</button>
-      <FlowchartShape kind={controlShapeKind(data.controlType)} marker={controlShapeMarker(data.controlType)} />
-      <div className="controlNodeText">
+      <NodeDeleteButton id={id} onRemove={data.onRemove} />
+      <div className="nodeTopBar controlTopBar">
+        <FlowchartShape kind={controlShapeKind(data.controlType)} marker={controlShapeMarker(data.controlType)} />
         <strong>{data.name || id}</strong>
+      </div>
+      <div className="controlNodeText">
         <small>{controlShapeLabel(data.controlType)} · {helpText}</small>
       </div>
       <Handle type="source" position={Position.Right} />
+      <QuickAddDownstreamButton id={id} onAddDownstream={data.onAddDownstream} />
     </div>
+  )
+}
+
+function NodeDeleteButton({id, onRemove}) {
+  if (!onRemove) return null
+  return (
+    <button
+      className="nodeDelete nodrag nopan"
+      onMouseDown={event => event.stopPropagation()}
+      onClick={event => { event.stopPropagation(); onRemove(id) }}
+      title="删除节点"
+    >
+      ×
+    </button>
+  )
+}
+
+function QuickAddDownstreamButton({id, onAddDownstream}) {
+  if (!onAddDownstream) return null
+  return (
+    <button
+      type="button"
+      className="quickNodeActions quickNodeActionsTrigger nodrag nopan"
+      title="添加下游节点并自动连接"
+      aria-label="添加下游节点"
+      onMouseDown={event => event.stopPropagation()}
+      onClick={event => {
+        event.stopPropagation()
+        onAddDownstream(id, event)
+      }}
+    >
+      +
+    </button>
   )
 }
 
@@ -231,6 +277,7 @@ export function runStatusLabel(status) {
   if (normalized === 'skipped') return '跳过'
   if (normalized === 'running') return '运行中'
   if (normalized === 'waiting') return '等待中'
+  if (normalized === 'cancelled') return '已取消'
   return '未运行'
 }
 
@@ -240,6 +287,7 @@ export function normalizeRunStatus(status) {
   if (value === 'fail' || value === 'failed' || value === 'error') return 'failed'
   if (value === 'skip' || value === 'skipped') return 'skipped'
   if (value === 'running') return 'running'
+  if (value === 'cancel' || value === 'cancelled' || value === 'canceled') return 'cancelled'
   if (value === 'waiting' || value === 'pending' || value === 'queued') return 'waiting'
   return value || 'idle'
 }

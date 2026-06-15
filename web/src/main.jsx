@@ -4,6 +4,7 @@ import '@xyflow/react/dist/style.css'
 import './styles.css'
 import * as yaml from 'js-yaml'
 import {deleteJSON, fetchJSON, fetchRunDetail, postJSON, postPluginZip, putJSON} from './api.js'
+import {buildTextDiff} from './configDiff.js'
 import {combineWorkflowStepLogs, filterEntries, readableAPIError, summarizeAPIResponse, tagsForEntries} from './utils.js'
 
 const WorkflowEditor = React.lazy(() => import('./workflow/WorkflowEditor.jsx'))
@@ -284,6 +285,7 @@ function RunHistoryPanel() {
   const [statusFilter, setStatusFilter] = useState('')
   const [message, setMessage] = useState('正在加载运行记录...')
   const [loading, setLoading] = useState(false)
+  const [cancellingRunID, setCancellingRunID] = useState('')
 
   async function loadRuns() {
     setLoading(true)
@@ -322,10 +324,29 @@ function RunHistoryPanel() {
     }
   }
 
+  async function cancelRun(runID) {
+    if (!runID) return
+    setCancellingRunID(runID)
+    setMessage(`正在取消运行任务 ${runID}...`)
+    try {
+      await postJSON(`/api/runs/${encodeURIComponent(runID)}/cancel`, {})
+      setMessage(`已发送取消请求：${runID}`)
+      await loadRuns()
+      if (selectedRunID === runID) {
+        await selectRun(runID)
+      }
+    } catch (err) {
+      setMessage(readableAPIError(err, '取消运行任务失败。'))
+    } finally {
+      setCancellingRunID('')
+    }
+  }
+
   const statusOptions = [
     ['', '全部'],
     ['failed', '失败'],
     ['running', '运行中'],
+    ['cancelled', '已取消'],
     ['succeeded', '成功']
   ]
 
@@ -343,14 +364,21 @@ function RunHistoryPanel() {
         </div>
         <div className="runHistoryList">
           {visibleRuns.map(item => (
-            <button key={item.id} className={selectedRunID === item.id ? 'runHistoryItem active' : 'runHistoryItem'} onClick={() => selectRun(item.id)}>
+            <div key={item.id} className={selectedRunID === item.id ? 'runHistoryItem active' : 'runHistoryItem'}>
+              <button type="button" className="runHistorySelectButton" onClick={() => selectRun(item.id)}>
               <div>
                 <strong>{item.target || item.id}</strong>
                 <span>{item.id}</span>
               </div>
               <small className={`runStatusText ${item.status || 'unknown'}`}>{runStatusText(item.status)}</small>
               <em>{formatRunTime(item.started_at)}</em>
-            </button>
+              </button>
+              {item.status === 'running' && (
+                <button type="button" className="secondary danger runCancelButton" disabled={cancellingRunID === item.id} onClick={() => cancelRun(item.id)}>
+                  {cancellingRunID === item.id ? '取消中' : '取消'}
+                </button>
+              )}
+            </div>
           ))}
           {visibleRuns.length === 0 && <div className="empty">没有匹配的运行记录。</div>}
         </div>
@@ -359,7 +387,14 @@ function RunHistoryPanel() {
       <section className="card runHistoryDetailCard">
         <div className="cardHeader">
           <h3>记录详情</h3>
-          {selectedRunID && <a className="secondary" href={`/api/runs/${encodeURIComponent(selectedRunID)}/support.zip`}>导出支持包</a>}
+          <div className="runDetailActions">
+            {selectedDetail?.record?.status === 'running' && (
+              <button type="button" className="secondary danger" disabled={cancellingRunID === selectedRunID} onClick={() => cancelRun(selectedRunID)}>
+                {cancellingRunID === selectedRunID ? '取消中' : '取消运行'}
+              </button>
+            )}
+            {selectedRunID && <a className="secondary" href={`/api/runs/${encodeURIComponent(selectedRunID)}/support.zip`}>导出支持包</a>}
+          </div>
         </div>
         {selectedDetail ? (
           <RunDetail detail={selectedDetail} run={{id: selectedRunID, status: selectedDetail.record?.status}} />
@@ -375,6 +410,7 @@ function runStatusText(status) {
   if (status === 'succeeded') return '成功'
   if (status === 'failed') return '失败'
   if (status === 'running') return '运行中'
+  if (status === 'cancelled') return '已取消'
   if (status === 'skipped') return '跳过'
   return status || '未知'
 }
@@ -1362,14 +1398,18 @@ function pluginConfigFileSaveBlockReason(file) {
 
 function PluginConfigFileEditor({pluginID, file, onBack}) {
   const [content, setContent] = useState('')
+  const [originalContent, setOriginalContent] = useState('')
+  const [showDiff, setShowDiff] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('正在读取配置文件...')
   const fileID = file?.id || ''
   const saveBlockReason = pluginConfigFileSaveBlockReason(file)
   const canSave = !saveBlockReason
+  const diff = useMemo(() => buildTextDiff(originalContent, content), [originalContent, content])
 
   useEffect(() => {
+    setShowDiff(false)
     loadFile()
   }, [pluginID, fileID])
 
@@ -1378,7 +1418,9 @@ function PluginConfigFileEditor({pluginID, file, onBack}) {
     setMessage('正在读取配置文件...')
     try {
       const body = await fetchJSON(`/api/plugins/${encodeURIComponent(pluginID)}/files/${encodeURIComponent(fileID)}`)
-      setContent(body.data?.content || '')
+      const loadedContent = body.data?.content || ''
+      setContent(loadedContent)
+      setOriginalContent(loadedContent)
       setMessage('已加载配置文件。')
     } catch (err) {
       setMessage(readableAPIError(err, '读取配置文件失败。'))
@@ -1396,6 +1438,8 @@ function PluginConfigFileEditor({pluginID, file, onBack}) {
     setMessage('正在保存配置文件...')
     try {
       await putJSON(`/api/plugins/${encodeURIComponent(pluginID)}/files/${encodeURIComponent(fileID)}`, {content})
+      setOriginalContent(content)
+      setShowDiff(false)
       setMessage('配置文件已保存。')
     } catch (err) {
       setMessage(readableAPIError(err, '保存配置文件失败。'))
@@ -1424,6 +1468,16 @@ function PluginConfigFileEditor({pluginID, file, onBack}) {
           onChange={event => setContent(event.target.value)}
         />
       </label>
+      <div className="configDiffToolbar">
+        <div>
+          <strong>{diff.changed ? '当前草稿有未保存差异' : '当前草稿与已加载内容一致'}</strong>
+          <span>+{diff.stats.added} / -{diff.stats.removed} / 未变 {diff.stats.unchanged}</span>
+        </div>
+        <button className="secondary" type="button" disabled={loading} onClick={() => setShowDiff(current => !current)}>
+          {showDiff ? '隐藏差异' : '查看差异'}
+        </button>
+      </div>
+      {showDiff && <ConfigDiffView diff={diff} />}
       <div className="buttonRow">
         <button className="primary" disabled={loading || saving || !canSave} onClick={saveFile}>保存配置文件</button>
         <button className="secondary" disabled={saving} onClick={onBack}>返回列表</button>
@@ -1431,6 +1485,36 @@ function PluginConfigFileEditor({pluginID, file, onBack}) {
       <pre className="modalResult">{message}</pre>
     </div>
   )
+}
+
+function ConfigDiffView({diff}) {
+  if (!diff.changed) {
+    return <div className="configDiffEmpty">没有检测到内容差异。</div>
+  }
+  return (
+    <div className="configDiffView" aria-label="配置文件差异">
+      <div className="configDiffHeader">
+        <span>原行</span>
+        <span>新行</span>
+        <span>内容</span>
+      </div>
+      <div className="configDiffRows">
+        {diff.rows.map((row, index) => (
+          <div key={`${row.type}-${index}-${row.oldLine}-${row.newLine}`} className={`configDiffRow ${row.type}`}>
+            <span>{row.oldLine}</span>
+            <span>{row.newLine}</span>
+            <code>{diffRowPrefix(row.type)}{row.text || ' '}</code>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function diffRowPrefix(type) {
+  if (type === 'add') return '+ '
+  if (type === 'remove') return '- '
+  return '  '
 }
 
 function ResultView({result, expanded = false}) {

@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -218,8 +219,13 @@ func (r *Runner) runWorkflowPrepared(ctx context.Context, wf *config.WorkflowCon
 			loopErr := r.executeLoop(ctx, node, nodeByID, finalParams, workflowContext, runDir, out, errOut)
 			stepRecord.EndedAt = time.Now()
 			if loopErr != nil {
-				stepRecord.Status = "failed"
-				stepRecord.Error = loopErr.Error()
+				if errors.Is(loopErr, context.Canceled) {
+					stepRecord.Status = "cancelled"
+					stepRecord.Error = "运行已取消"
+				} else {
+					stepRecord.Status = "failed"
+					stepRecord.Error = loopErr.Error()
+				}
 				record.Steps[stepIndex] = stepRecord
 				_ = r.saveRecord(runDir, record)
 				err = loopErr
@@ -249,8 +255,13 @@ func (r *Runner) runWorkflowPrepared(ctx context.Context, wf *config.WorkflowCon
 		}
 		stepRecord.EndedAt = time.Now()
 		if toolErr != nil {
-			stepRecord.Status = "failed"
-			stepRecord.Error = toolErr.Error()
+			if errors.Is(toolErr, context.Canceled) {
+				stepRecord.Status = "cancelled"
+				stepRecord.Error = "运行已取消"
+			} else {
+				stepRecord.Status = "failed"
+				stepRecord.Error = toolErr.Error()
+			}
 			record.Steps[stepIndex] = stepRecord
 			_ = r.saveRecord(runDir, record)
 			err = toolErr
@@ -498,6 +509,9 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 	cmd.Stdout = io.MultiWriter(stdoutFile, out)
 	cmd.Stderr = io.MultiWriter(stderrFile, errOut)
 	if err := cmd.Run(); err != nil {
+		if execCtx.Err() != nil {
+			return execCtx.Err()
+		}
 		return fmt.Errorf("执行工具 %s 失败: %w", tool.Config.ID, err)
 	}
 	return nil
@@ -769,11 +783,28 @@ func newRecord(kind, target string, params map[string]interface{}) *RunRecord {
 func finishRecord(record *RunRecord, err error) {
 	record.EndedAt = time.Now()
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			record.Status = "cancelled"
+			record.Error = "运行已取消"
+			markRunningStepsCancelled(record)
+			return
+		}
 		record.Status = "failed"
 		record.Error = err.Error()
 		return
 	}
 	record.Status = "succeeded"
+}
+
+func markRunningStepsCancelled(record *RunRecord) {
+	for index := range record.Steps {
+		if record.Steps[index].Status != "running" {
+			continue
+		}
+		record.Steps[index].Status = "cancelled"
+		record.Steps[index].EndedAt = record.EndedAt
+		record.Steps[index].Error = "运行已取消"
+	}
 }
 
 func sortedKeys(values map[string]string) []string {

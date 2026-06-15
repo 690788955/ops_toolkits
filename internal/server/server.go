@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -693,12 +694,14 @@ type response struct {
 }
 
 type serverState struct {
-	mu  sync.RWMutex
-	reg *registry.Registry
+	mu     sync.RWMutex
+	reg    *registry.Registry
+	runMu  sync.Mutex
+	active map[string]context.CancelFunc
 }
 
 func newServerState(reg *registry.Registry) *serverState {
-	return &serverState{reg: reg}
+	return &serverState{reg: reg, active: map[string]context.CancelFunc{}}
 }
 
 func (s *serverState) registry() *registry.Registry {
@@ -711,6 +714,35 @@ func (s *serverState) swap(reg *registry.Registry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reg = reg
+}
+
+func (s *serverState) registerRun(id string, cancel context.CancelFunc) {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	s.active[id] = cancel
+}
+
+func (s *serverState) finishRun(id string) {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	delete(s.active, id)
+}
+
+func (s *serverState) hasActiveRun(id string) bool {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	return s.active[id] != nil
+}
+
+func (s *serverState) cancelRun(id string) bool {
+	s.runMu.Lock()
+	cancel := s.active[id]
+	s.runMu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
 }
 
 func ListenAndServe(addr string, reg *registry.Registry) error {
@@ -1021,7 +1053,7 @@ func workflowsHandler(state *serverState) http.HandlerFunc {
 			return
 		}
 		if strings.HasSuffix(path, "/run") {
-			handleWorkflowRun(w, req, reg, r, strings.TrimSuffix(path, "/run"))
+			handleWorkflowRun(w, req, state, reg, r, strings.TrimSuffix(path, "/run"))
 			return
 		}
 		if strings.HasSuffix(path, "/validate") {
@@ -1050,7 +1082,7 @@ func handleWorkflowGet(w http.ResponseWriter, reg *registry.Registry, path strin
 	writeJSON(w, http.StatusOK, response{Data: wf})
 }
 
-func handleWorkflowRun(w http.ResponseWriter, req *http.Request, reg *registry.Registry, r *runner.Runner, id string) {
+func handleWorkflowRun(w http.ResponseWriter, req *http.Request, state *serverState, reg *registry.Registry, r *runner.Runner, id string) {
 	if id == "" {
 		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
 		return
@@ -1083,7 +1115,25 @@ func handleWorkflowRun(w http.ResponseWriter, req *http.Request, reg *registry.R
 		return
 	}
 	if isAsyncRunRequest(req) {
-		record, err := r.StartWorkflowConfigWithConfirmation(context.Background(), workflowConfig, params, reqBody.Confirm, io.Discard, io.Discard)
+		ctx, cancel := context.WithCancel(context.Background())
+		record, err := r.StartWorkflowConfigWithConfirmation(ctx, workflowConfig, params, reqBody.Confirm, io.Discard, io.Discard)
+		if err != nil {
+			cancel()
+			writeRunResponse(w, record, err)
+			return
+		}
+		state.registerRun(record.ID, cancel)
+		go func(runID string) {
+			for {
+				time.Sleep(100 * time.Millisecond)
+				detail, err := loadRunDetail(reg, runID)
+				if err != nil || detail.Record.Status != "running" {
+					state.finishRun(runID)
+					cancel()
+					return
+				}
+			}
+		}(record.ID)
 		writeRunResponse(w, record, err)
 		return
 	}
@@ -1172,6 +1222,14 @@ func runsHandler(state *serverState) http.HandlerFunc {
 			handleRunsCleanup(w, req, reg)
 			return
 		}
+		if req.Method == http.MethodPost {
+			if runID, ok := strings.CutSuffix(strings.Trim(id, "/"), "/cancel"); ok {
+				handleRunCancel(w, state, reg, strings.Trim(runID, "/"))
+				return
+			}
+			methodNotAllowed(w)
+			return
+		}
 		if req.Method != http.MethodGet {
 			methodNotAllowed(w)
 			return
@@ -1196,6 +1254,35 @@ func runsHandler(state *serverState) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, response{Data: detail})
 	}
+}
+
+func handleRunCancel(w http.ResponseWriter, state *serverState, reg *registry.Registry, id string) {
+	if strings.TrimSpace(id) == "" {
+		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
+		return
+	}
+	detail, err := loadRunDetail(reg, id)
+	if err == nil && detail.Record.Status != "running" {
+		writeJSON(w, http.StatusBadRequest, response{Error: "只能取消运行中的任务"})
+		return
+	}
+	if state.hasActiveRun(id) {
+		if !state.cancelRun(id) {
+			writeJSON(w, http.StatusConflict, response{Error: "当前进程没有该运行任务的取消句柄，可能已结束或由其他进程启动"})
+			return
+		}
+		writeJSON(w, http.StatusOK, response{Status: "cancelling", Data: map[string]string{"id": id, "status": "cancelling"}})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+		return
+	}
+	if !state.cancelRun(id) {
+		writeJSON(w, http.StatusConflict, response{Error: "当前进程没有该运行任务的取消句柄，可能已结束或由其他进程启动"})
+		return
+	}
+	writeJSON(w, http.StatusOK, response{Status: "cancelling", Data: map[string]string{"id": id, "status": "cancelling"}})
 }
 
 func handleRunsCleanup(w http.ResponseWriter, req *http.Request, reg *registry.Registry) {

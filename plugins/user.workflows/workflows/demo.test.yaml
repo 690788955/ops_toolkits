@@ -2,7 +2,7 @@ id: demo.test
 name: 测试
 description: ttrr
 version: 1.0.0
-category: example
+category: global
 tags: []
 parameters: []
 nodes:

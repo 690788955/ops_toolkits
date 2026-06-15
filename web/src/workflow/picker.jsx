@@ -8,10 +8,17 @@ const controlNodeCatalog = [
   {type: 'loop', title: '循环', secondary: 'Loop', description: '按固定次数重复执行一个内嵌选择的插件工具', help: '执行到循环节点时，按最大次数重复运行已选择的插件工具', enabled: true}
 ]
 
-function NodePickerPanel({searchText, setSearchText, tools, totalTools, panelPosition, canvasElement, connection, onAddTool, onAddControl, onClose}) {
+function NodePickerPanel({searchText, setSearchText, tools, totalTools, panelPosition, canvasElement, mode = 'add', connection, insertEdge, onAddTool, onAddControl, onClose}) {
   const keyword = searchText.trim().toLowerCase()
   const quickAdd = Boolean(connection?.source)
+  const insertMode = mode === 'insert' && insertEdge?.source && insertEdge?.target
   const panelStyle = pickerPanelStyle(panelPosition, canvasElement)
+  const title = insertMode ? '插入节点' : quickAdd ? '添加下游节点' : '添加节点'
+  const subtitle = insertMode
+    ? `选择后插入到 ${insertEdge.source} → ${insertEdge.target}`
+    : quickAdd
+      ? `选择后会自动连接到 ${connection.source}`
+      : '搜索插件工具，或插入条件/并行/合流/循环节点'
   const matchingControls = controlNodeCatalog
     .filter(control => control.enabled)
     .filter(control => !keyword || [control.title, control.secondary, control.description, control.help]
@@ -22,8 +29,8 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, panelPos
       <div className="nodePickerPanel" style={panelStyle}>
         <div className="nodePickerHeader">
           <div>
-            <strong>{quickAdd ? '添加下游节点' : '添加节点'}</strong>
-            <span>{quickAdd ? `选择后会自动连接到 ${connection.source}` : '搜索插件工具，或插入条件/并行/合流/循环节点'}</span>
+            <strong>{title}</strong>
+            <span>{subtitle}</span>
           </div>
           <button type="button" className="modalClose" onClick={onClose}>×</button>
         </div>
@@ -63,14 +70,14 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, panelPos
   )
 }
 
-function CanvasDock({onZoomIn, onZoomOut, onFitView, onAutoLayout, onRunWorkflow}) {
+function CanvasDock({onZoomIn, onZoomOut, onFitView, onAutoLayout, onRunWorkflow, runDisabled = false}) {
   return (
     <div className="canvasDock nodrag nopan" onMouseDown={event => event.stopPropagation()} aria-label="画布操作">
       <button type="button" onClick={onZoomOut} title="缩小画布" aria-label="缩小画布">−</button>
       <button type="button" onClick={onZoomIn} title="放大画布" aria-label="放大画布">+</button>
       <button type="button" onClick={onFitView} title="将全部节点适配到当前视图">适配</button>
       <button type="button" onClick={onAutoLayout} title="按依赖关系重新排列当前画布节点">自动排版</button>
-      <button type="button" className="canvasDockPrimary" onClick={onRunWorkflow} title="执行当前工作流草稿">运行工作流</button>
+      <button type="button" className="canvasDockPrimary" onClick={onRunWorkflow} disabled={runDisabled} title={runDisabled ? '当前工作流正在运行' : '执行当前工作流草稿'}>运行工作流</button>
     </div>
   )
 }
