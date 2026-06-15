@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import {Background, Controls, MiniMap, ReactFlow, useEdgesState, useNodesState} from '@xyflow/react'
+import {Background, Controls, MiniMap, ReactFlow, reconnectEdge, useEdgesState, useNodesState} from '@xyflow/react'
 import {fetchJSON, fetchRunDetail, postJSON} from '../api.js'
 import {filterEntries, readableAPIError, summarizeAPIResponse} from '../utils.js'
 import * as workflowModel from './model.js'
@@ -69,6 +69,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     return (catalog.tools || []).filter(tool => !sidebarScopedCategory || tool.category === sidebarScopedCategory)
   }, [catalog, sidebarScopedCategory])
   const [selectedWorkflowID, setSelectedWorkflowID] = useState('')
+  const [canvasMode, setCanvasMode] = useState('execute')
   const [selectedNodeID, setSelectedNodeID] = useState('')
   const [selectedEdgeID, setSelectedEdgeID] = useState('')
   const [nodeConfigModalOpen, setNodeConfigModalOpen] = useState(false)
@@ -80,15 +81,20 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   const [flowInstance, setFlowInstance] = useState(null)
   const canvasCardRef = useRef(null)
   const quickConnectRef = useRef(null)
-  const [nodePicker, setNodePicker] = useState({open: false, position: null, panelPosition: null, connection: null})
+  const [nodePicker, setNodePicker] = useState({open: false, mode: 'add', position: null, panelPosition: null, connection: null, insertEdge: null})
   const [nodePickerSearchText, setNodePickerSearchText] = useState('')
+  const [pendingInsertEdge, setPendingInsertEdge] = useState(null)
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
   const [canvasRunState, setCanvasRunState] = useState(() => emptyCanvasRunState())
+  const [activeRun, setActiveRun] = useState(null)
+  const [cancellingRunID, setCancellingRunID] = useState('')
   const canvasRunVersionRef = useRef(0)
 
   const clearCanvasRunOverlay = useCallback(() => {
     canvasRunVersionRef.current += 1
+    setActiveRun(null)
+    setCancellingRunID('')
     setCanvasRunState(current => current.status === 'idle' ? current : emptyCanvasRunState())
   }, [])
 
@@ -116,12 +122,22 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
 
   const selectedNode = useMemo(() => nodes.find(node => node.id === selectedNodeID), [nodes, selectedNodeID])
   const selectedEdge = useMemo(() => edges.find(edge => edge.id === selectedEdgeID), [edges, selectedEdgeID])
+  const toolMap = useMemo(() => new Map((catalog.tools || []).map(tool => [tool.id, tool])), [catalog.tools])
   const selectedTool = useMemo(() => (catalog.tools || []).find(tool => tool.id === selectedNode?.data.tool), [catalog.tools, selectedNode])
   const selectedLoopTool = useMemo(() => (catalog.tools || []).find(tool => tool.id === selectedNode?.data.loop?.tool), [catalog.tools, selectedNode])
   const nodePickerToolOptions = useMemo(() => filterEntries(toolOptions, nodePickerSearchText, ''), [toolOptions, nodePickerSearchText])
   const workflowParameters = useMemo(() => workflowModel.parseJSONList(workflowParamsText), [workflowParamsText])
+  const parsedRunParams = useMemo(() => parseJSONObject(runParamsText), [runParamsText])
+  const runParams = parsedRunParams.value
+  const executableParamGroups = useMemo(() => buildExecutableParamGroups(nodes, toolMap), [nodes, toolMap])
+  const executableParamCount = useMemo(() => executableParamGroups.reduce((total, group) => total + group.parameters.length, 0), [executableParamGroups])
   const mappingSources = useMemo(() => buildMappingSources(workflowParameters, selectedNodeID, nodes, edges), [workflowParameters, selectedNodeID, nodes, edges])
-  const displayNodes = useMemo(() => buildDisplayNodes(nodes, canvasRunState, catalog.tools || []), [nodes, canvasRunState, catalog.tools])
+  const isEditingCanvas = canvasMode === 'edit'
+  const workflowConfirm = effectiveWorkflowConfirm(workflow, selectedWorkflowID, catalog.workflows || [])
+  const activeRunID = activeRun?.id || ''
+  const activeRunStatus = normalizeRunStatus(activeRun?.status || canvasRunState.status)
+  const isActiveRunRunning = activeRunStatus === 'running'
+  const displayNodes = useMemo(() => buildDisplayNodes(nodes, canvasRunState, catalog.tools || [], isEditingCanvas ? openDownstreamNodePicker : null, isEditingCanvas), [nodes, canvasRunState, catalog.tools, isEditingCanvas])
   const displayEdges = useMemo(() => buildDisplayEdges(edges, displayNodes, canvasRunState), [edges, displayNodes, canvasRunState])
 
   useEffect(() => {
@@ -144,6 +160,10 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }, [])
 
   function openNodeConfigModal(nodeID) {
+    if (!isEditingCanvas) {
+      closeNodePicker()
+      return
+    }
     setSelectedNodeID(nodeID)
     setSelectedEdgeID('')
     setNodeConfigModalOpen(true)
@@ -152,6 +172,10 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }
 
   function openEdgeConfigModal(edgeID) {
+    if (!isEditingCanvas) {
+      closeNodePicker()
+      return
+    }
     setSelectedEdgeID(edgeID)
     setSelectedNodeID('')
     setNodeConfigModalOpen(false)
@@ -167,11 +191,12 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
 
   const onConnect = useCallback(
     params => {
+      if (!isEditingCanvas) return
       clearCanvasRunOverlay()
       if (quickConnectRef.current) quickConnectRef.current.completed = true
       setEdges(current => appendFlowEdge(current, params, nodes))
     },
-    [clearCanvasRunOverlay, nodes, setEdges]
+    [clearCanvasRunOverlay, isEditingCanvas, nodes, setEdges]
   )
 
   async function loadWorkflow(id) {
@@ -194,6 +219,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       setNodes(workflowModel.autoLayoutNodes(flowNodes, flowEdges))
       setEdges(flowEdges)
       setSelectedWorkflowID(id)
+      setCanvasMode('execute')
       setSelectedNodeID('')
       setSelectedEdgeID('')
       setNodeConfigModalOpen(false)
@@ -209,6 +235,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   function createWorkflow() {
     clearCanvasRunOverlay()
     const next = emptyWorkflow(activeCategory)
+    setCanvasMode('edit')
     setWorkflow(next)
     setWorkflowParamsText('[]')
     setRunParamsText('{}')
@@ -223,7 +250,31 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     setResult({message: '已创建空白工作流草稿'})
   }
 
+  function resetRunParamsToDefaults() {
+    clearCanvasRunOverlay()
+    setRunParamsText(JSON.stringify(workflowModel.defaultParams(workflowParameters), null, 2))
+    setNodes(current => current.map(node => resetNodeExecutableParams(node, toolMap)))
+    setEditorValidation(null)
+    setResult({message: '已填入工作流默认运行参数。'})
+  }
+
+  function updateRunParam(name, value) {
+    if (!name) return
+    clearCanvasRunOverlay()
+    const currentParams = parseJSONObject(runParamsText).value
+    setRunParamsText(JSON.stringify({...currentParams, [name]: value}, null, 2))
+    setEditorValidation(null)
+  }
+
+  function updateExecutableNodeParam(nodeID, name, value) {
+    if (!nodeID || !name) return
+    clearCanvasRunOverlay()
+    setNodes(current => current.map(node => updateNodeExecutableParam(node, nodeID, name, value)))
+    setEditorValidation(null)
+  }
+
   const removeNode = useCallback(id => {
+    if (canvasMode !== 'edit') return
     clearCanvasRunOverlay()
     setNodes(current => current.filter(node => node.id !== id))
     setEdges(current => current.filter(edge => edge.source !== id && edge.target !== id))
@@ -232,25 +283,28 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     setNodeConfigModalOpen(false)
     setEdgeConfigModalOpen(false)
     setSelectedEdgeID('')
-  }, [clearCanvasRunOverlay, setEdges, setNodes, setResult])
+  }, [canvasMode, clearCanvasRunOverlay, setEdges, setNodes, setResult])
 
   function addToolNode(tool, position, options = {}) {
+    if (!isEditingCanvas) return
     clearCanvasRunOverlay()
     const nodeID = uniqueNodeID(tool.id, nodes)
     const nextPosition = position || {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}
     const nextNode = newToolFlowNode(tool, nodeID, nextPosition, removeNode)
-    addNodeAndMaybeConnect(nextNode, options.connection)
+    addNodeAndMaybeConnect(nextNode, options)
   }
 
   function addConditionNode(position, options = {}) {
+    if (!isEditingCanvas) return
     clearCanvasRunOverlay()
     const nodeID = uniqueNodeID('condition', nodes)
     const nextPosition = position || {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}
     const nextNode = newConditionFlowNode(nodeID, nextPosition, removeNode)
-    addNodeAndMaybeConnect(nextNode, options.connection)
+    addNodeAndMaybeConnect(nextNode, options)
   }
 
   function addControlNode(controlType, position, options = {}) {
+    if (!isEditingCanvas) return
     if (controlType === 'condition') {
       addConditionNode(position, options)
       return
@@ -261,12 +315,28 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     const nodeID = uniqueNodeID(controlType, nodes)
     const nextPosition = position || {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}
     const nextNode = newControlFlowNode(control, nodeID, nextPosition, removeNode)
-    addNodeAndMaybeConnect(nextNode, options.connection)
+    addNodeAndMaybeConnect(nextNode, options)
   }
 
-  function addNodeAndMaybeConnect(nextNode, pendingConnection = null) {
+  function addNodeAndMaybeConnect(nextNode, options = {}) {
+    const pendingConnection = options.connection || null
+    const insertEdge = options.insertEdge || null
+    if (insertEdge && !canInsertIntoEdge(insertEdge, edges, nodes)) {
+      setResult({message: '待插入的连线已不存在，请重新选择连线。'})
+      closeNodePicker()
+      return
+    }
+    if (pendingConnection?.source && !nodes.some(node => node.id === pendingConnection.source)) {
+      setResult({message: '起始节点已不存在，未创建下游节点。'})
+      closeNodePicker()
+      return
+    }
     setNodes(current => [...current, nextNode])
-    if (pendingConnection?.source) {
+    if (insertEdge) {
+      const sourceNodes = [...nodes, nextNode]
+      setEdges(current => insertNodeIntoEdge(current, insertEdge, nextNode, sourceNodes))
+      setResult({message: `已在连线中插入节点 ${nextNode.id}。`})
+    } else if (pendingConnection?.source) {
       const sourceNodes = [...nodes, nextNode]
       setEdges(current => appendFlowEdge(current, {
         source: pendingConnection.source,
@@ -280,6 +350,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     setSelectedEdgeID('')
     setEditorValidation(null)
     closeNodePicker()
+    setPendingInsertEdge(null)
     setNodeConfigModalOpen(false)
     setEdgeConfigModalOpen(false)
   }
@@ -295,15 +366,20 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }
 
   function openNodePicker(position, options = {}) {
+    if (!isEditingCanvas) return
     setSelectedNodeID('')
     setSelectedEdgeID('')
     setNodeConfigModalOpen(false)
     setEdgeConfigModalOpen(false)
+    const insertEdge = options.insertEdge || null
+    setPendingInsertEdge(insertEdge)
     setNodePicker({
       open: true,
+      mode: options.mode || (insertEdge ? 'insert' : options.connection?.source ? 'connect' : 'add'),
       position: position || defaultCanvasInsertPosition(),
       panelPosition: options.panelPosition || null,
-      connection: options.connection || null
+      connection: options.connection || null,
+      insertEdge
     })
     setNodePickerSearchText('')
   }
@@ -318,10 +394,15 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }
 
   function closeNodePicker() {
-    setNodePicker({open: false, position: null, panelPosition: null, connection: null})
+    setNodePicker({open: false, mode: 'add', position: null, panelPosition: null, connection: null, insertEdge: null})
+    setPendingInsertEdge(null)
   }
 
   function handleConnectStart(_, params) {
+    if (!isEditingCanvas) {
+      quickConnectRef.current = null
+      return
+    }
     if (params?.handleType !== 'source' || !params?.nodeId) {
       quickConnectRef.current = null
       return
@@ -334,6 +415,10 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }
 
   function handleConnectEnd(event) {
+    if (!isEditingCanvas) {
+      quickConnectRef.current = null
+      return
+    }
     const pending = quickConnectRef.current
     quickConnectRef.current = null
     if (!pending?.source || pending.completed) return
@@ -346,6 +431,59 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       connection: {source: pending.source, sourceHandle: pending.sourceHandle || ''}
     })
   }
+
+  function openDownstreamNodePicker(nodeID, event) {
+    event?.stopPropagation()
+    if (!isEditingCanvas) return
+    const sourceNode = nodes.find(node => node.id === nodeID)
+    if (!sourceNode || sourceNode.type === 'conditionNode') return
+    const position = downstreamInsertPosition(sourceNode)
+    const panelPosition = position && flowInstance
+      ? panelPositionFromFlowPosition(position, flowInstance, canvasCardRef.current)
+      : null
+    openNodePicker(position, {
+      mode: 'connect',
+      panelPosition,
+      connection: {source: nodeID, sourceHandle: ''}
+    })
+  }
+
+  function handlePaneDoubleClick(event) {
+    if (!isEditingCanvas) return
+    if (!isPaneDoubleClick(event)) return
+    const point = eventPoint(event)
+    const position = point && flowInstance
+      ? flowInstance.screenToFlowPosition(point)
+      : defaultCanvasInsertPosition()
+    openNodePicker(position, {
+      mode: 'add',
+      panelPosition: panelPositionFromPoint(point, canvasCardRef.current)
+    })
+  }
+
+  function handleEdgeDoubleClick(event, edge) {
+    event.stopPropagation()
+    if (!isEditingCanvas) return
+    const point = eventPoint(event)
+    const position = point && flowInstance
+      ? flowInstance.screenToFlowPosition(point)
+      : edgeMidpoint(edge, nodes)
+    openNodePicker(position, {
+      mode: 'insert',
+      panelPosition: panelPositionFromPoint(point, canvasCardRef.current),
+      insertEdge: stripRuntimeEdgeState(edge)
+    })
+  }
+
+  const onReconnect = useCallback(
+    (oldEdge, newConnection) => {
+      if (!isEditingCanvas) return
+      clearCanvasRunOverlay()
+      setEdges(current => normalizeFlowEdges(reconnectEdge(oldEdge, newConnection, current), nodes))
+      setEditorValidation(null)
+    },
+    [clearCanvasRunOverlay, isEditingCanvas, nodes, setEdges]
+  )
 
   function zoomCanvas(direction) {
     if (!flowInstance) return
@@ -371,6 +509,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }
 
   function optimizeCanvasLayout() {
+    if (!isEditingCanvas) return
     setNodes(current => workflowModel.autoLayoutNodes(current, edges))
     setResult({message: nodes.length === 0 ? '当前画布没有节点，无需优化排版。' : '已优化工作流排版。'})
     fitCanvasViewAfterLayout()
@@ -443,21 +582,25 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }
 
   function handleToolDragStart(event, tool) {
+    if (!isEditingCanvas) return
     event.dataTransfer.setData('application/ops-tool', tool.id)
     event.dataTransfer.effectAllowed = 'move'
   }
 
   function handleControlDragStart(event, control) {
+    if (!isEditingCanvas) return
     event.dataTransfer.setData('application/ops-control', control.type)
     event.dataTransfer.effectAllowed = 'move'
   }
 
   function handleCanvasDragOver(event) {
+    if (!isEditingCanvas) return
     event.preventDefault()
     event.dataTransfer.dropEffect = 'move'
   }
 
   function handleCanvasDrop(event) {
+    if (!isEditingCanvas) return
     event.preventDefault()
     const position = flowInstance
       ? flowInstance.screenToFlowPosition({x: event.clientX, y: event.clientY})
@@ -474,11 +617,13 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }
 
   function removeSelectedNode() {
+    if (!isEditingCanvas) return
     if (!selectedNodeID) return
     removeNode(selectedNodeID)
   }
 
   function removeSelectedEdge() {
+    if (!isEditingCanvas) return
     if (!selectedEdgeID) return
     clearCanvasRunOverlay()
     setEdges(current => current.filter(edge => edge.id !== selectedEdgeID))
@@ -488,6 +633,15 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }
 
   function clearSelection() {
+    setNodeConfigModalOpen(false)
+    setEdgeConfigModalOpen(false)
+    setSelectedNodeID('')
+    setSelectedEdgeID('')
+  }
+
+  function enterExecuteMode() {
+    setCanvasMode('execute')
+    closeNodePicker()
     setNodeConfigModalOpen(false)
     setEdgeConfigModalOpen(false)
     setSelectedNodeID('')
@@ -589,6 +743,9 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       showEditorValidation(check)
       return
     }
+    const nodeCount = check.draft.nodes?.length || 0
+    const edgeCount = check.draft.edges?.length || 0
+    if (!window.confirm(`确认保存工作流「${check.draft.name || check.draft.id}」？\n\n节点：${nodeCount}\n依赖：${edgeCount}\n保存后会覆盖当前工作流配置。`)) return
     try {
       setEditorValidation(null)
       setWorkflow(check.draft)
@@ -602,10 +759,20 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }
 
   async function runDraft() {
+    if (isActiveRunRunning) {
+      setResult({message: `当前工作流正在运行：${activeRunID || '等待运行记录 ID'}，请先等待完成或取消运行。`, run: activeRun || undefined})
+      return
+    }
+    enterExecuteMode()
     const check = preflightWorkflowDraft('run')
     if (check.errors.length > 0) {
       clearCanvasRunOverlay()
       showEditorValidation(check)
+      return
+    }
+    const confirmRequired = Boolean(workflowConfirm?.required || check.draft.confirm?.required)
+    if (confirmRequired && !window.confirm(workflowConfirm?.message || check.draft.confirm?.message || '该工作流需要确认后执行，是否继续？')) {
+      setResult({message: '已取消执行工作流。'})
       return
     }
     const runVersion = canvasRunVersionRef.current + 1
@@ -628,11 +795,13 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
         return
       }
       setResult({message: '执行工作流...'})
-      const body = await postJSON(`/api/workflows/${check.draft.id}/run?async=true`, {params: runParams, workflow: check.draft})
+      const body = await postJSON(`/api/workflows/${check.draft.id}/run?async=true`, {params: runParams, workflow: check.draft, confirm: confirmRequired})
       if (body.id) {
+        setActiveRun({id: body.id, status: body.status || 'running', target: body.target || check.draft.id})
         await pollRunDetail(body.id, body, runVersion, runNodesSnapshot, applyRunOverlay)
         return
       }
+      setActiveRun(null)
       applyRunOverlay(buildFailedCanvasRunState(runNodesSnapshot, summarizeAPIResponse(body, '工作流已提交执行，但没有返回运行记录。')))
       setResult({message: summarizeAPIResponse(body, '工作流已提交执行。'), response: body})
     } catch (err) {
@@ -652,7 +821,22 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       } else {
         applyRunOverlay(buildFailedCanvasRunState(runNodesSnapshot, readableAPIError(err, '工作流执行失败。')))
       }
+      setActiveRun(runID ? {id: runID, status: body.status || 'failed'} : null)
       setResult({message: readableAPIError(err, '工作流执行失败。'), response: body, detail: detail ? {data: detail} : undefined, run: runID ? {id: runID, status: body.status || 'failed'} : undefined})
+    }
+  }
+
+  async function cancelActiveRun() {
+    if (!activeRunID || cancellingRunID) return
+    setCancellingRunID(activeRunID)
+    setResult({message: `正在取消运行任务 ${activeRunID}...`, run: activeRun})
+    try {
+      const body = await postJSON(`/api/runs/${encodeURIComponent(activeRunID)}/cancel`, {})
+      setResult({message: `已发送取消请求：${activeRunID}`, response: body, run: activeRun})
+    } catch (err) {
+      setResult({message: readableAPIError(err, '取消运行任务失败。'), response: err.body, run: activeRun})
+    } finally {
+      setCancellingRunID('')
     }
   }
 
@@ -666,6 +850,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
         if (detailData?.record) {
           const status = normalizeRunStatus(detailData.record.status || initialRun?.status || 'running')
           applyRunOverlay(buildCanvasRunStateFromDetail(detailData, runNodesSnapshot))
+          setActiveRun({id: runID, status, target: detailData.record.target || initialRun?.target})
           setResult({run: {...initialRun, status, id: runID}, detail: {data: detailData}})
           if (status !== 'running') return detail
         }
@@ -679,7 +864,55 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }
 
   const quickToolOptions = toolOptions.slice(0, 4)
-  const canvasHoverToolbar = (
+  const modeSwitch = (
+    <div className="workflowModeSwitch" role="group" aria-label="工作流画布模式">
+      <button className={isEditingCanvas ? 'primary' : 'secondary'} type="button" onClick={() => setCanvasMode('edit')}>编辑模式</button>
+      <button className={!isEditingCanvas ? 'primary' : 'secondary'} type="button" onClick={enterExecuteMode}>执行模式</button>
+    </div>
+  )
+  const workflowLoader = (
+    <label>
+      <span>加载已有工作流</span>
+      <select value={selectedWorkflowID} onChange={event => loadWorkflow(event.target.value)}>
+        <option value="">选择工作流...</option>
+        {workflowOptions.map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
+      </select>
+    </label>
+  )
+  const addControlNodeGrid = (
+    <div className="canvasHoverToolbarGrid">
+      {controlNodeCatalog.map(control => {
+        const disabled = !control.enabled
+        return (
+          <button
+            key={control.type}
+            type="button"
+            draggable={!disabled}
+            disabled={disabled}
+            aria-disabled={disabled}
+            onDragStart={disabled ? undefined : event => handleControlDragStart(event, control)}
+            onClick={disabled ? undefined : () => addControlNode(control.type)}
+            title={`${control.title}\n${control.secondary}\n${control.help || control.description}${disabled ? '\n规划中' : ''}`}
+          >
+            <span className={`paletteShape ${control.type}`} data-symbol={controlShapeMarker(control.type)} aria-hidden="true" />
+            <span>{control.title}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+  const addToolNodeGrid = (
+    <div className="canvasHoverToolbarGrid tools">
+      {quickToolOptions.map(tool => (
+        <button key={tool.id} type="button" draggable onDragStart={event => handleToolDragStart(event, tool)} onClick={() => addToolNode(tool)} title={`${tool.name || tool.id}\n${tool.id}${tool.description ? `\n${tool.description}` : ''}`}>
+          <span className="paletteShape tool" aria-hidden="true" />
+          <span>{tool.name || tool.id}</span>
+        </button>
+      ))}
+      {quickToolOptions.length === 0 && <button type="button" onClick={() => openNodePicker()}>搜索插件工具</button>}
+    </div>
+  )
+  const canvasHoverToolbar = isEditingCanvas ? (
     <section className="canvasHoverToolbar nodrag nopan" onMouseDown={event => event.stopPropagation()} aria-label="画布节点工具栏">
       <div className="canvasHoverToolbarPanel">
         <div className="canvasHoverToolbarHeader">
@@ -688,38 +921,11 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
         </div>
         <div className="canvasHoverToolbarSection">
           <span>编排节点</span>
-          <div className="canvasHoverToolbarGrid">
-            {controlNodeCatalog.map(control => {
-              const disabled = !control.enabled
-              return (
-                <button
-                  key={control.type}
-                  type="button"
-                  draggable={!disabled}
-                  disabled={disabled}
-                  aria-disabled={disabled}
-                  onDragStart={disabled ? undefined : event => handleControlDragStart(event, control)}
-                  onClick={disabled ? undefined : () => addControlNode(control.type)}
-                  title={`${control.title}\n${control.secondary}\n${control.help || control.description}${disabled ? '\n规划中' : ''}`}
-                >
-                  <span className={`paletteShape ${control.type}`} data-symbol={controlShapeMarker(control.type)} aria-hidden="true" />
-                  <span>{control.title}</span>
-                </button>
-              )
-            })}
-          </div>
+          {addControlNodeGrid}
         </div>
         <div className="canvasHoverToolbarSection">
           <span>插件工具</span>
-          <div className="canvasHoverToolbarGrid tools">
-            {quickToolOptions.map(tool => (
-              <button key={tool.id} type="button" draggable onDragStart={event => handleToolDragStart(event, tool)} onClick={() => addToolNode(tool)} title={`${tool.name || tool.id}\n${tool.id}${tool.description ? `\n${tool.description}` : ''}`}>
-                <span className="paletteShape tool" aria-hidden="true" />
-                <span>{tool.name || tool.id}</span>
-              </button>
-            ))}
-            {quickToolOptions.length === 0 && <button type="button" onClick={() => openNodePicker()}>搜索插件工具</button>}
-          </div>
+          {addToolNodeGrid}
         </div>
       </div>
       <button type="button" className="canvasHoverToolbarTrigger" aria-label="添加节点工具栏" title="悬停展开快捷节点；拖动节点卡片到画布添加">
@@ -727,58 +933,176 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
         <span>添加节点</span>
       </button>
     </section>
+  ) : null
+  const editModeSidebar = (
+    <section className="card editorToolbar workflowSidebar editModeSidebar">
+      <div className="cardHeader">
+        <h3>工作流编排</h3>
+        <span>编辑模式 · {nodes.length} 节点 / {edges.length} 依赖</span>
+      </div>
+      {modeSwitch}
+      {editorValidation?.errors?.length > 0 && <ValidationSummary status={editorValidation} />}
+      <div className="form compact">
+        {workflowLoader}
+        <div className="buttonRow">
+          <button className="secondary" type="button" onClick={createWorkflow}>新建</button>
+          <button className="secondary" type="button" onClick={validateDraft}>校验</button>
+          <button className="primary" type="button" onClick={saveDraft}>保存</button>
+        </div>
+        <div className="buttonRow">
+          <button className="secondary danger" type="button" onClick={removeSelectedNode} disabled={!selectedNode}>删除节点</button>
+          <button className="secondary danger" type="button" onClick={removeSelectedEdge} disabled={!selectedEdge}>删除依赖</button>
+          <button className="secondary" type="button" onClick={clearSelection} disabled={!selectedNode && !selectedEdge}>取消选择</button>
+        </div>
+        <label>
+          <span>工作流 ID</span>
+          <input value={workflow.id || ''} onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, id: event.target.value}) }} placeholder="demo.my-flow" />
+        </label>
+        <label>
+          <span>名称</span>
+          <input value={workflow.name || ''} onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, name: event.target.value}) }} placeholder="工作流名称" />
+        </label>
+        <label>
+          <span>描述</span>
+          <textarea
+            className="workflowDescriptionInput"
+            value={workflow.description || ''}
+            onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, description: event.target.value}) }}
+            placeholder="工作流描述，可分多行记录用途、前置条件或注意事项"
+          />
+        </label>
+        <label>
+          <span>工作流参数定义 JSON</span>
+          <textarea
+            className="workflowRunParamsInput"
+            value={workflowParamsText}
+            onChange={event => {
+              clearCanvasRunOverlay()
+              setWorkflowParamsText(event.target.value)
+              setEditorValidation(null)
+            }}
+            placeholder='[{"name":"host","type":"string","required":true,"default":"127.0.0.1"}]'
+          />
+        </label>
+      </div>
+    </section>
   )
+  const executeModeSidebar = (
+    <section className="card editorToolbar workflowSidebar executeModeSidebar">
+      <div className="cardHeader">
+        <h3>工作流执行</h3>
+        <span title={`执行模式 · ${nodes.length} 节点 / ${edges.length} 依赖`}>执行模式 · {nodes.length} 节点 / {edges.length} 依赖</span>
+      </div>
+      {modeSwitch}
+      {editorValidation?.errors?.length > 0 && <ValidationSummary status={editorValidation} />}
+      <div className="form compact">
+        {workflowLoader}
+        <div className="workflowSidebarStatus" title={workflow.name || workflow.id || '未选择工作流'}>
+          <strong>{workflow.name || workflow.id || '未选择工作流'}</strong>
+        </div>
+        <div className={isActiveRunRunning ? 'workflowSidebarStatus running' : 'workflowSidebarStatus'} title={activeRunID ? `运行 ID：${activeRunID}` : '执行后可在这里取消当前画布发起的运行任务。'}>
+          <strong>{isActiveRunRunning ? '运行中' : activeRunID ? runStatusLabel(activeRunStatus) : '未运行'}</strong>
+        </div>
+      </div>
+    </section>
+  )
+  const executeModeParamsPanel = !isEditingCanvas ? (
+    <aside className="card workflowRunParamsPanel">
+      <div className="cardHeader">
+        <h3>运行参数</h3>
+        <span title={`当前共 ${workflowParameters.length + executableParamCount} 项可执行参数`}>{workflowParameters.length + executableParamCount} 项</span>
+      </div>
+      <div className="form compact">
+        {workflowParameters.length + executableParamCount === 0 && (
+          <div className="empty small">无需参数。</div>
+        )}
+        {workflowParameters.length > 0 && (
+          <div className="workflowRunParamSection">
+            <strong title="工作流级运行参数">工作流参数</strong>
+            {workflowParameters.map((param, index) => (
+              <label key={param.name || index} className={param.required ? 'requiredField' : ''}>
+                <span title={param.description || param.name || `参数 ${index + 1}`}>{param.description || param.name || `参数 ${index + 1}`}{param.required ? ' *' : ''}</span>
+                <input
+                  value={formatRunParamInputValue(runParams[param.name])}
+                  placeholder={param.name || '参数名'}
+                  onChange={event => updateRunParam(param.name, event.target.value)}
+                  disabled={!param.name || isActiveRunRunning}
+                />
+              </label>
+            ))}
+          </div>
+        )}
+        {executableParamGroups.map(group => (
+          <div className="workflowRunParamGroup" key={group.key}>
+            <div className="workflowRunParamGroupHeader">
+              <strong title={group.subtitle}>{group.title}</strong>
+              <span title={group.subtitle}>{group.subtitle}</span>
+            </div>
+            {group.parameters.map(param => (
+              <label key={param.name} className={param.required ? 'requiredField' : ''}>
+                <span title={param.description || param.name}>{param.description || param.name}{param.required ? ' *' : ''}</span>
+                <input
+                  value={formatRunParamInputValue(group.params[param.name])}
+                  placeholder={param.name}
+                  onChange={event => updateExecutableNodeParam(group.nodeID, param.name, event.target.value)}
+                  disabled={isActiveRunRunning}
+                />
+              </label>
+            ))}
+          </div>
+        ))}
+        {parsedRunParams.invalid && (
+          <div className="empty small" title="高级 JSON 当前无效，逐项输入会以空对象重新生成参数。">高级 JSON 当前无效。</div>
+        )}
+        <div className="buttonRow">
+          <button className="secondary" type="button" onClick={resetRunParamsToDefaults}>填入默认参数</button>
+        </div>
+        <details className="advancedParams workflowRunParamsAdvanced">
+          <summary>高级 JSON</summary>
+          <textarea
+            className="workflowRunParamsInput"
+            value={runParamsText}
+            onChange={event => setRunParamsText(event.target.value)}
+            placeholder='{"host":"127.0.0.1"}'
+          />
+        </details>
+        <div className="buttonRow workflowRunActionRow">
+          <button className="secondary" type="button" onClick={validateDraft}>校验</button>
+          <button className="primary" type="button" onClick={runDraft} disabled={isActiveRunRunning}>执行</button>
+          <button className="secondary" type="button" onClick={fitCanvasView}>适配视图</button>
+          {isActiveRunRunning && (
+            <button className="secondary danger" type="button" onClick={cancelActiveRun} disabled={cancellingRunID === activeRunID}>
+              {cancellingRunID === activeRunID ? '取消中' : '取消运行'}
+            </button>
+          )}
+        </div>
+      </div>
+    </aside>
+  ) : null
+  const executeModeSidebarFooter = !isEditingCanvas ? (
+    <div className="workflowSidebarFooter">
+      <div className="workflowSidebarHint" title="执行模式下点击节点不会进入配置，节点和连线只用于查看当前运行状态。">
+        <strong>画布只读</strong>
+        <span>节点 / 连线 / 配置均不可编辑</span>
+      </div>
+      <div className="workflowSidebarHint" title={`当前画布共有 ${nodes.length} 个节点，${edges.length} 条依赖。`}>
+        <strong>结构概览</strong>
+        <span>{nodes.length} 节点 · {edges.length} 依赖</span>
+      </div>
+      <div className="workflowSidebarHint" title="运行结果会继续显示在页面下方。">
+        <strong>运行结果</strong>
+        <span>在下方面板查看日志与步骤详情</span>
+      </div>
+    </div>
+  ) : null
 
   return (
-    <div className="editorLayout">
-      <section className="card editorToolbar">
-        <div className="cardHeader">
-          <h3>工作流画布</h3>
-          <span>{nodes.length} 节点 / {edges.length} 依赖</span>
-        </div>
-        {editorValidation?.errors?.length > 0 && <ValidationSummary status={editorValidation} />}
-        <div className="form compact">
-          <label>
-            <span>加载已有工作流</span>
-            <select value={selectedWorkflowID} onChange={event => loadWorkflow(event.target.value)}>
-              <option value="">选择工作流...</option>
-              {workflowOptions.map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
-            </select>
-          </label>
-          <div className="buttonRow">
-            <button className="secondary" onClick={createWorkflow}>新建</button>
-            <button className="secondary" onClick={validateDraft}>校验</button>
-            <button className="secondary" onClick={runDraft}>执行</button>
-            <button className="primary" onClick={saveDraft}>保存</button>
-          </div>
-          <div className="buttonRow">
-            <button className="secondary danger" onClick={removeSelectedNode} disabled={!selectedNode}>删除节点</button>
-            <button className="secondary danger" onClick={removeSelectedEdge} disabled={!selectedEdge}>删除依赖</button>
-            <button className="secondary" onClick={clearSelection} disabled={!selectedNode && !selectedEdge}>取消选择</button>
-          </div>
-          <label>
-            <span>工作流 ID</span>
-            <input value={workflow.id || ''} onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, id: event.target.value}) }} placeholder="demo.my-flow" />
-          </label>
-          <label>
-            <span>名称</span>
-            <input value={workflow.name || ''} onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, name: event.target.value}) }} placeholder="工作流名称" />
-          </label>
-          <label>
-            <span>描述</span>
-            <textarea
-              className="workflowDescriptionInput"
-              value={workflow.description || ''}
-              onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, description: event.target.value}) }}
-              placeholder="工作流描述，可分多行记录用途、前置条件或注意事项"
-            />
-          </label>
-        </div>
-      </section>
+    <div className={isEditingCanvas ? 'editorLayout editModeLayout' : 'editorLayout executeModeLayout'}>
+      {isEditingCanvas ? editModeSidebar : executeModeSidebar}
 
-      {resultPanel}
+      {!isEditingCanvas && resultPanel}
 
-      <section className="card canvasCard" ref={canvasCardRef} onDragOver={handleCanvasDragOver} onDrop={handleCanvasDrop}>
+      <section className="card canvasCard" ref={canvasCardRef} onDragOver={handleCanvasDragOver} onDrop={handleCanvasDrop} onDoubleClick={handlePaneDoubleClick}>
         <ReactFlow
           nodes={displayNodes}
           edges={displayEdges}
@@ -788,16 +1112,24 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
           onConnect={onConnect}
           onConnectStart={handleConnectStart}
           onConnectEnd={handleConnectEnd}
+          onReconnect={onReconnect}
           onNodeClick={(_, node) => openNodeConfigModal(node.id)}
           onEdgeClick={(_, edge) => openEdgeConfigModal(edge.id)}
+          onEdgeDoubleClick={handleEdgeDoubleClick}
           onPaneClick={() => { clearSelection(); closeNodePicker() }}
           onInit={setFlowInstance}
+          nodesDraggable={isEditingCanvas}
+          nodesConnectable={isEditingCanvas}
+          edgesReconnectable={isEditingCanvas}
+          elementsSelectable={isEditingCanvas}
+          deleteKeyCode={isEditingCanvas ? 'Backspace' : null}
+          zoomOnDoubleClick={false}
           fitView
         >
           <MiniMap />
           <Controls />
           <Background />
-          {nodes.length === 0 && !nodePicker.open && (
+          {isEditingCanvas && nodes.length === 0 && !nodePicker.open && (
             <div className="canvasEmptyCallout nodrag nopan" onMouseDown={event => event.stopPropagation()}>
               <strong>从添加节点开始编排</strong>
               <span>悬停画布底部工具栏，或拖出连线后选择下游节点。</span>
@@ -813,9 +1145,11 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
               position={nodePicker.position}
               panelPosition={nodePicker.panelPosition}
               canvasElement={canvasCardRef.current}
+              mode={nodePicker.mode}
               connection={nodePicker.connection}
-              onAddTool={tool => addToolNode(tool, nodePicker.position, {connection: nodePicker.connection})}
-              onAddControl={controlType => addControlNode(controlType, nodePicker.position, {connection: nodePicker.connection})}
+              insertEdge={nodePicker.insertEdge || pendingInsertEdge}
+              onAddTool={tool => addToolNode(tool, nodePicker.position, {connection: nodePicker.connection, insertEdge: nodePicker.insertEdge || pendingInsertEdge})}
+              onAddControl={controlType => addControlNode(controlType, nodePicker.position, {connection: nodePicker.connection, insertEdge: nodePicker.insertEdge || pendingInsertEdge})}
               onClose={closeNodePicker}
             />
           )}
@@ -826,11 +1160,15 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
             onFitView={fitCanvasView}
             onAutoLayout={optimizeCanvasLayout}
             onRunWorkflow={runDraft}
+            runDisabled={isActiveRunRunning}
           />
         </ReactFlow>
       </section>
 
-      {nodeConfigModalOpen && selectedNode && (
+      {executeModeParamsPanel}
+      {executeModeSidebarFooter}
+
+      {isEditingCanvas && nodeConfigModalOpen && selectedNode && (
         <NodeConfigModal
           node={selectedNode}
           kindLabel={selectedNodeKindLabel}
@@ -858,7 +1196,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
         </NodeConfigModal>
       )}
 
-      {edgeConfigModalOpen && selectedEdge && (
+      {isEditingCanvas && edgeConfigModalOpen && selectedEdge && (
         <EdgeConfigModal
           edge={selectedEdge}
           sourceNode={nodes.find(node => node.id === selectedEdge.source)}
@@ -886,6 +1224,95 @@ export function shouldClearCanvasRunOverlayForNodeChanges(changes) {
 
 function sleep(ms) {
   return new Promise(resolve => window.setTimeout(resolve, ms))
+}
+
+function parseJSONObject(value) {
+  try {
+    const parsed = JSON.parse(value || '{}')
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {value: {}, invalid: true}
+    }
+    return {value: parsed, invalid: false}
+  } catch {
+    return {value: {}, invalid: true}
+  }
+}
+
+function formatRunParamInputValue(value) {
+  if (value === undefined || value === null) return ''
+  return typeof value === 'string' ? value : String(value)
+}
+
+function buildExecutableParamGroups(nodes, toolMap) {
+  return (nodes || []).flatMap(node => {
+    if (node.type === 'toolNode') {
+      const tool = toolMap.get(node.data?.tool)
+      const parameters = tool?.parameters || []
+      if (parameters.length === 0) return []
+      return [{
+        key: node.id,
+        nodeID: node.id,
+        title: node.data?.name || node.id,
+        subtitle: tool?.name || node.data?.tool || '工具节点',
+        parameters,
+        params: node.data?.params || {}
+      }]
+    }
+    if (node.type === 'controlNode' && node.data?.controlType === 'loop') {
+      const loop = normalizeLoopConfig(node.data.loop || defaultLoop())
+      const tool = toolMap.get(loop.tool)
+      const parameters = tool?.parameters || []
+      if (parameters.length === 0) return []
+      return [{
+        key: `${node.id}:loop`,
+        nodeID: node.id,
+        title: node.data?.name || node.id,
+        subtitle: `循环工具：${tool?.name || loop.tool}`,
+        parameters,
+        params: loop.params || {}
+      }]
+    }
+    return []
+  })
+}
+
+function updateNodeExecutableParam(node, nodeID, name, value) {
+  if (node.id !== nodeID) return node
+  if (node.type === 'toolNode') {
+    return {...node, data: {...node.data, params: {...(node.data.params || {}), [name]: value}}}
+  }
+  if (node.type === 'controlNode' && node.data?.controlType === 'loop') {
+    const loop = normalizeLoopConfig(node.data.loop || defaultLoop())
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        loop: {...loop, params: {...(loop.params || {}), [name]: value}}
+      }
+    }
+  }
+  return node
+}
+
+function resetNodeExecutableParams(node, toolMap) {
+  if (node.type === 'toolNode') {
+    const tool = toolMap.get(node.data?.tool)
+    if (!tool) return node
+    return {...node, data: {...node.data, params: defaultParams(tool.parameters || [])}}
+  }
+  if (node.type === 'controlNode' && node.data?.controlType === 'loop') {
+    const loop = normalizeLoopConfig(node.data.loop || defaultLoop())
+    const tool = toolMap.get(loop.tool)
+    if (!tool) return node
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        loop: {...loop, params: defaultParams(tool.parameters || [])}
+      }
+    }
+  }
+  return node
 }
 
 function buildRunningCanvasRunState(nodes, edges = []) {
@@ -1087,6 +1514,81 @@ function appendFlowEdge(edges, params, nodes) {
   ]
 }
 
+function canInsertIntoEdge(insertEdge, edges, nodes) {
+  if (!insertEdge?.id) return false
+  const edge = (edges || []).find(item => item.id === insertEdge.id)
+  if (!edge) return false
+  const nodeIDs = new Set((nodes || []).map(node => node.id))
+  return nodeIDs.has(edge.source) && nodeIDs.has(edge.target)
+}
+
+function insertNodeIntoEdge(edges, insertEdge, nextNode, nodes) {
+  const currentEdge = (edges || []).find(edge => edge.id === insertEdge.id)
+  if (!currentEdge) return edges
+  const sourceParams = {
+    source: currentEdge.source,
+    sourceHandle: currentEdge.sourceHandle || currentEdge.data?.case || undefined,
+    target: nextNode.id,
+    targetHandle: undefined
+  }
+  const targetParams = {
+    source: nextNode.id,
+    sourceHandle: undefined,
+    target: currentEdge.target,
+    targetHandle: currentEdge.targetHandle || undefined
+  }
+  const remainingEdges = (edges || []).filter(edge => edge.id !== currentEdge.id)
+  return appendFlowEdge(appendFlowEdge(remainingEdges, sourceParams, nodes), targetParams, nodes)
+}
+
+function normalizeFlowEdges(edges, nodes) {
+  return (edges || []).map(edge => {
+    const sourceNode = (nodes || []).find(node => node.id === edge.source)
+    const edgeCase = edgeCaseFromHandle(sourceNode, edge.sourceHandle)
+    const label = edgeCase ? conditionCaseLabel(sourceNode?.data.condition, edgeCase) : ''
+    return {
+      ...edge,
+      label,
+      data: edgeCase ? {...(edge.data || {}), case: edgeCase} : {}
+    }
+  })
+}
+
+function stripRuntimeEdgeState(edge) {
+  if (!edge) return null
+  const {className, selected, data, ...rest} = edge
+  const {run, ...cleanData} = data || {}
+  return {
+    ...rest,
+    data: cleanData
+  }
+}
+
+function downstreamInsertPosition(node) {
+  const position = node?.position || {x: 80, y: 120}
+  const size = autoLayoutNodeSize(node)
+  return {
+    x: position.x + size.width + 120,
+    y: position.y + Math.max(0, size.height / 2 - 36)
+  }
+}
+
+function edgeMidpoint(edge, nodes) {
+  const sourceNode = (nodes || []).find(node => node.id === edge?.source)
+  const targetNode = (nodes || []).find(node => node.id === edge?.target)
+  if (!sourceNode || !targetNode) return {x: 80, y: 120}
+  return {
+    x: (sourceNode.position.x + targetNode.position.x) / 2,
+    y: (sourceNode.position.y + targetNode.position.y) / 2
+  }
+}
+
+function panelPositionFromFlowPosition(position, flowInstance, element) {
+  if (!position || !flowInstance || !element) return null
+  const point = flowInstance.flowToScreenPosition(position)
+  return panelPositionFromPoint(point, element)
+}
+
 function eventPoint(event) {
   const source = event?.changedTouches?.[0] || event?.touches?.[0] || event
   if (typeof source?.clientX !== 'number' || typeof source?.clientY !== 'number') return null
@@ -1100,6 +1602,16 @@ function panelPositionFromPoint(point, element) {
     x: point.x - bounds.left,
     y: point.y - bounds.top
   }
+}
+
+function isPaneDoubleClick(event) {
+  const target = event?.target
+  if (!target?.closest) return true
+  return Boolean(target.closest('.react-flow__pane')) &&
+    !target.closest('.react-flow__node') &&
+    !target.closest('.react-flow__edge') &&
+    !target.closest('.nodrag') &&
+    !target.closest('button, input, textarea, select')
 }
 
 function pickerPanelStyle(position, element) {
@@ -1166,7 +1678,7 @@ function hasConfiguredParamValue(value) {
   return String(value).trim() !== ''
 }
 
-function buildDisplayNodes(nodes, runState, tools = []) {
+function buildDisplayNodes(nodes, runState, tools = [], onAddDownstream = null, canRemove = true) {
   const overlayNodes = runState?.nodes || {}
   const toolMap = new Map((tools || []).map(tool => [tool.id, tool]))
   return (nodes || []).map(node => {
@@ -1176,6 +1688,8 @@ function buildDisplayNodes(nodes, runState, tools = []) {
       data: {
         ...node.data,
         run: overlayNodes[node.id] || null,
+        onRemove: canRemove ? node.data?.onRemove : null,
+        ...(node.type !== 'conditionNode' && onAddDownstream ? {onAddDownstream} : {}),
         ...(node.type === 'toolNode' ? {
           paramStatus: toolParamStatus(tool, node.data?.params || {}),
           toolMeta: {
@@ -1240,6 +1754,12 @@ function emptyWorkflow(category) {
     edges: [],
     confirm: {required: false}
   }
+}
+
+function effectiveWorkflowConfirm(workflow, selectedWorkflowID, workflowOptions = []) {
+  if (workflow?.confirm?.required) return workflow.confirm
+  const selected = (workflowOptions || []).find(item => item.id === selectedWorkflowID || item.id === workflow?.id)
+  return selected?.confirm || workflow?.confirm || {required: false}
 }
 
 function newToolFlowNode(tool, id, position, onRemove) {

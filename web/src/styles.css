@@ -403,18 +403,32 @@ input:disabled { color: var(--color-muted); background: var(--color-bg); }
 .runHistoryItem {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px 12px;
+  gap: 8px;
   align-items: start;
   border: 1px solid var(--color-border);
   border-radius: 12px;
-  padding: 13px;
-  text-align: left;
+  padding: 8px;
   background: var(--color-surface);
 }
 .runHistoryItem:hover, .runHistoryItem.active {
   border-color: var(--color-black);
   box-shadow: var(--shadow-whisper);
 }
+
+.runHistorySelectButton {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-column: 1 / -1;
+  gap: 8px 12px;
+  align-items: start;
+  min-width: 0;
+  border: 0;
+  padding: 5px;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+}
+
 .runHistoryItem strong,
 .runHistoryItem span,
 .runHistoryItem em,
@@ -448,6 +462,19 @@ input:disabled { color: var(--color-muted); background: var(--color-bg); }
 .runStatusText.succeeded { color: var(--color-success); border-color: var(--color-success-border); background: var(--color-success-bg); }
 .runStatusText.failed { color: var(--color-danger); border-color: var(--color-danger-border); background: var(--color-danger-bg); }
 .runStatusText.running { color: var(--color-link); border-color: #0d74ce52; background: #eef7ff; }
+.runStatusText.cancelled { color: var(--color-warning-text); border-color: var(--color-warning-border); background: var(--color-warning-bg); }
+.runCancelButton {
+  grid-column: 2;
+  justify-self: end;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+.runDetailActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
 .compactResult { min-height: 74px; margin-top: 14px; font-size: 12px; }
 .logBlock, .stepLogs { display: grid; gap: 8px; }
 .logBlock h4, .stepLogs h4 { margin: 0; color: var(--color-text); font-size: 14px; font-weight: 800; }
@@ -614,7 +641,7 @@ pre {
 }
 .pluginExportLinks { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .pluginExportItem.pluginDisabled { border-color: var(--color-warning-border); background: var(--color-warning-bg); }
-.nodeConfigModal { width: min(760px, 100%); }
+.nodeConfigModal { width: min(900px, 100%); }
 .edgeConfigModal { width: min(520px, 100%); }
 .nodeConfigEditor { gap: 18px; }
 .nodeConfigEditor .advancedParams textarea { min-height: 240px; }
@@ -624,15 +651,23 @@ pre {
 
 .editorLayout {
   display: grid;
-  grid-template-columns: minmax(240px, 320px) minmax(820px, 1fr);
+  grid-template-columns: minmax(236px, 292px) minmax(760px, 1fr);
   grid-template-areas:
-    "toolbar canvas"
-    "result canvas";
-  grid-template-rows: auto minmax(0, 1fr);
+    "toolbar canvas";
+  grid-template-rows: auto;
   align-items: stretch;
   align-content: start;
-  gap: 18px;
-  min-height: clamp(560px, 58vh, 640px);
+  gap: 16px;
+  min-height: clamp(620px, 68vh, 760px);
+}
+
+.executeModeLayout {
+  grid-template-columns: minmax(236px, 292px) minmax(760px, 1fr);
+  grid-template-areas:
+    "toolbar canvas"
+    "params canvas"
+    "footer result";
+  grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
 .editorToolbar {
@@ -644,10 +679,15 @@ pre {
   overflow: auto;
 }
 
+.editModeSidebar .form.compact,
+.executeModeSidebar .form.compact {
+  gap: 10px;
+}
+
 .workflowResultCard {
   grid-area: result;
   align-self: stretch;
-  min-height: 340px;
+  min-height: 300px;
   margin-top: 0;
   overflow: hidden;
 }
@@ -695,6 +735,16 @@ pre {
   font-family: inherit;
   font-size: 14px;
   line-height: 1.55;
+}
+
+.editModeSidebar .workflowDescriptionInput,
+.editModeSidebar .workflowRunParamsInput {
+  min-height: 78px;
+  max-height: 132px;
+}
+
+.editModeSidebar .workflowSidebarSection {
+  gap: 8px;
 }
 
 .validationSummary {
@@ -850,7 +900,7 @@ pre {
   bottom: 50px;
   z-index: 1;
   display: grid;
-  width: min(520px, calc(100vw - 44px));
+  width: min(640px, calc(100vw - 44px));
   max-height: min(420px, calc(100vh - 190px));
   gap: 14px;
   overflow: auto;
@@ -960,23 +1010,33 @@ pre {
 
 .canvasCard {
   grid-area: canvas;
-  min-height: clamp(560px, 58vh, 640px);
+  min-height: clamp(620px, 68vh, 760px);
   padding: 0;
   overflow: hidden;
   background: var(--color-surface);
 }
 .canvasCard .react-flow {
-  min-height: clamp(560px, 58vh, 640px);
+  min-height: clamp(620px, 68vh, 760px);
   background:
-    linear-gradient(90deg, rgba(216,220,227,.44) 1px, transparent 1px),
-    linear-gradient(0deg, rgba(216,220,227,.44) 1px, transparent 1px),
-    var(--color-surface-muted);
-  background-size: 24px 24px;
+    radial-gradient(circle at 1px 1px, rgba(90,96,112,.28) 1px, transparent 0),
+    linear-gradient(90deg, rgba(216,220,227,.36) 1px, transparent 1px),
+    linear-gradient(0deg, rgba(216,220,227,.36) 1px, transparent 1px),
+    #f7f8fb;
+  background-size: 24px 24px, 96px 96px, 96px 96px;
 }
-.react-flow__node { color: var(--color-black); background: transparent; font-weight: 800; }
+.react-flow__node {
+  z-index: 5;
+  color: var(--color-black);
+  background: transparent;
+  font-weight: 800;
+}
+.react-flow__node.selected,
+.react-flow__node:hover {
+  z-index: 12;
+}
 .react-flow__node.selected .toolNode, .react-flow__node.selected .conditionNode, .react-flow__node.selected .controlNode {
   border-color: var(--color-focus);
-  box-shadow: 0 0 0 3px rgba(37,71,208,.16), var(--shadow-whisper);
+  box-shadow: 0 0 0 3px rgba(37,71,208,.16), rgba(15,23,42,.12) 0 16px 32px;
 }
 
 .toolNode,
@@ -985,17 +1045,71 @@ pre {
   position: relative;
   color: var(--color-black);
   background: var(--color-surface);
-  box-shadow: var(--shadow-whisper);
+  border: 1px solid #cfd5df;
+  border-radius: 8px;
+  box-shadow: rgba(15,23,42,.08) 0 10px 24px, rgba(15,23,42,.06) 0 1px 2px;
+  overflow: visible;
   transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
+}
+
+.toolNode::before,
+.conditionNode::before,
+.controlNode::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  border-radius: 8px 0 0 8px;
+  background: var(--node-accent, var(--color-link));
+  pointer-events: none;
 }
 
 .toolNode {
   display: grid;
-  min-width: 196px;
-  gap: 5px;
-  border: 1px solid var(--color-black);
-  border-radius: 12px;
-  padding: 14px 34px 14px 16px;
+  width: 228px;
+  gap: 0;
+  --node-accent: #2563eb;
+}
+
+.nodeTopBar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  min-height: 38px;
+  gap: 9px;
+  border-bottom: 1px solid rgba(15,23,42,.08);
+  border-radius: 8px 8px 0 0;
+  padding: 8px 34px 8px 14px;
+  background: linear-gradient(180deg, #ffffff, #f2f5f9);
+}
+
+.nodeTopBar strong {
+  overflow: hidden;
+  color: #111827;
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nodeContent,
+.controlNodeText,
+.conditionInfoCard {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 14px 12px;
+}
+
+.nodeHeaderShape.process {
+  display: block;
+  width: 18px;
+  height: 12px;
+  border: 1.5px solid var(--node-accent, var(--color-link));
+  border-radius: 4px;
+  background: rgba(37,99,235,.08);
 }
 
 .toolNode .nodeHoverMeta,
@@ -1027,15 +1141,15 @@ pre {
 .flowchartShape {
   position: relative;
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 20px;
+  height: 20px;
   flex: 0 0 auto;
   place-items: center;
-  border: 1.5px solid var(--color-dark-border);
+  border: 1.5px solid var(--node-accent, var(--color-dark-border));
   color: var(--color-black);
-  background: var(--color-surface);
+  background: rgba(13,116,206,.08);
   font-family: Inter, "Microsoft YaHei", -apple-system, system-ui, sans-serif;
-  font-size: 15px;
+  font-size: 11px;
   font-weight: 900;
   line-height: 1;
 }
@@ -1048,22 +1162,15 @@ pre {
 
 .controlNode {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  min-width: 210px;
-  max-width: 272px;
-  gap: 12px;
-  border: 1.5px solid var(--color-dark-border);
-  border-radius: 12px;
-  padding: 14px 36px 14px 16px;
+  width: 246px;
+  gap: 0;
+  --node-accent: #4b5563;
 }
-.controlNode.parallel { border-color: var(--color-link); }
-.controlNode.join { border-color: var(--color-dark-border); }
-.controlNode.loop { border-color: var(--color-warning-text); }
-.controlNodeText { display: grid; min-width: 0; }
+.controlNode.parallel { --node-accent: #0d74ce; }
+.controlNode.join { --node-accent: #4b5563; }
+.controlNode.loop { --node-accent: #b45309; }
 .controlNode strong,
 .controlNode small { display: block; }
-.controlNode strong { overflow: hidden; color: var(--color-black); font-size: 14px; font-weight: 900; letter-spacing: 0; text-overflow: ellipsis; white-space: nowrap; }
 .controlNode small { color: var(--color-muted); font-size: 12px; font-weight: 700; line-height: 1.35; }
 .controlNode:hover small,
 .controlNode.selected small,
@@ -1072,41 +1179,40 @@ pre {
 
 .conditionNode {
   display: grid;
-  grid-template-columns: auto minmax(172px, 1fr) minmax(148px, auto);
+  grid-template-columns: minmax(208px, 1fr) minmax(156px, auto);
   align-items: start;
-  gap: 12px;
-  min-width: 400px;
-  border: 1px solid var(--color-dark-border);
-  border-radius: 12px;
-  padding: 13px 16px 13px 15px;
+  width: 438px;
+  gap: 0;
+  --node-accent: #7c3aed;
+}
+
+.conditionNodeMain {
+  display: grid;
+  min-width: 0;
+}
+
+.conditionTopBar {
+  padding-right: 12px;
 }
 
 .conditionDiamond {
   display: grid;
-  width: 34px;
-  height: 34px;
-  margin-top: 6px;
+  width: 20px;
+  height: 20px;
   place-items: center;
-  border: 1.5px solid var(--color-dark-border);
-  border-radius: 7px;
+  border: 1.5px solid var(--node-accent);
+  border-radius: 5px;
   color: var(--color-black);
-  background: var(--color-surface);
+  background: rgba(124,58,237,.08);
   transform: rotate(45deg);
 }
 .conditionDiamond span {
   font-family: Inter, "Microsoft YaHei", -apple-system, system-ui, sans-serif;
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 900;
   transform: rotate(-45deg);
 }
 
-.conditionInfoCard {
-  display: grid;
-  min-width: 0;
-  gap: 0;
-  padding-top: 5px;
-}
-.conditionInfoCard strong { overflow: hidden; color: var(--color-black); font-size: 14px; letter-spacing: 0; text-overflow: ellipsis; white-space: nowrap; }
 .conditionInputSummary {
   overflow: hidden;
   max-width: 220px;
@@ -1138,16 +1244,20 @@ pre {
   display: grid;
   min-width: 148px;
   gap: 6px;
+  border-left: 1px solid rgba(15,23,42,.08);
+  padding: 10px 16px 10px 10px;
+  background: #fbfcfe;
+  border-radius: 0 8px 8px 0;
 }
 .conditionBranchRow {
   position: relative;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  min-height: 34px;
+  min-height: 36px;
   align-items: center;
   gap: 7px;
   border: 1px solid var(--color-border);
-  border-radius: 11px;
+  border-radius: 7px;
   padding: 6px 18px 6px 9px;
   color: var(--color-text);
   background: var(--color-surface);
@@ -1195,7 +1305,6 @@ pre {
   transform: translateY(-50%);
 }
 .toolNode strong, .toolNode span { display: block; }
-.toolNode strong { overflow: hidden; font-size: 14px; letter-spacing: 0; text-overflow: ellipsis; white-space: nowrap; }
 .toolNode .toolTypeLine {
   overflow: hidden;
   color: var(--color-muted);
@@ -1207,7 +1316,7 @@ pre {
 .toolParamStatus {
   overflow: hidden;
   border-top: 1px solid rgba(12,18,32,.08);
-  padding-top: 5px;
+  padding-top: 7px;
   color: var(--color-muted);
   font-size: 11px;
   font-weight: 900;
@@ -1223,11 +1332,11 @@ pre {
 
 .runStatusBadge {
   position: absolute;
-  top: -10px;
-  left: 12px;
+  top: -11px;
+  left: 14px;
   z-index: 6;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-pill);
+  border-radius: 7px;
   padding: 3px 8px;
   color: var(--color-muted);
   background: var(--color-surface);
@@ -1248,15 +1357,17 @@ pre {
 .conditionNode.runSucceeded,
 .controlNode.runSucceeded {
   border-color: var(--color-success);
-  box-shadow: 0 0 0 2px rgba(26,127,55,.08), var(--shadow-whisper);
+  --node-accent: var(--color-success);
+  box-shadow: 0 0 0 2px rgba(26,127,55,.08), rgba(15,23,42,.08) 0 10px 24px;
 }
 
 .toolNode.runFailed,
 .conditionNode.runFailed,
 .controlNode.runFailed {
   border-color: var(--color-danger);
+  --node-accent: var(--color-danger);
   background: var(--color-danger-bg);
-  box-shadow: 0 0 0 3px rgba(180,35,24,.14), var(--shadow-whisper);
+  box-shadow: 0 0 0 3px rgba(180,35,24,.14), rgba(15,23,42,.08) 0 10px 24px;
 }
 
 .toolNode.runSkipped,
@@ -1265,6 +1376,14 @@ pre {
   border-color: var(--color-tertiary);
   opacity: .62;
   filter: grayscale(.18);
+}
+
+.toolNode.runCancelled,
+.conditionNode.runCancelled,
+.controlNode.runCancelled {
+  border-color: var(--color-warning-border);
+  --node-accent: var(--color-warning-text);
+  background: var(--color-warning-bg);
 }
 
 .toolNode.runWaiting,
@@ -1278,12 +1397,13 @@ pre {
 .conditionNode.runRunning,
 .controlNode.runRunning {
   border-color: var(--color-link);
+  --node-accent: var(--color-link);
   animation: runPulse 1.25s ease-in-out infinite;
 }
 
 @keyframes runPulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(13,116,206,.16), var(--shadow-whisper); }
-  50% { box-shadow: 0 0 0 5px rgba(13,116,206,.08), var(--shadow-whisper); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(13,116,206,.16), rgba(15,23,42,.08) 0 10px 24px; }
+  50% { box-shadow: 0 0 0 5px rgba(13,116,206,.08), rgba(15,23,42,.08) 0 10px 24px; }
 }
 
 .conditionBranchRow.matched {
@@ -1312,31 +1432,78 @@ pre {
 
 .nodeDelete {
   position: absolute;
-  top: -9px;
-  right: -9px;
+  top: 7px;
+  right: 8px;
+  z-index: 14;
   display: grid;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   place-items: center;
-  border: 1px solid var(--color-black);
-  border-radius: var(--radius-pill);
+  border: 1px solid rgba(15,23,42,.18);
+  border-radius: 7px;
   padding: 0;
-  color: var(--color-surface);
-  background: var(--color-black);
+  color: var(--color-muted);
+  background: rgba(255,255,255,.9);
   font-size: 16px;
   font-weight: 900;
   line-height: 1;
 }
-.nodeDelete:hover { background: var(--color-danger); border-color: var(--color-danger); }
+.nodeDelete::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border-radius: 10px;
+}
+.nodeDelete:hover { color: var(--color-surface); background: var(--color-danger); border-color: var(--color-danger); }
+
+.quickNodeActions {
+  position: absolute;
+  top: calc(50% - 34px);
+  right: -14px;
+  z-index: 16;
+}
+
+.quickNodeActionsTrigger {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border: 1px solid rgba(37,71,208,.28);
+  border-radius: var(--radius-pill);
+  padding: 0;
+  color: var(--color-focus);
+  background: rgba(255,255,255,.96);
+  box-shadow: 0 8px 18px rgba(15,23,42,.12);
+  cursor: pointer;
+  font-size: 17px;
+  font-weight: 900;
+  line-height: 1;
+  transition: border-color .15s ease, background .15s ease, color .15s ease, transform .15s ease;
+}
+
+.quickNodeActionsTrigger:hover,
+.quickNodeActionsTrigger:focus-visible,
+.quickNodeActions:hover,
+.quickNodeActions:focus-visible {
+  border-color: var(--color-focus);
+  outline: none;
+}
+
+.quickNodeActionsTrigger:hover,
+.quickNodeActionsTrigger:focus-visible {
+  color: var(--color-surface);
+  background: var(--color-focus);
+  transform: translateY(-1px) scale(1.04);
+}
 
 .react-flow__handle {
-  z-index: 5;
-  width: 22px;
-  height: 22px;
-  border: 5px solid var(--color-surface);
+  z-index: 12;
+  width: 18px;
+  height: 18px;
+  border: 4px solid var(--color-surface);
   border-radius: var(--radius-pill);
-  background: var(--color-black);
-  box-shadow: 0 0 0 1px rgba(0,0,0,.18), 0 2px 6px rgba(0,0,0,.12);
+  background: var(--node-accent, var(--color-black));
+  box-shadow: 0 0 0 1px rgba(15,23,42,.2), 0 2px 7px rgba(15,23,42,.14);
   pointer-events: auto;
   transition: box-shadow .15s ease, transform .15s ease, background .15s ease;
 }
@@ -1353,19 +1520,23 @@ pre {
   outline: none;
   transform: scale(1.08);
 }
-.react-flow__handle-left { left: -11px; }
-.react-flow__handle-right { right: -11px; }
+.react-flow__handle-left { left: -9px; }
+.react-flow__handle-right { right: -9px; }
 .conditionBranchRow .conditionBranchHandle {
   top: 50%;
-  right: -11px;
+  right: -18px;
   transform: translateY(-50%);
 }
 .conditionBranchRow .conditionBranchHandle:hover {
   box-shadow: 0 0 0 6px rgba(37,71,208,.18), 0 2px 8px rgba(0,0,0,.16);
   transform: translateY(-50%) scale(1.08);
 }
+.react-flow__edge { z-index: 2; cursor: pointer; }
+.react-flow__edge.selected,
+.react-flow__edge:hover { z-index: 4; }
 .react-flow__edge-path { stroke: var(--color-link); stroke-width: 1.8; }
-.react-flow__edge.selected .react-flow__edge-path { stroke: var(--color-focus); }
+.react-flow__edge:hover .react-flow__edge-path { stroke-width: 2.5; filter: drop-shadow(0 2px 4px rgba(37,71,208,.16)); }
+.react-flow__edge.selected .react-flow__edge-path { stroke: var(--color-focus); stroke-width: 2.6; }
 .react-flow__edge-text { font-weight: 900; fill: var(--color-text); }
 .react-flow__edge-textbg { fill: var(--color-surface); stroke: var(--color-border); stroke-width: 1; }
 .react-flow__background { background-color: var(--color-bg); }
@@ -1426,7 +1597,7 @@ pre {
   top: 50%;
   left: 50%;
   display: grid;
-  width: min(440px, calc(100% - 40px));
+  width: min(720px, calc(100% - 40px));
   max-height: min(640px, calc(100% - 116px));
   gap: 14px;
   overflow: auto;
@@ -1459,12 +1630,13 @@ pre {
 }
 .nodePickerList {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   max-height: 274px;
   overflow: auto;
   gap: 8px;
   padding-right: 2px;
 }
-.nodePickerList.compact { max-height: 176px; }
+.nodePickerList.compact { max-height: 136px; }
 .nodePickerItem {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -1923,19 +2095,42 @@ fieldset legend {
 }
 .caseEditor button { justify-self: start; }
 
-@media (max-width: 1500px) {
+@media (max-width: 1180px) {
   .editorLayout {
     grid-template-columns: 1fr;
     grid-template-areas:
       "toolbar"
-      "canvas"
-      "result";
-    grid-template-rows: auto auto auto;
+      "canvas";
+    grid-template-rows: auto auto;
     min-height: 0;
+  }
+  .executeModeLayout {
+    grid-template-areas:
+      "toolbar"
+      "params"
+      "canvas"
+      "result"
+      "footer";
+    grid-template-rows: auto auto auto auto auto;
   }
   .editorToolbar {
     position: static;
     max-height: none;
+  }
+  .workflowRunParamsPanel {
+    position: static;
+    max-height: none;
+  }
+  .executeModeLayout .workflowRunParamsPanel {
+    top: auto;
+    padding: 20px;
+  }
+  .executeModeLayout .workflowRunActionRow {
+    display: flex;
+  }
+  .workflowSidebarFooter {
+    grid-area: footer;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .canvasCard, .canvasCard .react-flow { min-height: 560px; }
 }
@@ -1978,6 +2173,15 @@ fieldset legend {
   }
   .canvasHoverToolbarGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .nodePickerPanel {
+    width: min(360px, calc(100% - 24px));
+  }
+  .nodePickerList {
+    grid-template-columns: 1fr;
+  }
+  .workflowSidebarFooter {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -2245,7 +2449,424 @@ fieldset legend {
   line-height: 1.4;
 }
 
+.configDiffToolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 12px 14px;
+  background: var(--color-panel);
+}
+
+.configDiffToolbar strong,
+.configDiffToolbar span {
+  display: block;
+}
+
+.configDiffToolbar strong {
+  color: var(--color-black);
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.configDiffToolbar span {
+  margin-top: 4px;
+  color: var(--color-muted);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.configDiffView,
+.configDiffEmpty {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+  background: var(--color-surface);
+}
+
+.configDiffEmpty {
+  padding: 14px;
+  color: var(--color-muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.configDiffHeader,
+.configDiffRow {
+  display: grid;
+  grid-template-columns: 64px 64px minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.configDiffHeader {
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-muted);
+  background: var(--color-panel);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.configDiffHeader span,
+.configDiffRow span,
+.configDiffRow code {
+  min-width: 0;
+  padding: 7px 10px;
+}
+
+.configDiffRow span {
+  color: var(--color-muted);
+  border-right: 1px solid rgba(224,225,230,.72);
+  text-align: right;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+  user-select: none;
+}
+
+.configDiffRows {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.workflowSidebar {
+  display: grid;
+  gap: 14px;
+}
+
+.workflowModeSwitch {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 6px;
+  background: var(--color-panel);
+}
+
+.workflowModeSwitch button {
+  min-width: 0;
+}
+
+.workflowSidebarSection {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--color-border);
+  padding-top: 14px;
+}
+
+.workflowSidebarSectionHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.workflowSidebarSectionHeader strong {
+  color: var(--color-black);
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.workflowSidebarSection > span {
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.workflowSidebarStatus {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 12px;
+  background: var(--color-panel);
+}
+
+.workflowSidebarStatus.running {
+  border-color: #0d74ce52;
+  background: #eef7ff;
+}
+
+.workflowSidebarStatus.running strong {
+  color: var(--color-link);
+}
+
+.workflowSidebarStatus strong {
+  overflow-wrap: anywhere;
+  color: var(--color-black);
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.workflowSidebarStatus span {
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.workflowRunParamsBox {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 12px;
+  background: var(--color-surface);
+}
+
+.workflowRunParamsBox > span {
+  margin-bottom: 0;
+  color: var(--color-black);
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.workflowRunParamsInput {
+  min-height: 120px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+.workflowRunParamsPanel {
+  grid-area: params;
+  position: sticky;
+  top: 24px;
+  align-self: start;
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+
+.workflowRunParamsPanel .cardHeader {
+  align-items: flex-start;
+}
+
+.workflowRunParamsPanel .form.compact {
+  gap: 10px;
+}
+
+.workflowRunParamsPanel .empty.small {
+  margin: 0;
+}
+
+.workflowRunParamSection,
+.workflowRunParamGroup {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 12px;
+  background: var(--color-surface);
+}
+
+.workflowRunParamSection > strong,
+.workflowRunParamGroupHeader strong {
+  color: var(--color-black);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.workflowRunParamGroupHeader {
+  display: grid;
+  gap: 3px;
+}
+
+.workflowRunParamGroupHeader span {
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.executeModeLayout .workflowRunParamsPanel {
+  top: 260px;
+  padding: 16px;
+}
+
+.executeModeLayout .workflowRunParamsPanel .cardHeader {
+  margin-bottom: 12px;
+}
+
+.executeModeLayout .workflowRunParamsPanel .cardHeader h3 {
+  font-size: 16px;
+}
+
+.executeModeLayout .workflowRunParamsPanel .cardHeader span {
+  font-size: 12px;
+}
+
+.executeModeLayout .workflowRunParamSection,
+.executeModeLayout .workflowRunParamGroup {
+  gap: 8px;
+  padding: 10px;
+}
+
+.executeModeLayout .workflowRunActionRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.executeModeLayout .workflowRunActionRow .primary {
+  flex: initial;
+}
+
+.workflowRunParamsPanel label.requiredField > span {
+  color: var(--color-danger);
+  font-weight: 900;
+}
+
+.workflowRunParamsPanel label.requiredField input {
+  border-color: rgba(180,35,24,.48);
+  background: linear-gradient(0deg, rgba(255,241,240,.45), rgba(255,255,255,.96));
+}
+
+.workflowRunParamsPanel label.requiredField input:focus {
+  border-color: var(--color-danger);
+  box-shadow: 0 0 0 3px rgba(180,35,24,.12);
+}
+
+.workflowRunParamsPanel input:disabled {
+  opacity: .58;
+  cursor: not-allowed;
+}
+
+.workflowRunParamsAdvanced {
+  border-top: 1px solid var(--color-border);
+  padding-top: 12px;
+}
+
+.workflowRunParamsAdvanced textarea {
+  min-height: 112px;
+}
+
+.workflowRunActionRow {
+  border-top: 1px solid var(--color-border);
+  padding-top: 12px;
+}
+
+.workflowRunActionRow .primary {
+  flex: 1 1 120px;
+}
+
+.workflowSidebarFooter {
+  grid-area: footer;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  align-self: stretch;
+  min-height: 0;
+}
+
+.workflowSidebarHint {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 12px;
+  background: var(--color-surface);
+}
+
+.workflowSidebarHint strong {
+  color: var(--color-black);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.workflowSidebarHint span {
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.configDiffRow {
+  border-bottom: 1px solid rgba(224,225,230,.58);
+}
+
+.configDiffRow:last-child {
+  border-bottom: 0;
+}
+
+.configDiffRow code {
+  overflow-x: auto;
+  color: var(--color-text);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.configDiffRow.add {
+  background: var(--color-success-bg);
+}
+
+.configDiffRow.add code {
+  color: var(--color-success);
+}
+
+.configDiffRow.remove {
+  background: var(--color-danger-bg);
+}
+
+.configDiffRow.remove code {
+  color: var(--color-danger);
+}
+
 .configFileItem button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+@media (max-width: 1180px) {
+  .editorLayout,
+  .executeModeLayout {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "toolbar"
+      "params"
+      "canvas"
+      "result"
+      "footer";
+    grid-template-rows: auto auto auto auto auto;
+    min-height: 0;
+  }
+
+  .editModeLayout {
+    grid-template-areas:
+      "toolbar"
+      "canvas";
+  }
+
+  .editorToolbar,
+  .workflowRunParamsPanel {
+    position: static;
+    max-height: none;
+  }
+
+  .executeModeLayout .workflowRunParamsPanel {
+    top: auto;
+    padding: 20px;
+  }
+
+  .executeModeLayout .workflowRunActionRow {
+    display: flex;
+  }
+
+  .workflowSidebarFooter {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .nodePickerPanel {
+    width: min(360px, calc(100% - 24px));
+  }
+
+  .nodePickerList {
+    grid-template-columns: 1fr;
+  }
+
+  .workflowSidebarFooter {
+    grid-template-columns: 1fr;
+  }
 }
