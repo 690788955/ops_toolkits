@@ -1,0 +1,106 @@
+id: test
+name: test
+description: ""
+version: 1.0.0
+category: docker
+tags: []
+parameters: []
+nodes:
+  - id: docker_exec_bash_1
+    type: tool
+    name: 容器内执行 Bash 脚本
+    tool: docker.exec.bash
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    depends_on: []
+    params:
+      container: "1"
+      script: "1"
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+  - id: docker_exec_bash_2
+    type: tool
+    name: 容器内执行 Bash 脚本
+    tool: docker.exec.bash
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    depends_on: []
+    params:
+      container: "1"
+      script: "1"
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+  - id: docker_exec_bash_3
+    type: tool
+    name: 容器内执行 Bash 脚本
+    tool: docker.exec.bash
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    depends_on: []
+    params:
+      container: "1"
+      script: "1"
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+  - id: docker_exec_bash_4
+    type: tool
+    name: 容器内执行 Bash 脚本
+    tool: docker.exec.bash
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    depends_on: []
+    params:
+      container: "1"
+      script: "1"
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+edges:
+  - from: docker_exec_bash_1
+    to: docker_exec_bash_2
+    case: ""
+  - from: docker_exec_bash_2
+    to: docker_exec_bash_3
+    case: ""
+  - from: docker_exec_bash_3
+    to: docker_exec_bash_4
+    case: ""
+steps: []
+confirm:
+  required: false
+  message: ""

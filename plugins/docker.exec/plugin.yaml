@@ -1,0 +1,60 @@
+id: docker.exec
+name: Docker 容器执行
+version: 1.0.0
+description: 在 Docker 容器中执行命令，支持指定容器名称和待执行命令
+author: ops-team
+
+contributes:
+  categories:
+    - id: docker
+      name: Docker
+      description: Docker 容器管理工具
+
+  tools:
+    - id: docker.exec.run
+      name: 容器内执行命令
+      category: docker
+      description: 在指定的 Docker 容器中执行命令（非交互式）
+      tags: [docker, exec, container]
+      command: scripts/docker-exec.sh
+      args:
+        - "{{ .container }}"
+        - "{{ .command }}"
+      workdir: .
+      timeout: 30m
+      parameters:
+        - name: container
+          type: string
+          description: Docker 容器名称或 ID
+          required: true
+        - name: command
+          type: string
+          description: 在容器内执行的命令（如 ./ops/everisk/install_all.sh）
+          required: true
+      confirm:
+        required: true
+        message: "确认在容器 [{{ .container }}] 中执行命令: {{ .command }} ？"
+
+    - id: docker.exec.bash
+      name: 容器内执行 Bash 脚本
+      category: docker
+      description: 在指定的 Docker 容器中通过 bash -c 执行脚本命令
+      tags: [docker, exec, bash]
+      command: scripts/docker-exec-bash.sh
+      args:
+        - "{{ .container }}"
+        - "{{ .script }}"
+      workdir: .
+      timeout: 30m
+      parameters:
+        - name: container
+          type: string
+          description: Docker 容器名称或 ID
+          required: true
+        - name: script
+          type: string
+          description: 通过 bash -c 执行的脚本内容（如 "cd /app && ./deploy.sh"）
+          required: true
+      confirm:
+        required: true
+        message: "确认在容器 [{{ .container }}] 中执行 Bash 脚本？"

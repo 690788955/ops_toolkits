@@ -12,3 +12,4 @@ contributes:
   tools: []
   workflows:
     - path: workflows/demo.test.yaml
+    - path: workflows/test.yaml

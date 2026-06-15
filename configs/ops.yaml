@@ -21,7 +21,8 @@ plugins:
     - plugins
   strict: false
   disabled: []
-  allowed_commands: []
+  allowed_commands:
+    - docker
 ui:
   enabled: true
   title: 运维工作流控制台
