@@ -72,6 +72,9 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		if hasLoopConfig(node.Loop) {
 			return fmt.Errorf("工具节点 %s 不能配置 loop", node.ID)
 		}
+		if hasUploadConfig(node.Upload) {
+			return fmt.Errorf("工具节点 %s 不能配置 upload", node.ID)
+		}
 		if _, ok := r.Tools[node.Tool]; !ok {
 			return fmt.Errorf("节点 %s 引用了不存在的工具 %s", node.ID, node.Tool)
 		}
@@ -81,6 +84,9 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		}
 		if hasLoopConfig(node.Loop) {
 			return fmt.Errorf("条件节点 %s 不能配置 loop", node.ID)
+		}
+		if hasUploadConfig(node.Upload) {
+			return fmt.Errorf("条件节点 %s 不能配置 upload", node.ID)
 		}
 		if node.Condition.Input == "" {
 			return fmt.Errorf("条件节点 %s 的 condition.input 必填", node.ID)
@@ -120,12 +126,31 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		if hasLoopConfig(node.Loop) {
 			return fmt.Errorf("编排节点 %s 不能配置 loop", node.ID)
 		}
+		if hasUploadConfig(node.Upload) {
+			return fmt.Errorf("编排节点 %s 不能配置 upload", node.ID)
+		}
+	case config.WorkflowNodeTypeUpload:
+		if node.Tool != "" {
+			return fmt.Errorf("上传节点 %s 不能配置 tool", node.ID)
+		}
+		if node.Condition.Input != "" || len(node.Condition.Cases) > 0 || node.Condition.DefaultCase != "" {
+			return fmt.Errorf("上传节点 %s 不能配置 condition", node.ID)
+		}
+		if hasLoopConfig(node.Loop) {
+			return fmt.Errorf("上传节点 %s 不能配置 loop", node.ID)
+		}
+		if _, err := config.NormalizeUploadTargetDir(node.Upload.TargetDir); err != nil {
+			return fmt.Errorf("上传节点 %s 的 upload.target_dir 无效: %w", node.ID, err)
+		}
 	case config.WorkflowNodeTypeLoop:
 		if node.Tool != "" {
 			return fmt.Errorf("循环节点 %s 不能同时配置 tool", node.ID)
 		}
 		if node.Condition.Input != "" || len(node.Condition.Cases) > 0 || node.Condition.DefaultCase != "" {
 			return fmt.Errorf("循环节点 %s 不能配置 condition", node.ID)
+		}
+		if hasUploadConfig(node.Upload) {
+			return fmt.Errorf("循环节点 %s 不能配置 upload", node.ID)
 		}
 		if node.Loop.Target != "" {
 			if node.Loop.Tool != "" {
@@ -197,11 +222,18 @@ func effectiveNodeType(node config.WorkflowNode) string {
 	if hasLoopConfig(node.Loop) {
 		return config.WorkflowNodeTypeLoop
 	}
+	if hasUploadConfig(node.Upload) {
+		return config.WorkflowNodeTypeUpload
+	}
 	return ""
 }
 
 func hasLoopConfig(loop config.WorkflowLoop) bool {
 	return loop.Tool != "" || loop.Target != "" || loop.MaxIterations != 0 || len(loop.Params) > 0
+}
+
+func hasUploadConfig(upload config.WorkflowUpload) bool {
+	return upload.TargetDir != ""
 }
 
 func conditionCaseExists(node config.WorkflowNode, caseID string) bool {

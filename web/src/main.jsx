@@ -6,6 +6,9 @@ import * as yaml from 'js-yaml'
 import {deleteJSON, fetchJSON, fetchRunDetail, postJSON, postPluginZip, putJSON} from './api.js'
 import {buildTextDiff} from './configDiff.js'
 import {combineWorkflowStepLogs, filterEntries, readableAPIError, summarizeAPIResponse, tagsForEntries} from './utils.js'
+import FileUploadInput from './FileUploadInput.jsx'
+import LiveRunTerminal from './LiveRunTerminal.jsx'
+import {normalizeLogFontSize} from './logUtils.js'
 
 const WorkflowEditor = React.lazy(() => import('./workflow/WorkflowEditor.jsx'))
 
@@ -98,16 +101,34 @@ function App() {
     const needsConfirm = selected.confirm?.required
     if (needsConfirm && !window.confirm(selected.confirm.message || '该操作需要确认，是否继续？')) return
     runVersionRef.current += 1
+    const runVersion = runVersionRef.current
     setResult({message: '执行中...'})
     try {
-      const body = await postJSON(`/api/tools/${selected.id}/run`, {params, confirm: Boolean(needsConfirm)})
+      const body = await postJSON(`/api/tools/${selected.id}/run?async=true`, {params, confirm: Boolean(needsConfirm)})
       if (body.id) {
-        setResult({run: body, detail: await fetchRunDetail(body.id)})
+        setResult({run: body, message: '执行中...'})
+        pollToolRunDetail(body, runVersion)
         return
       }
       setResult({message: summarizeAPIResponse(body, '执行请求已提交。'), response: body})
     } catch (err) {
       setResult({message: readableAPIError(err, '执行失败。'), response: err.body})
+    }
+  }
+
+  async function pollToolRunDetail(run, runVersion) {
+    while (runVersionRef.current === runVersion) {
+      try {
+        const detail = await fetchRunDetail(run.id)
+        const detailData = detail?.data || detail
+        const status = detailData?.record?.status || run.status || 'running'
+        setResult({run: {...run, status}, detail: {data: detailData}})
+        if (status !== 'running') return
+      } catch (err) {
+        setResult({message: readableAPIError(err, '读取运行详情失败。'), run})
+        return
+      }
+      await new Promise(resolve => window.setTimeout(resolve, 1000))
     }
   }
 
@@ -181,9 +202,8 @@ function App() {
             <p>{category?.description || '跨分类选择工具或维护工作流'}</p>
           </div>
           <div className="topbarActions">
-            <div className="hint">可视化工作流编排</div>
-            <button className="settingsButton" type="button" title="全局环境" aria-label="全局环境" onClick={() => setGlobalEnvOpen(true)}>ENV</button>
-            <button className="settingsButton" type="button" title="平台设置" aria-label="平台设置" onClick={() => setPlatformSettingsOpen(true)}>SET</button>
+            <button className="settingsButton" type="button" title="工具和插件脚本可引用的全局变量" aria-label="全局变量" onClick={() => setGlobalEnvOpen(true)}>全局变量</button>
+            <button className="settingsButton" type="button" title="平台、界面和服务设置" aria-label="平台设置" onClick={() => setPlatformSettingsOpen(true)}>平台设置</button>
           </div>
         </header>
 
@@ -726,7 +746,7 @@ function PlatformSettingsModal({onClose, onSaved}) {
         <div className="modalHeader">
           <div>
             <h3 id="platform-settings-title">平台设置</h3>
-            <p>配置应用名称、插件目录、服务端口等基础信息</p>
+            <p>配置平台服务、插件目录、路径和界面偏好。</p>
           </div>
           <button className="modalClose" type="button" onClick={onClose} aria-label="关闭">×</button>
         </div>
@@ -742,8 +762,8 @@ function GlobalEnvModal({onClose, onSaved}) {
       <div className="modal platformSettingsModal" role="dialog" aria-modal="true" aria-labelledby="global-env-title">
         <div className="modalHeader">
           <div>
-            <h3 id="global-env-title">全局环境</h3>
-            <p>编辑全局环境配置文件（.env 格式），插件脚本可通过 $OPS_GLOBAL_ENV_FILE 访问</p>
+            <h3 id="global-env-title">全局变量</h3>
+            <p>配置工具和插件脚本运行时可引用的全局变量，脚本可通过 $OPS_GLOBAL_ENV_FILE 读取。</p>
           </div>
           <button className="modalClose" type="button" onClick={onClose} aria-label="关闭">×</button>
         </div>
@@ -775,6 +795,7 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
     pluginsAllowedCommands: '',
     pathsRuns: 'runs',
     pathsLogs: 'runs/logs',
+    uiLogFontSize: 14,
     hostConfigAllowedDirs: ''
   })
 
@@ -805,6 +826,7 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
             pluginsAllowedCommands: (config.plugins?.allowed_commands || []).join('\n'),
             pathsRuns: config.paths?.runs || 'runs',
             pathsLogs: config.paths?.logs || 'runs/logs',
+            uiLogFontSize: normalizeLogFontSize(config.ui?.log_font_size),
             hostConfigAllowedDirs: (config.host_config_files?.allowed_dirs || []).join('\n')
           })
         } catch (parseErr) {
@@ -864,6 +886,10 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
         runs: formData.pathsRuns,
         logs: formData.pathsLogs
       },
+      ui: {
+        ...(base.ui || {}),
+        log_font_size: normalizeLogFontSize(formData.uiLogFontSize)
+      },
       host_config_files: {
         ...(base.host_config_files || {}),
         allowed_dirs: formLines(formData.hostConfigAllowedDirs)
@@ -893,6 +919,7 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
         pluginsAllowedCommands: (config.plugins?.allowed_commands || []).join('\n'),
         pathsRuns: config.paths?.runs || 'runs',
         pathsLogs: config.paths?.logs || 'runs/logs',
+        uiLogFontSize: normalizeLogFontSize(config.ui?.log_font_size),
         hostConfigAllowedDirs: (config.host_config_files?.allowed_dirs || []).join('\n')
       })
       setEditMode('form')
@@ -1036,6 +1063,15 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
               </fieldset>
 
               <fieldset>
+                <legend>界面设置</legend>
+                <label>
+                  <span>日志字体大小</span>
+                  <input type="number" min="12" max="20" value={formData.uiLogFontSize} disabled={loading || saving} placeholder="14" onChange={e => updateFormField('uiLogFontSize', e.target.value)} />
+                </label>
+                <div className="empty small">日志终端字体大小，支持 12-20；非法值保存时会回退为 14。</div>
+              </fieldset>
+
+              <fieldset>
                 <legend>宿主配置文件白名单</legend>
                 <label>
                   <span>允许目录（每行一个绝对目录）</span>
@@ -1115,19 +1151,19 @@ function GlobalEnvConfigPanel({onBack, onSaved, modalMode = false}) {
         {!modalMode && (
           <div className="cardHeader">
             <div>
-              <h3>全局环境</h3>
-              <p>{path} - 存储可被所有工具插件调用的全局参数（数据库连接、API密钥等）</p>
+              <h3>全局变量</h3>
+              <p>{path} - 存储工具和插件脚本运行时可引用的全局变量</p>
             </div>
           </div>
         )}
         <div className="pluginConfigEditor">
-          <div className="empty small">编辑全局环境配置文件（.env 格式），保存后会重新加载运行时配置。插件脚本可通过 $OPS_GLOBAL_ENV_FILE 环境变量访问此文件。</div>
+          <div className="empty small">编辑全局变量配置文件（.env 格式），保存后会重新加载运行时配置。插件脚本可通过 $OPS_GLOBAL_ENV_FILE 环境变量访问此文件。</div>
           <label>
             <span>.env 格式内容</span>
             <textarea value={content} disabled={loading || saving} placeholder="# 数据库配置&#10;DB_HOST=localhost&#10;DB_PORT=5432&#10;&#10;# API 配置&#10;API_BASE_URL=https://api.example.com&#10;&#10;# 环境标识&#10;ENVIRONMENT=dev" onChange={event => setContent(event.target.value)} />
           </label>
           <div className="buttonRow">
-            <button className="primary" disabled={loading || saving} onClick={saveConfig}>保存全局环境配置</button>
+            <button className="primary" disabled={loading || saving} onClick={saveConfig}>保存全局变量</button>
             {!modalMode && <button className="secondary" disabled={saving} onClick={onBack}>返回列表</button>}
           </div>
           <pre className="modalResult">{message}</pre>
@@ -1519,16 +1555,48 @@ function diffRowPrefix(type) {
 
 function ResultView({result, expanded = false}) {
   const className = expanded ? 'resultView resultViewExpanded' : 'resultView'
+  const progress = result?.uploadProgress
   if (typeof result === 'string') {
     return <div className={className}><pre>{result}</pre></div>
   }
+  if (result?.run?.id && !result?.detail?.data) {
+    return <div className={className}>{progress && <UploadProgressPanel progress={progress} />}<RunDetail detail={{record: result.run, logs: {}}} run={result.run} /></div>
+  }
   if (result?.detail?.data) {
-    return <div className={className}><RunDetail detail={result.detail.data} run={result.run} /></div>
+    return <div className={className}>{progress && <UploadProgressPanel progress={progress} />}<RunDetail detail={result.detail.data} run={result.run} /></div>
   }
   if (result?.response) {
-    return <div className={className}><MessageWithDetails message={result.message} details={result.response} /></div>
+    return <div className={className}>{progress && <UploadProgressPanel progress={progress} />}<MessageWithDetails message={result.message} details={result.response} /></div>
   }
-  return <div className={className}><pre>{result?.message || '暂无结果'}</pre></div>
+  return <div className={className}>{progress && <UploadProgressPanel progress={progress} />}<pre>{result?.message || '暂无结果'}</pre></div>
+}
+
+function UploadProgressPanel({progress}) {
+  return (
+    <div className={`uploadProgressPanel uploadProgress${capitalizeProgressStatus(progress.status)}`}>
+      <div className="uploadProgressMeta">
+        <strong>{progress.nodeID}</strong>
+        <span>{progress.label || '上传中'}</span>
+        <span>{formatBytes(progress.uploaded)} / {formatBytes(progress.total)} · {progress.percent}%</span>
+      </div>
+      <div className="uploadProgressTrack" role="progressbar" aria-valuenow={progress.percent} aria-valuemin="0" aria-valuemax="100">
+        <span style={{width: `${progress.percent}%`}} />
+      </div>
+    </div>
+  )
+}
+
+function capitalizeProgressStatus(status) {
+  const value = String(status || 'uploading')
+  return value.charAt(0).toUpperCase() + value.slice(1)
+}
+
+function formatBytes(value) {
+  const size = Number(value || 0)
+  if (size >= 1024 * 1024 * 1024) return `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`
+  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${size} B`
 }
 
 function MessageWithDetails({message, details}) {
@@ -1548,19 +1616,19 @@ function RunDetail({detail, run}) {
   const logs = detail.logs || {}
   const combinedStepLogs = combineWorkflowStepLogs(logs.steps, record)
   const runID = record.id || run?.id
+  const status = record.status || run?.status
+  const items = logs.items || []
   return (
     <div className="runDetail">
       <div className="runSummary">
-        <span>运行 ID：{runID}</span>
-        <span>状态：{record.status || run?.status}</span>
+        <span className={`runStatusText ${status || ''}`}>{status || '-'}</span>
         <span>目标：{record.target || '-'}</span>
+        <span>运行 ID：{runID || '-'}</span>
+        {runID && <a href={`/api/runs/${encodeURIComponent(runID)}/support.zip`}>导出支持包</a>}
       </div>
-      {runID && (
-        <div className="buttonRow">
-          <a className="secondary" href={`/api/runs/${encodeURIComponent(runID)}/support.zip`}>导出支持包</a>
-        </div>
-      )}
-      {combinedStepLogs ? (
+      {runID ? (
+        <LiveRunTerminal runID={runID} running={status === 'running'} initialItems={items} />
+      ) : combinedStepLogs ? (
         <LogBlock title="工作流日志" value={combinedStepLogs} />
       ) : (
         <>
@@ -1679,7 +1747,13 @@ function RunPanel({entries, totalEntries, selected, params, setParams, selectEnt
               {(selected.parameters || []).map(param => (
                 <label key={param.name}>
                   <span>{param.description || param.name}{param.required ? ' *' : ''}</span>
-                  <input value={params[param.name] || ''} placeholder={param.name} onChange={event => setParams({...params, [param.name]: event.target.value})} />
+                  {param.type === 'bool' ? (
+                    <input type="checkbox" checked={parseBoolParamValue(params[param.name])} onChange={event => setParams({...params, [param.name]: event.target.checked})} />
+                  ) : param.type === 'file' ? (
+                    <FileUploadInput value={params[param.name] || ''} onChange={value => setParams({...params, [param.name]: value})} />
+                  ) : (
+                    <input value={params[param.name] || ''} placeholder={param.name} onChange={event => setParams({...params, [param.name]: event.target.value})} />
+                  )}
                 </label>
               ))}
               {(selected.parameters || []).length === 0 && <div className="empty small">无需参数。</div>}
@@ -1693,3 +1767,7 @@ function RunPanel({entries, totalEntries, selected, params, setParams, selectEnt
 }
 
 createRoot(document.getElementById('root')).render(<App />)
+
+function parseBoolParamValue(value) {
+  return value === true || value === 'true' || value === '1' || value === 'yes' || value === 'on'
+}

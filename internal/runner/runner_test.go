@@ -2,10 +2,13 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"shell_ops/internal/config"
 	"shell_ops/internal/registry"
@@ -407,6 +410,136 @@ echo done
 	}
 }
 
+func TestRunWorkflowUploadNodeWritesContextForDownstreamTool(t *testing.T) {
+	dir := t.TempDir()
+	consumerDir := writeTool(t, dir, "upload-consumer", `#!/usr/bin/env bash
+set -euo pipefail
+echo "path=${OPS_PARAM_PATH}"
+echo "name=${OPS_PARAM_NAME}"
+echo "count=${OPS_PARAM_COUNT}"
+echo "paths=${OPS_PARAM_PATHS}"
+`)
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.consumer": {Entry: config.ToolEntry{ID: "demo.consumer", Category: "demo"}, Config: toolConfig("demo.consumer"), Dir: consumerDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID: "demo.upload-flow",
+		Nodes: []config.WorkflowNode{
+			{ID: "upload", Type: config.WorkflowNodeTypeUpload, Upload: config.WorkflowUpload{TargetDir: "assets"}},
+			{ID: "consume", Tool: "demo.consumer", Params: map[string]interface{}{"path": "{{ .steps.upload.file.path }}", "name": "{{ .steps.upload.file.filename }}", "count": "{{ .steps.upload.files.count }}", "paths": "{{ .steps.upload.files.paths }}"}},
+		},
+		Edges: []config.WorkflowEdge{{From: "upload", To: "consume"}},
+	}
+	firstPath := filepath.Join(dir, "runs", "uploads", "assets", "upload-1", "a.zip")
+	secondPath := filepath.Join(dir, "runs", "uploads", "assets", "upload-1", "dir", "b.zip")
+	upload := config.WorkflowUploadResult{
+		ID:           "upload-1",
+		FileName:     "a.zip",
+		Path:         firstPath,
+		RelativePath: "runs/uploads/assets/upload-1/a.zip",
+		Size:         123,
+		Files: []config.WorkflowUploadFile{
+			{FileName: "a.zip", Path: firstPath, RelativePath: "runs/uploads/assets/upload-1/a.zip", Size: 123},
+			{FileName: "b.zip", Path: secondPath, RelativePath: "runs/uploads/assets/upload-1/dir/b.zip", Size: 456},
+		},
+		Count:     2,
+		TotalSize: 579,
+	}
+
+	r := New(reg)
+	record, err := r.RunWorkflowConfigWithUploads(context.Background(), wf, nil, false, map[string]config.WorkflowUploadResult{"upload": upload}, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflowConfigWithUploads error: %v", err)
+	}
+	if record.Status != "succeeded" {
+		t.Fatalf("status = %s", record.Status)
+	}
+	uploadStdout := readFile(t, filepath.Join(r.RunsDir, record.ID, "upload", "stdout.log"))
+	if !strings.Contains(uploadStdout, "SUCCESS 上传节点 upload 上传完成") || !strings.Contains(uploadStdout, `"filename":"a.zip"`) || !strings.Contains(uploadStdout, `"relative_path":"runs/uploads/assets/upload-1/a.zip"`) {
+		t.Fatalf("upload stdout = %s", uploadStdout)
+	}
+	consumerStdout := readFile(t, filepath.Join(r.RunsDir, record.ID, "consume", "stdout.log"))
+	if !strings.Contains(filepath.ToSlash(consumerStdout), "/runs/uploads/assets/upload-1/a.zip") || !strings.Contains(consumerStdout, "name=a.zip") || !strings.Contains(consumerStdout, "count=2") || !strings.Contains(filepath.ToSlash(consumerStdout), "/runs/uploads/assets/upload-1/dir/b.zip") {
+		t.Fatalf("consumer stdout = %s", consumerStdout)
+	}
+}
+
+func TestRunWorkflowUploadNodeFailsWithoutUploadResult(t *testing.T) {
+	dir := t.TempDir()
+	reg := &registry.Registry{
+		BaseDir:   dir,
+		Root:      &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools:     map[string]*registry.Tool{},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID:    "demo.upload-flow",
+		Nodes: []config.WorkflowNode{{ID: "upload", Type: config.WorkflowNodeTypeUpload}},
+	}
+
+	r := New(reg)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	record, err := r.RunWorkflowConfigWithUploads(ctx, wf, nil, false, nil, nilWriter{}, nilWriter{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunWorkflowConfigWithUploads error = %v, want context canceled", err)
+	}
+	if record.Status != "cancelled" || len(record.Steps) != 1 || record.Steps[0].Status != "cancelled" {
+		t.Fatalf("record = %#v", record)
+	}
+}
+
+func TestRunWorkflowUploadNodeWaitsForUploadResultFile(t *testing.T) {
+	dir := t.TempDir()
+	reg := &registry.Registry{
+		BaseDir:   dir,
+		Root:      &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools:     map[string]*registry.Tool{},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID:    "demo.upload-flow",
+		Nodes: []config.WorkflowNode{{ID: "upload", Type: config.WorkflowNodeTypeUpload}},
+	}
+
+	r := New(reg)
+	record, err := r.StartWorkflowConfigWithUploads(context.Background(), wf, nil, false, nil, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("StartWorkflowConfigWithUploads error: %v", err)
+	}
+	runDir := filepath.Join(r.RunsDir, record.ID)
+	waitForRunnerStepStatus(t, runDir, "upload", "waiting")
+	waitStdout := readFile(t, filepath.Join(runDir, "upload", "stdout.log"))
+	if !strings.Contains(waitStdout, "WAIT 上传节点 upload 等待选择的文件上传到平台") {
+		t.Fatalf("wait stdout = %s", waitStdout)
+	}
+	upload := config.WorkflowUploadResult{
+		ID:           "upload-1",
+		FileName:     "a.zip",
+		Path:         filepath.Join(dir, "runs", "uploads", "upload-1", "a.zip"),
+		RelativePath: "runs/uploads/upload-1/a.zip",
+		Size:         123,
+		Count:        1,
+		TotalSize:    123,
+	}
+	if err := WriteWorkflowUploadResult(runDir, "upload", upload); err != nil {
+		t.Fatalf("WriteWorkflowUploadResult error: %v", err)
+	}
+	finalRecord := waitForRunnerRecordStatus(t, runDir, "succeeded")
+	if len(finalRecord.Steps) != 1 || finalRecord.Steps[0].Status != "succeeded" {
+		t.Fatalf("record = %#v", finalRecord)
+	}
+	stdout := readFile(t, filepath.Join(runDir, "upload", "stdout.log"))
+	if !strings.Contains(stdout, "WAIT 上传节点 upload") || !strings.Contains(stdout, "LOG 上传节点 upload 已接收上传文件") || !strings.Contains(stdout, "SUCCESS 上传节点 upload 上传完成") || !strings.Contains(stdout, `"filename":"a.zip"`) {
+		t.Fatalf("stdout = %s", stdout)
+	}
+}
+
 func TestRunToolMergesLayeredConfigWritesNestedParamFileTemplatesAndRedacts(t *testing.T) {
 	dir := t.TempDir()
 	toolDir := writeTool(t, dir, "layered", `#!/usr/bin/env bash
@@ -490,6 +623,73 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func waitForRunnerStepStatus(t *testing.T, runDir, stepID, status string) RunRecord {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		record, ok := tryReadRunnerRecord(runDir)
+		if !ok {
+			if time.Now().After(deadline) {
+				t.Fatalf("step %s did not reach status %s; result.json was not readable", stepID, status)
+			}
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+		for _, step := range record.Steps {
+			if step.ID == stepID && step.Status == status {
+				return record
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("step %s did not reach status %s, record=%#v", stepID, status, record)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func waitForRunnerRecordStatus(t *testing.T, runDir, status string) RunRecord {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		record, ok := tryReadRunnerRecord(runDir)
+		if !ok {
+			if time.Now().After(deadline) {
+				t.Fatalf("record did not reach status %s; result.json was not readable", status)
+			}
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+		if record.Status == status {
+			return record
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("record did not reach status %s, record=%#v", status, record)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func readRunnerRecord(t *testing.T, runDir string) RunRecord {
+	t.Helper()
+	record, ok := tryReadRunnerRecord(runDir)
+	if !ok {
+		t.Fatalf("read runner record from %s", runDir)
+	}
+	return record
+}
+
+func tryReadRunnerRecord(runDir string) (RunRecord, bool) {
+	data, err := os.ReadFile(filepath.Join(runDir, "result.json"))
+	if err != nil {
+		return RunRecord{}, false
+	}
+	var record RunRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return RunRecord{}, false
+	}
+	return record, true
 }
 
 func TestWindowsPathToWSLConvertsDrivePath(t *testing.T) {

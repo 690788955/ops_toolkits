@@ -24,6 +24,25 @@ export function defaultLoop() {
   return {tool: '', params: {}, max_iterations: 3}
 }
 
+export function defaultUpload() {
+  return {target_dir: ''}
+}
+
+export function normalizeUploadConfig(upload) {
+  return {target_dir: String(upload?.target_dir || upload?.targetDir || '').trim()}
+}
+
+export function normalizeUploadTargetDir(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return {value: '', error: ''}
+  if (raw.includes('://')) return {value: '', error: '上传目标目录必须是 uploads 下的相对子目录。'}
+  if (/^[A-Za-z]:/.test(raw) || raw.startsWith('/') || raw.startsWith('\\')) return {value: '', error: '上传目标目录不能是绝对路径。'}
+  const normalized = raw.replace(/\\/g, '/')
+  const parts = normalized.split('/')
+  if (parts.some(part => !part.trim() || part === '.' || part === '..')) return {value: '', error: '上传目标目录不能包含空路径、. 或 ..。'}
+  return {value: parts.join('/'), error: ''}
+}
+
 export function normalizeLoopConfig(loop) {
   const params = loop?.params && typeof loop.params === 'object' && !Array.isArray(loop.params) ? loop.params : {}
   return {
@@ -98,6 +117,7 @@ export function buildWorkflowDraft(workflow, nodes, edges, category, parameters)
       if (node.type === 'controlNode') {
         const draftNode = {id: node.id, type: node.data.controlType, name: node.data.name || node.id}
         if (node.data.controlType === 'loop') draftNode.loop = normalizeLoopConfig(node.data.loop || defaultLoop())
+        if (node.data.controlType === 'upload') draftNode.upload = normalizeUploadConfig(node.data.upload || defaultUpload())
         return draftNode
       }
       return {id: node.id, type: 'tool', name: node.data.name || node.id, tool: node.data.tool, params: node.data.params || {}, on_failure: node.data.on_failure || 'stop'}
@@ -131,7 +151,7 @@ export function buildSequentialFlowEdges(nodes, edges = []) {
 
 function isLinearFlowNode(node) {
   if (node?.type === 'toolNode') return true
-  return node?.type === 'controlNode' && node.data?.controlType === 'loop'
+  return node?.type === 'controlNode' && (node.data?.controlType === 'loop' || node.data?.controlType === 'upload')
 }
 
 function orderedFlowNodes(nodes) {
@@ -270,6 +290,10 @@ export function validateControlDraft(nodes, edges, tools = []) {
       if (!loop.tool) errors.push(`循环节点 ${node.id} 请选择循环工具。`)
       if (loop.tool && !toolMap.has(loop.tool)) errors.push(`循环节点 ${node.id} 引用了不存在的工具：${loop.tool}`)
       if (!Number.isInteger(loop.max_iterations) || loop.max_iterations < 1 || loop.max_iterations > 20) errors.push(`循环节点 ${node.id} 的最大循环次数必须在 1 到 20 之间。`)
+    }
+    if (node.data.controlType === 'upload') {
+      const targetDir = normalizeUploadTargetDir(node.data.upload?.target_dir || '')
+      if (targetDir.error) errors.push(`上传节点 ${node.id} 的目标子目录无效：${targetDir.error}`)
     }
     if (node.data.controlType === 'parallel' && !edges.some(edge => edge.source === node.id)) errors.push(`并行分支节点 ${node.id} 至少需要一条出边。`)
     if (node.data.controlType === 'join' && !edges.some(edge => edge.target === node.id)) errors.push(`合流节点 ${node.id} 至少需要一条入边。`)

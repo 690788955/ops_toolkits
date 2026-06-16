@@ -19,6 +19,8 @@ nodes:
       params: {}
       max_iterations: 0
       target: ""
+    upload:
+      target_dir: ""
     depends_on: []
     params:
       message: Hello World
@@ -39,6 +41,8 @@ nodes:
       params: {}
       max_iterations: 0
       target: ""
+    upload:
+      target_dir: ""
     depends_on: []
     params:
       action: check
@@ -46,10 +50,10 @@ nodes:
     timeout: ""
     confirm: false
     on_failure: stop
-  - id: plugin_template_sleep_30s_3
-    type: tool
-    name: Sleep 30 秒示例
-    tool: plugin.template.sleep-30s
+  - id: upload_4
+    type: upload
+    name: upload_4
+    tool: ""
     condition:
       input: ""
       cases: []
@@ -59,17 +63,44 @@ nodes:
       params: {}
       max_iterations: 0
       target: ""
+    upload:
+      target_dir: ""
     depends_on: []
     params: {}
     optional: false
     timeout: ""
     confirm: false
     on_failure: stop
+  - id: docker_exec_host_command_5
+    type: tool
+    name: 宿主机执行命令
+    tool: docker.exec.host_command
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    upload:
+      target_dir: ""
+    depends_on: []
+    params:
+      command: cat "{{ .steps.upload_4.file.relative_dir }}/md5.txt"
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
 edges:
-  - from: plugin_template_simple_1
-    to: plugin_template_sleep_30s_3
+  - from: plugin_template_with_config_2
+    to: upload_4
     case: ""
-  - from: plugin_template_sleep_30s_3
+  - from: upload_4
+    to: docker_exec_host_command_5
+    case: ""
+  - from: plugin_template_simple_1
     to: plugin_template_with_config_2
     case: ""
 steps: []

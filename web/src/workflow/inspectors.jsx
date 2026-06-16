@@ -1,4 +1,5 @@
 import React, {useState} from 'react'
+import FileUploadInput from '../FileUploadInput.jsx'
 
 const conditionOperators = [
   {value: 'eq', label: '等于'},
@@ -32,14 +33,14 @@ function NodeConfigModal({node, kindLabel, children, onClose, onSave}) {
   )
 }
 
-function NodeConfigEditor({node, tool, loopTool, tools, sources, paramsText, setParamsText, onNameChange, onConditionChange, onLoopChange, onParamChange, onLoopParamChange, onApplyParams}) {
+function NodeConfigEditor({node, tool, loopTool, tools, sources, paramsText, setParamsText, onNameChange, onConditionChange, onLoopChange, onUploadChange, onParamChange, onLoopParamChange, onApplyParams}) {
   if (!node) return null
   return (
     <div className="form nodeConfigEditor">
       {node.type === 'conditionNode' ? (
         <ConditionEditor node={node} sources={sources} onNameChange={onNameChange} onChange={onConditionChange} />
       ) : node.type === 'controlNode' ? (
-        <ControlNodeInspector node={node} tools={tools} loopTool={loopTool} sources={sources} onNameChange={onNameChange} onLoopChange={onLoopChange} onLoopParamChange={onLoopParamChange} />
+        <ControlNodeInspector node={node} tools={tools} loopTool={loopTool} sources={sources} onNameChange={onNameChange} onLoopChange={onLoopChange} onUploadChange={onUploadChange} onLoopParamChange={onLoopParamChange} />
       ) : (
         <ToolNodeConfigEditor
           node={node}
@@ -177,9 +178,11 @@ function ConditionEditor({node, sources, onNameChange, onChange}) {
   )
 }
 
-function ControlNodeInspector({node, tools, loopTool, sources, onNameChange, onLoopChange, onLoopParamChange}) {
+function ControlNodeInspector({node, tools, loopTool, sources, onNameChange, onLoopChange, onUploadChange, onLoopParamChange}) {
   const isLoop = node.data.controlType === 'loop'
   const loop = normalizeLoopConfig(node.data.loop || defaultLoop())
+  const isUpload = node.data.controlType === 'upload'
+  const upload = node.data.upload || {target_dir: ''}
   function updateLoop(patch) {
     onLoopChange(normalizeLoopConfig({...loop, ...patch}))
   }
@@ -216,6 +219,14 @@ function ControlNodeInspector({node, tools, loopTool, sources, onNameChange, onL
           </label>
           <ParamMappingEditor tool={loopTool} params={loop.params || {}} sources={sources} onChange={onLoopParamChange} emptyMessage="请先选择循环工具，再配置该工具的输入参数。" />
           <div className="empty small">循环节点会重复执行上方选择的工具，不需要在画布上额外添加目标工具节点；普通连线仍保持 DAG。</div>
+        </>
+      ) : isUpload ? (
+        <>
+          <label>
+            <span>目标子目录</span>
+            <input value={upload.target_dir || ''} placeholder="可留空，例如 assets/release" onChange={event => onUploadChange({target_dir: event.target.value})} />
+          </label>
+          <div className="empty small">目标子目录只能是平台 uploads 下的相对路径；运行前在执行面板选择本地文件、多个文件或目录。</div>
         </>
       ) : (
         <div className="empty small">{controlNodeHelp(node.data.controlType)}。该节点不需要配置工具或参数，运行时自身记录为成功。</div>
@@ -284,11 +295,60 @@ function ParamMappingEditor({tool, params, sources, onChange, emptyMessage}) {
             <option value="">手动输入 / 不设置</option>
             {sources.map(source => <option key={source.value} value={source.value}>{source.label}</option>)}
           </select>
-          <input value={params[param.name] || ''} placeholder={param.default || param.name} onChange={event => onChange(param.name, event.target.value)} />
+          {param.type === 'bool' && !isTemplateValue(params[param.name]) ? (
+            <input type="checkbox" checked={parseBoolParamValue(params[param.name])} onChange={event => onChange(param.name, event.target.checked)} />
+          ) : param.type === 'file' && !isTemplateValue(params[param.name]) ? (
+            <FileUploadInput value={params[param.name] || ''} onChange={value => onChange(param.name, value)} />
+          ) : (
+            <input value={params[param.name] || ''} placeholder={param.default || param.name} onChange={event => onChange(param.name, event.target.value)} />
+          )}
         </div>
       ))}
     </div>
   )
+}
+
+function isTemplateValue(value) {
+  return typeof value === 'string' && value.includes('{{')
+}
+
+function parseBoolParamValue(value) {
+  return value === true || value === 'true' || value === '1' || value === 'yes' || value === 'on'
+}
+
+function defaultLoop() {
+  return {tool: '', params: {}, max_iterations: 3}
+}
+
+function normalizeLoopConfig(loop) {
+  const params = loop?.params && typeof loop.params === 'object' && !Array.isArray(loop.params) ? loop.params : {}
+  return {
+    tool: String(loop?.tool || '').trim(),
+    params,
+    max_iterations: clampLoopIterations(loop?.max_iterations || loop?.maxIterations || 1)
+  }
+}
+
+function clampLoopIterations(value) {
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isFinite(parsed)) return 1
+  return Math.min(20, Math.max(1, parsed))
+}
+
+function controlNodeTitle(type) {
+  if (type === 'condition') return '条件分支'
+  if (type === 'parallel') return '并行分支'
+  if (type === 'join') return '合流'
+  if (type === 'loop') return '循环'
+  if (type === 'upload') return '上传文件'
+  return type || '编排节点'
+}
+
+function controlNodeHelp(type) {
+  if (type === 'parallel') return '将后续任务拆分为多个分支路径'
+  if (type === 'join') return '等待多个上游分支完成后继续流程'
+  if (type === 'upload') return '运行前上传本地文件、批量文件或目录到平台目录'
+  return '编排控制节点'
 }
 
 function updateCaseValuesText(value) {

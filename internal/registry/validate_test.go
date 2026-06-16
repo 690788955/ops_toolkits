@@ -175,6 +175,42 @@ func TestValidateWorkflowAcceptsEmbeddedLoopNode(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowAcceptsUploadNode(t *testing.T) {
+	reg := &Registry{Tools: map[string]*Tool{}}
+	wf := &config.WorkflowConfig{
+		ID: "demo.upload",
+		Nodes: []config.WorkflowNode{
+			{ID: "upload", Type: config.WorkflowNodeTypeUpload, Upload: config.WorkflowUpload{TargetDir: "assets/release"}},
+		},
+	}
+
+	if err := reg.ValidateWorkflow(wf); err != nil {
+		t.Fatalf("ValidateWorkflow error = %v", err)
+	}
+}
+
+func TestValidateWorkflowRejectsInvalidUploadNode(t *testing.T) {
+	reg := &Registry{Tools: map[string]*Tool{"demo.tool": {}}}
+	cases := []struct {
+		name string
+		node config.WorkflowNode
+		want string
+	}{
+		{name: "tool forbidden", node: config.WorkflowNode{ID: "upload", Type: config.WorkflowNodeTypeUpload, Tool: "demo.tool"}, want: "不能配置 tool"},
+		{name: "condition forbidden", node: config.WorkflowNode{ID: "upload", Type: config.WorkflowNodeTypeUpload, Condition: config.WorkflowCondition{Input: "x"}}, want: "不能配置 condition"},
+		{name: "loop forbidden", node: config.WorkflowNode{ID: "upload", Type: config.WorkflowNodeTypeUpload, Loop: config.WorkflowLoop{Tool: "demo.tool", MaxIterations: 1}}, want: "不能配置 loop"},
+		{name: "bad target dir", node: config.WorkflowNode{ID: "upload", Type: config.WorkflowNodeTypeUpload, Upload: config.WorkflowUpload{TargetDir: "../bad"}}, want: "upload.target_dir 无效"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := reg.ValidateWorkflow(&config.WorkflowConfig{ID: "demo.upload", Nodes: []config.WorkflowNode{tc.node}})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidateWorkflow error = %v, want %s", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateWorkflowAcceptsPluginDemoAllNodesExample(t *testing.T) {
 	t.Skip("工作流示例文件已删除")
 	wf, err := config.LoadWorkflow(filepath.Join("..", "..", "plugins", "plugin.demo", "workflows", "all-nodes-example.yaml"))

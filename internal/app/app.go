@@ -371,7 +371,7 @@ func serveCommand(opts *options) *cobra.Command {
 		fmt.Fprintf(cmd.OutOrStdout(), "监听地址: %s\n", listenAddr)
 		fmt.Fprintf(cmd.OutOrStdout(), "运行目录: %s\n", filepath.Join(reg.BaseDir, filepath.FromSlash(reg.Root.Paths.Runs)))
 		fmt.Fprintf(cmd.OutOrStdout(), "日志目录: %s\n", filepath.Join(reg.BaseDir, filepath.FromSlash(reg.Root.Paths.Logs)))
-		fmt.Fprintf(cmd.OutOrStdout(), "Web UI: http://127.0.0.1%s/?token=%s\n", displayPort(listenAddr), token)
+		fmt.Fprintf(cmd.OutOrStdout(), "Web UI: http://%s%s/?token=%s\n", resolveDisplayHost(listenAddr), displayPort(listenAddr), token)
 		return server.ListenAndServeWithToken(listenAddr, reg, token)
 	}}
 	cmd.Flags().StringVar(&addr, "addr", "", "监听地址，例如 0.0.0.0:8080")
@@ -503,6 +503,25 @@ func displayPort(addr string) string {
 	return addr[idx:]
 }
 
+func resolveDisplayHost(addr string) string {
+	host := addr
+	if strings.HasPrefix(addr, "[") {
+		if end := strings.Index(addr, "]"); end >= 0 {
+			host = strings.Trim(addr[1:end], " ")
+		}
+	} else if idx := strings.LastIndex(addr, ":"); idx >= 0 {
+		host = strings.TrimSpace(addr[:idx])
+	}
+	host = strings.Trim(host, "[] ")
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		return "127.0.0.1"
+	}
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
+}
+
 func generateToken() string {
 	var data [16]byte
 	if _, err := rand.Read(data[:]); err != nil {
@@ -603,6 +622,9 @@ func displayStepType(step runner.StepRecord) string {
 	if step.Type == config.WorkflowNodeTypeLoop {
 		return "编排节点/循环"
 	}
+	if step.Type == config.WorkflowNodeTypeUpload {
+		return "编排节点/上传文件"
+	}
 	return "工具节点"
 }
 
@@ -615,6 +637,9 @@ func workflowNodeType(node config.WorkflowNode) string {
 	}
 	if node.Loop.Tool != "" || node.Loop.Target != "" || node.Loop.MaxIterations != 0 || len(node.Loop.Params) > 0 {
 		return config.WorkflowNodeTypeLoop
+	}
+	if node.Upload.TargetDir != "" {
+		return config.WorkflowNodeTypeUpload
 	}
 	return ""
 }

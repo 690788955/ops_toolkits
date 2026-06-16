@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -635,6 +636,7 @@ type categoryCatalogEntry struct {
 type toolCatalogEntry struct {
 	config.ToolEntry
 	Tags           []string               `json:"tags"`
+	Execution      config.ExecutionConfig `json:"execution"`
 	Parameters     []config.Parameter     `json:"parameters"`
 	ConfigFiles    []string               `json:"config_files"`
 	ConfigFileRefs []config.ConfigFileRef `json:"config_file_entries,omitempty"`
@@ -660,10 +662,11 @@ type pluginCatalogEntry struct {
 }
 
 type runRequest struct {
-	Params        map[string]interface{} `json:"params"`
-	Confirm       bool                   `json:"confirm"`
-	Workflow      *config.WorkflowConfig `json:"workflow,omitempty"`
-	ConfigVersion string                 `json:"config_version,omitempty"`
+	Params        map[string]interface{}                 `json:"params"`
+	Confirm       bool                                   `json:"confirm"`
+	Workflow      *config.WorkflowConfig                 `json:"workflow,omitempty"`
+	Uploads       map[string]config.WorkflowUploadResult `json:"uploads,omitempty"`
+	ConfigVersion string                                 `json:"config_version,omitempty"`
 }
 
 type workflowSaveRequest struct {
@@ -679,6 +682,32 @@ type runLogs struct {
 	Stdout string             `json:"stdout,omitempty"`
 	Stderr string             `json:"stderr,omitempty"`
 	Steps  map[string]runLogs `json:"steps,omitempty"`
+	Items  []runLogItem       `json:"items,omitempty"`
+}
+
+type runLogItem struct {
+	ID        string       `json:"id"`
+	Kind      string       `json:"kind"`
+	Title     string       `json:"title"`
+	Status    string       `json:"status,omitempty"`
+	Type      string       `json:"type,omitempty"`
+	Tool      string       `json:"tool,omitempty"`
+	Stdout    string       `json:"stdout,omitempty"`
+	Stderr    string       `json:"stderr,omitempty"`
+	Children  []runLogItem `json:"children,omitempty"`
+	Iteration int          `json:"iteration,omitempty"`
+}
+
+type runLogEvent struct {
+	Seq       int    `json:"seq"`
+	RunID     string `json:"run_id"`
+	ItemID    string `json:"item_id"`
+	Kind      string `json:"kind"`
+	StepID    string `json:"step_id,omitempty"`
+	Iteration int    `json:"iteration,omitempty"`
+	Stream    string `json:"stream"`
+	Text      string `json:"text"`
+	Status    string `json:"status"`
 }
 
 type runDetail struct {
@@ -758,6 +787,7 @@ func NewHandler(reg *registry.Registry) http.Handler {
 	mux := http.NewServeMux()
 	registerWeb(mux)
 	mux.HandleFunc("/api/catalog", catalogHandler(state))
+	mux.HandleFunc("/api/ui/preferences", uiPreferencesHandler(state))
 	mux.HandleFunc("/api/config/global", globalConfigHandler(state))
 	mux.HandleFunc("/api/config/global-env", globalEnvConfigHandler(state))
 	mux.HandleFunc("/api/config/global/versions/", func(w http.ResponseWriter, req *http.Request) {
@@ -780,6 +810,7 @@ func NewHandler(reg *registry.Registry) http.Handler {
 		}
 		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
 	})
+	mux.HandleFunc("/api/files/upload", fileUploadHandler(state))
 	mux.HandleFunc("/api/dev/toolkit.zip", toolDevKitHandler())
 	mux.HandleFunc("/api/plugins/user-workflows.zip", userWorkflowPluginExportHandler(state))
 	mux.HandleFunc("/api/plugins/upload", pluginUploadHandler(state))
@@ -831,6 +862,34 @@ func catalogHandler(state *serverState) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, response{Data: buildCatalog(state.registry())})
 	}
+}
+
+func uiPreferencesHandler(state *serverState) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		writeJSON(w, http.StatusOK, response{Data: uiPreferencesFromConfig(state.registry().Root.UI)})
+	}
+}
+
+func uiPreferencesFromConfig(ui config.UIConfig) map[string]interface{} {
+	return map[string]interface{}{
+		"log_font_size": uiLogFontSize(ui.LogFontSize),
+	}
+}
+
+func uiLogFontSize(value int) int {
+	const (
+		defaultLogFontSize = 14
+		minLogFontSize     = 12
+		maxLogFontSize     = 20
+	)
+	if value < minLogFontSize || value > maxLogFontSize {
+		return defaultLogFontSize
+	}
+	return value
 }
 
 func globalConfigHandler(state *serverState) http.HandlerFunc {
@@ -1034,6 +1093,19 @@ func toolsHandler(state *serverState) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, response{Error: "该工具需要确认后执行"})
 			return
 		}
+		if isAsyncRunRequest(req) {
+			ctx, cancel := context.WithCancel(context.Background())
+			record, err := r.StartToolValues(ctx, id, config.InterfaceMapToValues(reqBody.Params), io.Discard, io.Discard)
+			if err != nil {
+				cancel()
+				writeRunResponse(w, record, err)
+				return
+			}
+			state.registerRun(record.ID, cancel)
+			go watchRunCompletion(state, reg, record.ID, cancel)
+			writeRunResponse(w, record, err)
+			return
+		}
 		record, err := r.RunToolValues(context.Background(), id, config.InterfaceMapToValues(reqBody.Params), io.Discard, io.Discard)
 		writeRunResponse(w, record, err)
 	}
@@ -1046,6 +1118,10 @@ func workflowsHandler(state *serverState) http.HandlerFunc {
 		path := strings.TrimPrefix(req.URL.Path, "/api/workflows/")
 		if req.Method == http.MethodGet {
 			handleWorkflowGet(w, reg, path)
+			return
+		}
+		if req.Method == http.MethodDelete {
+			handleWorkflowDelete(w, reg, path)
 			return
 		}
 		if req.Method != http.MethodPost {
@@ -1116,34 +1192,47 @@ func handleWorkflowRun(w http.ResponseWriter, req *http.Request, state *serverSt
 	}
 	if isAsyncRunRequest(req) {
 		ctx, cancel := context.WithCancel(context.Background())
-		record, err := r.StartWorkflowConfigWithConfirmation(ctx, workflowConfig, params, reqBody.Confirm, io.Discard, io.Discard)
+		record, err := r.StartWorkflowConfigWithUploads(ctx, workflowConfig, params, reqBody.Confirm, reqBody.Uploads, io.Discard, io.Discard)
 		if err != nil {
 			cancel()
 			writeRunResponse(w, record, err)
 			return
 		}
 		state.registerRun(record.ID, cancel)
-		go func(runID string) {
-			for {
-				time.Sleep(100 * time.Millisecond)
-				detail, err := loadRunDetail(reg, runID)
-				if err != nil || detail.Record.Status != "running" {
-					state.finishRun(runID)
-					cancel()
-					return
-				}
-			}
-		}(record.ID)
+		go watchRunCompletion(state, reg, record.ID, cancel)
 		writeRunResponse(w, record, err)
 		return
 	}
 	if reqBody.Workflow != nil {
-		record, err := r.RunWorkflowConfigWithConfirmation(context.Background(), workflowConfig, params, reqBody.Confirm, io.Discard, io.Discard)
+		record, err := r.RunWorkflowConfigWithUploads(context.Background(), workflowConfig, params, reqBody.Confirm, reqBody.Uploads, io.Discard, io.Discard)
 		writeRunResponse(w, record, err)
 		return
 	}
-	record, err := r.RunWorkflowWithConfirmation(context.Background(), id, params, reqBody.Confirm, io.Discard, io.Discard)
+	record, err := r.RunWorkflowConfigWithUploads(context.Background(), workflowConfig, params, reqBody.Confirm, reqBody.Uploads, io.Discard, io.Discard)
 	writeRunResponse(w, record, err)
+}
+
+func watchRunCompletion(state *serverState, reg *registry.Registry, runID string, cancel context.CancelFunc) {
+	readFailures := 0
+	for {
+		time.Sleep(100 * time.Millisecond)
+		detail, err := loadRunDetail(reg, runID)
+		if err != nil {
+			readFailures++
+			if readFailures < 5 {
+				continue
+			}
+			state.finishRun(runID)
+			cancel()
+			return
+		}
+		readFailures = 0
+		if detail.Record.Status != "running" {
+			state.finishRun(runID)
+			cancel()
+			return
+		}
+	}
 }
 
 func isAsyncRunRequest(req *http.Request) bool {
@@ -1214,6 +1303,33 @@ func handleWorkflowSave(w http.ResponseWriter, req *http.Request, reg *registry.
 	writeJSON(w, http.StatusOK, response{Status: "saved", Data: reg.Workflows[wf.ID]})
 }
 
+func handleWorkflowDelete(w http.ResponseWriter, reg *registry.Registry, path string) {
+	id := strings.Trim(path, "/")
+	if id == "" || strings.Contains(id, "/") {
+		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
+		return
+	}
+	wf, err := reg.Workflow(id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+		return
+	}
+	if wf.Source.PluginID != userWorkflowPluginID || !isUserWorkflowPluginPath(reg, wf.Path) {
+		writeJSON(w, http.StatusBadRequest, response{Error: "只能删除 Web 页面保存的用户工作流"})
+		return
+	}
+	if err := os.Remove(wf.Path); err != nil && !os.IsNotExist(err) {
+		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+		return
+	}
+	delete(reg.Workflows, id)
+	if err := maintainUserWorkflowPluginManifest(reg); err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, response{Status: "deleted", ID: id})
+}
+
 func runsHandler(state *serverState) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		reg := state.registry()
@@ -1225,6 +1341,10 @@ func runsHandler(state *serverState) http.HandlerFunc {
 		if req.Method == http.MethodPost {
 			if runID, ok := strings.CutSuffix(strings.Trim(id, "/"), "/cancel"); ok {
 				handleRunCancel(w, state, reg, strings.Trim(runID, "/"))
+				return
+			}
+			if runID, nodeID, action, ok := parseRunUploadPath(id); ok {
+				handleRunUploadNode(w, req, state, reg, strings.Trim(runID, "/"), strings.Trim(nodeID, "/"), action)
 				return
 			}
 			methodNotAllowed(w)
@@ -1247,6 +1367,10 @@ func runsHandler(state *serverState) http.HandlerFunc {
 			handleRunSupportZip(w, reg, strings.Trim(runID, "/"))
 			return
 		}
+		if runID, ok := strings.CutSuffix(id, "/events"); ok {
+			handleRunEvents(w, req, reg, strings.Trim(runID, "/"))
+			return
+		}
 		detail, err := loadRunDetail(reg, id)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
@@ -1254,6 +1378,18 @@ func runsHandler(state *serverState) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, response{Data: detail})
 	}
+}
+
+func parseRunUploadPath(path string) (string, string, string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if (len(parts) != 3 && len(parts) != 4) || len(parts) >= 2 && parts[1] != "uploads" {
+		return "", "", "", false
+	}
+	action := ""
+	if len(parts) == 4 {
+		action = parts[3]
+	}
+	return parts[0], parts[2], action, true
 }
 
 func handleRunCancel(w http.ResponseWriter, state *serverState, reg *registry.Registry, id string) {
@@ -1285,6 +1421,127 @@ func handleRunCancel(w http.ResponseWriter, state *serverState, reg *registry.Re
 	writeJSON(w, http.StatusOK, response{Status: "cancelling", Data: map[string]string{"id": id, "status": "cancelling"}})
 }
 
+func handleRunUploadNode(w http.ResponseWriter, req *http.Request, state *serverState, reg *registry.Registry, runID, nodeID, action string) {
+	if strings.TrimSpace(runID) == "" || strings.TrimSpace(nodeID) == "" {
+		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
+		return
+	}
+	if !state.hasActiveRun(runID) {
+		writeJSON(w, http.StatusConflict, response{Error: "运行任务未处于活动状态，无法上传节点文件"})
+		return
+	}
+	detail, err := loadRunDetail(reg, runID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+		return
+	}
+	if detail.Record.Status != "running" {
+		writeJSON(w, http.StatusBadRequest, response{Error: "只能向运行中的工作流上传节点文件"})
+		return
+	}
+	step, ok := findRunStep(detail.Record, nodeID)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, response{Error: "上传节点尚未进入等待状态"})
+		return
+	}
+	if step.Type != config.WorkflowNodeTypeUpload {
+		writeJSON(w, http.StatusBadRequest, response{Error: "目标步骤不是上传节点"})
+		return
+	}
+	if step.Status != "waiting" {
+		writeJSON(w, http.StatusBadRequest, response{Error: "上传节点当前不在等待上传状态"})
+		return
+	}
+	if action != "" {
+		handleRunUploadNodeChunked(w, req, reg, runID, nodeID, action)
+		return
+	}
+	req.Body = http.MaxBytesReader(w, req.Body, maxPlatformFileUploadBytes+1)
+	result, err := savePlatformUpload(reg, req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	runDir, err := runbundle.RunDir(reg, runID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+		return
+	}
+	if err := runner.WriteWorkflowUploadResult(runDir, nodeID, result); err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("写入上传节点结果失败: %v", err)})
+		return
+	}
+	writeJSON(w, http.StatusOK, response{Status: "uploaded", Data: result})
+}
+
+func handleRunUploadNodeChunked(w http.ResponseWriter, req *http.Request, reg *registry.Registry, runID, nodeID, action string) {
+	switch action {
+	case "start":
+		var body chunkedUploadStartRequest
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+			return
+		}
+		session, err := startChunkedPlatformUpload(reg, body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, response{Status: "started", Data: map[string]interface{}{"id": session.ID, "chunk_size": maxPlatformUploadChunkBytes}})
+	case "chunk":
+		sessionID := strings.TrimSpace(req.URL.Query().Get("session_id"))
+		fileIndex, err := strconv.Atoi(req.URL.Query().Get("file_index"))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, response{Error: "上传文件索引无效"})
+			return
+		}
+		offset, err := strconv.ParseInt(req.URL.Query().Get("offset"), 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, response{Error: "上传分片偏移无效"})
+			return
+		}
+		req.Body = http.MaxBytesReader(w, req.Body, maxPlatformUploadChunkBytes+1)
+		session, err := appendChunkedPlatformUpload(reg, sessionID, fileIndex, offset, req.Body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, response{Status: "chunked", Data: map[string]interface{}{"id": session.ID, "received_size": session.ReceivedSize, "received": session.Received}})
+	case "finish":
+		var body chunkedUploadFinishRequest
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+			return
+		}
+		result, err := finishChunkedPlatformUpload(reg, body.SessionID)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+			return
+		}
+		runDir, err := runbundle.RunDir(reg, runID)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+			return
+		}
+		if err := runner.WriteWorkflowUploadResult(runDir, nodeID, result); err != nil {
+			writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("写入上传节点结果失败: %v", err)})
+			return
+		}
+		writeJSON(w, http.StatusOK, response{Status: "uploaded", Data: result})
+	default:
+		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
+	}
+}
+
+func findRunStep(record runner.RunRecord, nodeID string) (runner.StepRecord, bool) {
+	for _, step := range record.Steps {
+		if step.ID == nodeID {
+			return step, true
+		}
+	}
+	return runner.StepRecord{}, false
+}
+
 func handleRunsCleanup(w http.ResponseWriter, req *http.Request, reg *registry.Registry) {
 	var body runbundle.CleanupOptions
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
@@ -1297,6 +1554,100 @@ func handleRunsCleanup(w http.ResponseWriter, req *http.Request, reg *registry.R
 		return
 	}
 	writeJSON(w, http.StatusOK, response{Status: "ok", Data: result})
+}
+
+func handleRunEvents(w http.ResponseWriter, req *http.Request, reg *registry.Registry, id string) {
+	if strings.TrimSpace(id) == "" {
+		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
+		return
+	}
+	detail, err := loadRunDetail(reg, id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+		return
+	}
+	runDir, err := runbundle.RunDir(reg, id)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, response{Error: "streaming is not supported"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	tailer := newRunLogTailer(id, runDir, detail.Record)
+	seq := 0
+	lastBySource := map[string]string{}
+	sendLogEvents := func() bool {
+		events := tailer.read(detail.Record.Status)
+		for _, event := range events {
+			key := event.ItemID + ":" + event.Stream
+			if lastBySource[key] == event.Text {
+				continue
+			}
+			lastBySource[key] = event.Text
+			seq++
+			event.Seq = seq
+			if err := writeSSEEvent(w, "log", event); err != nil {
+				return false
+			}
+		}
+		flusher.Flush()
+		return true
+	}
+	if !sendLogEvents() {
+		return
+	}
+	if detail.Record.Status != "running" {
+		_ = writeSSEEvent(w, "complete", map[string]string{"run_id": id, "status": detail.Record.Status})
+		flusher.Flush()
+		return
+	}
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-req.Context().Done():
+			return
+		case <-ticker.C:
+			next, err := loadRunDetail(reg, id)
+			if err == nil {
+				detail = next
+				tailer.record = next.Record
+			}
+			if !sendLogEvents() {
+				return
+			}
+			if err != nil || detail.Record.Status != "running" {
+				status := detail.Record.Status
+				if status == "" {
+					status = "unknown"
+				}
+				_ = writeSSEEvent(w, "complete", map[string]string{"run_id": id, "status": status})
+				flusher.Flush()
+				return
+			}
+		}
+	}
+}
+
+func writeSSEEvent(w io.Writer, event string, value interface{}) error {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\n", event); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "data: %s\n\n", data)
+	return err
 }
 
 func handleRunSupportZip(w http.ResponseWriter, reg *registry.Registry, id string) {
@@ -1466,6 +1817,18 @@ func loadRunLogs(runDir string, record runner.RunRecord) runLogs {
 		Stderr: readTextFile(filepath.Join(runDir, "stderr.log")),
 	}
 	if len(record.Steps) == 0 {
+		if logs.Stdout != "" || logs.Stderr != "" || record.Kind == "tool" {
+			logs.Items = []runLogItem{{
+				ID:     record.ID,
+				Kind:   "tool_run",
+				Title:  nonEmpty(record.Target, record.ID),
+				Status: record.Status,
+				Type:   "tool",
+				Tool:   record.Target,
+				Stdout: logs.Stdout,
+				Stderr: logs.Stderr,
+			}}
+		}
 		return logs
 	}
 	logs.Steps = map[string]runLogs{}
@@ -1475,6 +1838,7 @@ func loadRunLogs(runDir string, record runner.RunRecord) runLogs {
 			Stderr: readTextFile(filepath.Join(runDir, step.ID, "stderr.log")),
 		}
 	}
+	logs.Items = buildRunLogItems(runDir, record, logs.Steps)
 	return logs
 }
 
@@ -1484,6 +1848,203 @@ func readTextFile(path string) string {
 		return ""
 	}
 	return string(data)
+}
+
+func buildRunLogItems(runDir string, record runner.RunRecord, steps map[string]runLogs) []runLogItem {
+	items := make([]runLogItem, 0, len(record.Steps))
+	for _, step := range record.Steps {
+		stepLogs := steps[step.ID]
+		item := runLogItem{
+			ID:     step.ID,
+			Kind:   "workflow_step",
+			Title:  stepLogTitle(step),
+			Status: step.Status,
+			Type:   step.Type,
+			Tool:   step.Tool,
+			Stdout: stepLogs.Stdout,
+			Stderr: stepLogs.Stderr,
+		}
+		if step.Type == config.WorkflowNodeTypeLoop {
+			item.Children = loopLogItems(runDir, step.ID, step.LoopIterations, step.Status)
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
+func stepLogTitle(step runner.StepRecord) string {
+	if step.Type == config.WorkflowNodeTypeLoop && step.Tool != "" {
+		return fmt.Sprintf("%s / 循环 / %s", step.ID, step.Tool)
+	}
+	if step.Tool != "" {
+		return fmt.Sprintf("%s / %s", step.ID, step.Tool)
+	}
+	if step.Type != "" {
+		return fmt.Sprintf("%s / %s", step.ID, step.Type)
+	}
+	return step.ID
+}
+
+func nonEmpty(value, fallback string) string {
+	if strings.TrimSpace(value) != "" {
+		return value
+	}
+	return fallback
+}
+
+func loopLogItems(runDir, stepID string, iterations int, status string) []runLogItem {
+	if iterations <= 0 {
+		iterations = countLoopIterationDirs(runDir, stepID)
+	}
+	items := []runLogItem{}
+	for iteration := 1; iteration <= iterations; iteration++ {
+		dir := filepath.Join(runDir, stepID, fmt.Sprintf("%d", iteration))
+		stdout := readTextFile(filepath.Join(dir, "stdout.log"))
+		stderr := readTextFile(filepath.Join(dir, "stderr.log"))
+		if stdout == "" && stderr == "" {
+			continue
+		}
+		itemID := fmt.Sprintf("%s#%d", stepID, iteration)
+		items = append(items, runLogItem{
+			ID:        itemID,
+			Kind:      "loop_iteration",
+			Title:     fmt.Sprintf("%s / 第 %d 次", stepID, iteration),
+			Status:    status,
+			Type:      config.WorkflowNodeTypeLoop,
+			Stdout:    stdout,
+			Stderr:    stderr,
+			Iteration: iteration,
+		})
+	}
+	return items
+}
+
+func countLoopIterationDirs(runDir, stepID string) int {
+	entries, err := os.ReadDir(filepath.Join(runDir, stepID))
+	if err != nil {
+		return 0
+	}
+	maxIteration := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		var iteration int
+		if _, err := fmt.Sscanf(entry.Name(), "%d", &iteration); err == nil && iteration > maxIteration {
+			maxIteration = iteration
+		}
+	}
+	return maxIteration
+}
+
+type runLogTailer struct {
+	runID  string
+	runDir string
+	record runner.RunRecord
+	offset map[string]int64
+}
+
+type runLogSource struct {
+	path      string
+	itemID    string
+	kind      string
+	stepID    string
+	iteration int
+	stream    string
+}
+
+func newRunLogTailer(runID, runDir string, record runner.RunRecord) *runLogTailer {
+	return &runLogTailer{runID: runID, runDir: runDir, record: record, offset: map[string]int64{}}
+}
+
+func (t *runLogTailer) read(status string) []runLogEvent {
+	events := []runLogEvent{}
+	for _, source := range t.sources() {
+		lines, nextOffset := readNewLogLines(source.path, t.offset[source.path])
+		t.offset[source.path] = nextOffset
+		for _, line := range lines {
+			events = append(events, runLogEvent{
+				RunID:     t.runID,
+				ItemID:    source.itemID,
+				Kind:      source.kind,
+				StepID:    source.stepID,
+				Iteration: source.iteration,
+				Stream:    source.stream,
+				Text:      line,
+				Status:    status,
+			})
+		}
+	}
+	return events
+}
+
+func (t *runLogTailer) sources() []runLogSource {
+	if len(t.record.Steps) == 0 {
+		return []runLogSource{
+			{path: filepath.Join(t.runDir, "stdout.log"), itemID: t.record.ID, kind: "tool_run", stream: "stdout"},
+			{path: filepath.Join(t.runDir, "stderr.log"), itemID: t.record.ID, kind: "tool_run", stream: "stderr"},
+		}
+	}
+	sources := []runLogSource{}
+	for _, step := range t.record.Steps {
+		stepDir := filepath.Join(t.runDir, step.ID)
+		sources = append(sources,
+			runLogSource{path: filepath.Join(stepDir, "stdout.log"), itemID: step.ID, kind: "workflow_step", stepID: step.ID, stream: "stdout"},
+			runLogSource{path: filepath.Join(stepDir, "stderr.log"), itemID: step.ID, kind: "workflow_step", stepID: step.ID, stream: "stderr"},
+		)
+		if step.Type == config.WorkflowNodeTypeLoop {
+			iterations := step.LoopIterations
+			if iterations <= 0 {
+				iterations = countLoopIterationDirs(t.runDir, step.ID)
+			}
+			for iteration := 1; iteration <= iterations; iteration++ {
+				itemID := fmt.Sprintf("%s#%d", step.ID, iteration)
+				iterationDir := filepath.Join(stepDir, fmt.Sprintf("%d", iteration))
+				sources = append(sources,
+					runLogSource{path: filepath.Join(iterationDir, "stdout.log"), itemID: itemID, kind: "loop_iteration", stepID: step.ID, iteration: iteration, stream: "stdout"},
+					runLogSource{path: filepath.Join(iterationDir, "stderr.log"), itemID: itemID, kind: "loop_iteration", stepID: step.ID, iteration: iteration, stream: "stderr"},
+				)
+			}
+		}
+	}
+	return sources
+}
+
+func readNewLogLines(path string, offset int64) ([]string, int64) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, offset
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, offset
+	}
+	if info.Size() < offset {
+		offset = 0
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return nil, offset
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, offset
+	}
+	nextOffset := offset + int64(len(data))
+	if len(data) == 0 {
+		return nil, nextOffset
+	}
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	rawLines := strings.Split(text, "\n")
+	lines := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		if line == "" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return lines, nextOffset
 }
 
 func buildToolDevKitZip() ([]byte, error) {
@@ -1546,7 +2107,7 @@ func buildCatalog(reg *registry.Registry) catalogResponse {
 		out.Plugins = append(out.Plugins, item)
 	}
 	for _, tool := range reg.OrderedTools() {
-		out.Tools = append(out.Tools, toolCatalogEntry{ToolEntry: tool.Entry, Tags: tool.Config.Tags, Parameters: tool.Config.Parameters, ConfigFiles: tool.Config.ConfigFiles, ConfigFileRefs: declaredConfigFiles(tool.Config), Confirm: tool.Config.Confirm, Source: tool.Source})
+		out.Tools = append(out.Tools, toolCatalogEntry{ToolEntry: tool.Entry, Tags: tool.Config.Tags, Execution: tool.Config.Execution, Parameters: tool.Config.Parameters, ConfigFiles: tool.Config.ConfigFiles, ConfigFileRefs: declaredConfigFiles(tool.Config), Confirm: tool.Config.Confirm, Source: tool.Source})
 	}
 	for _, wf := range reg.Workflows {
 		out.Workflows = append(out.Workflows, workflowCatalogEntry{WorkflowRef: wf.Entry, Tags: wf.Config.Tags, Parameters: wf.Config.Parameters, Confirm: effectiveWorkflowConfirm(reg, wf.Config), Source: wf.Source})

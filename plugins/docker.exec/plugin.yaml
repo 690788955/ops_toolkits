@@ -33,7 +33,7 @@ contributes:
           required: true
       confirm:
         required: true
-        message: "确认在容器 [{{ .container }}] 中执行命令: {{ .command }} ？"
+        message: 确认在容器中执行命令？请确认容器名称、命令内容及影响范围已核对。
 
     - id: docker.exec.bash
       name: 容器内执行 Bash 脚本
@@ -57,4 +57,82 @@ contributes:
           required: true
       confirm:
         required: true
-        message: "确认在容器 [{{ .container }}] 中执行 Bash 脚本？"
+        message: 确认在容器中执行 Bash 脚本？请确认容器名称、脚本内容及影响范围已核对。
+
+    - id: docker.exec.shell
+      name: 执行宿主机 Shell 脚本
+      category: docker
+      description: 在宿主机上执行指定的 Shell 脚本，支持传入自定义参数
+      tags: [shell, script, host]
+      command: scripts/host-shell.sh
+      args:
+        - "{{ .script }}"
+        - "{{ .args }}"
+      workdir: .
+      timeout: 30m
+      parameters:
+        - name: script
+          type: string
+          description: 要执行的 Shell 脚本绝对路径（如 /opt/scripts/deploy.sh）
+          required: true
+        - name: args
+          type: string
+          description: 传递给脚本的参数（空格分隔，可选）
+          required: false
+          default: ""
+      confirm:
+        required: true
+        message: 确认在宿主机执行 Shell 脚本？请确认脚本路径、参数及影响范围已核对。
+
+    - id: docker.exec.host_command
+      name: 宿主机执行命令
+      category: docker
+      description: 在宿主机上通过 bash -lc 执行一条命令，支持管道、重定向和 cd 等复合命令
+      tags: [host, shell, command]
+      command: scripts/host-command.sh
+      args:
+        - "{{ .command }}"
+      workdir: .
+      timeout: 30m
+      parameters:
+        - name: command
+          type: string
+          description: 在宿主机执行的命令（如 "docker ps" 或 "cd /opt/app && ./deploy.sh"）
+          required: true
+      confirm:
+        required: true
+        message: 确认在宿主机执行命令？请确认命令内容、工作目录和影响范围已核对。
+
+    - id: docker.exec.verify_md5_merge
+      name: 分片包 MD5 校验并合并
+      category: docker
+      description: 使用上传目录中的 md5.txt 校验分片包，并按清单顺序合并为完整 tar.gz 包，可选自动解压
+      tags: [host, file, md5, merge]
+      command: scripts/verify-md5-and-merge.sh
+      args:
+        - "{{ .path }}"
+        - "{{ .output }}"
+        - "{{ .extract }}"
+      workdir: .
+      timeout: 2h
+      parameters:
+        - name: path
+          type: string
+          description: 上传文件节点传入的文件路径或目录路径；传入文件时会自动使用其所在目录
+          required: true
+        - name: output
+          type: string
+          description: 合并后的输出文件名；留空时自动去掉首个分片名末尾的 .00/.01 等数字后缀
+          required: false
+          default: ""
+        - name: extract
+          type: string
+          description: 是否解压合并后的 tar.gz 包；yes 解压到同目录，no 不解压
+          required: false
+          default: "yes"
+          options:
+            - "yes"
+            - "no"
+      confirm:
+        required: true
+        message: 确认校验并合并上传目录中的分片包？请确认 md5.txt 和分片文件来自可信来源。

@@ -3,6 +3,7 @@ import {
   autoLayoutNodes,
   buildWorkflowDraft,
   defaultCondition,
+  defaultUpload,
   normalizeLoopConfig,
   validateConditionDraft,
   validateControlDraft
@@ -56,6 +57,24 @@ describe('workflow model', () => {
     const draft = buildWorkflowDraft({id: 'demo.branch'}, nodes, [], 'global', [])
 
     expect(draft.edges).toEqual([])
+  })
+
+  it('serializes upload control nodes and validates target directories', () => {
+    const nodes = [
+      {id: 'upload', type: 'controlNode', position: {x: 80, y: 80}, data: {controlType: 'upload', name: '上传包', upload: {target_dir: 'assets/release'}}},
+      {id: 'consume', type: 'toolNode', position: {x: 360, y: 80}, data: {name: '处理', tool: 'demo.consume', params: {path: '{{ .steps.upload.file.path }}'}}}
+    ]
+
+    const draft = buildWorkflowDraft({id: 'demo.upload'}, nodes, [], 'global', [])
+
+    expect(defaultUpload()).toEqual({target_dir: ''})
+    expect(draft.nodes[0]).toEqual({id: 'upload', type: 'upload', name: '上传包', upload: {target_dir: 'assets/release'}})
+    expect(draft.edges).toEqual([{from: 'upload', to: 'consume'}])
+    expect(validateControlDraft([
+      {id: 'bad', type: 'controlNode', data: {controlType: 'upload', upload: {target_dir: '../bad'}}}
+    ], [], [])).toEqual(expect.arrayContaining([
+      expect.stringContaining('上传节点 bad 的目标子目录无效')
+    ]))
   })
 
   it('validates condition edge case contracts before save or run', () => {

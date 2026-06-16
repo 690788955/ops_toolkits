@@ -23,6 +23,10 @@ import (
 )
 
 func TestWebIndexDisablesBrowserCache(t *testing.T) {
+	if os.Getenv("OPS_TEST_HELPER_OUTPUT") != "" {
+		io.WriteString(os.Stdout, os.Getenv("OPS_TEST_HELPER_OUTPUT")+"\n")
+		os.Exit(0)
+	}
 	reg := testRegistry(t)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	res := httptest.NewRecorder()
@@ -68,6 +72,36 @@ func TestCatalogAPIIncludesTags(t *testing.T) {
 	body := res.Body.String()
 	if !strings.Contains(body, "工具标签") || !strings.Contains(body, "工作流标签") {
 		t.Fatalf("响应缺少标签: %s", body)
+	}
+}
+
+func TestUIPreferencesAPIReadsLogFontSizeFromUIConfig(t *testing.T) {
+	cases := []struct {
+		name        string
+		logFontSize int
+		want        string
+	}{
+		{name: "default", logFontSize: 0, want: `"log_font_size":14`},
+		{name: "configured", logFontSize: 16, want: `"log_font_size":16`},
+		{name: "too small", logFontSize: 11, want: `"log_font_size":14`},
+		{name: "too large", logFontSize: 30, want: `"log_font_size":14`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := testRegistry(t)
+			reg.Root.UI.LogFontSize = tc.logFontSize
+			req := httptest.NewRequest(http.MethodGet, "/api/ui/preferences", nil)
+			res := httptest.NewRecorder()
+
+			NewHandler(reg).ServeHTTP(res, req)
+
+			if res.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+			}
+			if !strings.Contains(res.Body.String(), tc.want) {
+				t.Fatalf("响应缺少 %s: %s", tc.want, res.Body.String())
+			}
+		})
 	}
 }
 
@@ -206,13 +240,7 @@ func TestWorkflowRunAPIRunsUnsavedDraftWithoutPersisting(t *testing.T) {
 
 func TestWorkflowRunAPIAsyncReturnsRunningRecordAndPersistsLogs(t *testing.T) {
 	reg := testRegistry(t)
-	toolDir := reg.Tools["demo.hello"].Dir
-	if err := os.MkdirAll(filepath.Join(toolDir, "bin"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(toolDir, "bin", "run.sh"), []byte("#!/usr/bin/env bash\necho async-run\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	configureHelperTool(t, reg, "demo.hello", "async-run")
 	body := `{"params":{},"workflow":{"id":"demo.async","name":"异步草稿","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.async/run?async=true", strings.NewReader(body))
 	res := httptest.NewRecorder()
@@ -243,6 +271,60 @@ func TestWorkflowRunAPIAsyncReturnsRunningRecordAndPersistsLogs(t *testing.T) {
 			t.Fatalf("异步运行未在超时内完成，last status=%d body=%s", runRes.Code, runRes.Body.String())
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestToolRunAPIAsyncReturnsRunningRecordAndPersistsLogs(t *testing.T) {
+	reg := testRegistry(t)
+	configureHelperTool(t, reg, "demo.hello", "async-tool")
+	req := httptest.NewRequest(http.MethodPost, "/api/tools/demo.hello/run?async=true", strings.NewReader(`{"params":{}}`))
+	res := httptest.NewRecorder()
+
+	handler := NewHandler(reg)
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var started response
+	if err := json.Unmarshal(res.Body.Bytes(), &started); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if started.ID == "" || started.Status != "running" {
+		t.Fatalf("async tool response = %#v, want running id", started)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		runReq := httptest.NewRequest(http.MethodGet, "/api/runs/"+started.ID, nil)
+		runRes := httptest.NewRecorder()
+		handler.ServeHTTP(runRes, runReq)
+		if runRes.Code == http.StatusOK && strings.Contains(runRes.Body.String(), `"status":"succeeded"`) && strings.Contains(runRes.Body.String(), "async-tool") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("异步工具运行未在超时内完成，last status=%d body=%s", runRes.Code, runRes.Body.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func configureHelperTool(t *testing.T, reg *registry.Registry, id, output string) {
+	t.Helper()
+	tool := reg.Tools[id]
+	if tool == nil {
+		t.Fatalf("missing test tool %s", id)
+	}
+	helper, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test helper executable: %v", err)
+	}
+	tool.Config.Execution.Entry = helper
+	tool.Config.Execution.Args = []string{"-test.run=TestWebIndexDisablesBrowserCache"}
+	tool.Config.Env = map[string]string{"OPS_TEST_HELPER_OUTPUT": output}
+	tool.Config.PassMode = config.PassMode{}
+	if strings.Contains(helper, string(filepath.Separator)) {
+		tool.Dir = filepath.Dir(helper)
 	}
 }
 
@@ -288,6 +370,48 @@ func TestRunCancelAPIStopsAsyncWorkflow(t *testing.T) {
 			t.Fatalf("异步运行未在超时内取消，last status=%d body=%s", runRes.Code, runRes.Body.String())
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestWatchRunCompletionIgnoresTransientReadErrors(t *testing.T) {
+	dir := t.TempDir()
+	reg := testRegistry(t)
+	reg.BaseDir = dir
+	runDir := filepath.Join(dir, "runs", "logs", "workflow-transient")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := runner.RunRecord{ID: "workflow-transient", Status: "running"}
+	if err := os.WriteFile(filepath.Join(runDir, "result.json"), []byte(`{"id":"workflow-transient","kind":"workflow","status":"running","steps":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	state := newServerState(reg)
+	cancelCount := 0
+	cancel := func() { cancelCount++ }
+
+	done := make(chan struct{})
+	go func() {
+		watchRunCompletion(state, reg, record.ID, cancel)
+		close(done)
+	}()
+
+	_ = os.Remove(filepath.Join(runDir, "result.json"))
+	time.Sleep(150 * time.Millisecond)
+	if cancelCount != 0 {
+		t.Fatalf("cancelCount = %d, want 0 after transient missing record", cancelCount)
+	}
+
+	if err := os.WriteFile(filepath.Join(runDir, "result.json"), []byte(`{"id":"workflow-transient","kind":"workflow","status":"succeeded","steps":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchRunCompletion did not exit after record finished")
+	}
+	if cancelCount != 1 {
+		t.Fatalf("cancelCount = %d, want 1 after completion", cancelCount)
 	}
 }
 
@@ -363,6 +487,69 @@ contributes:
 	manifestText := string(manifest)
 	if strings.Contains(manifestText, "workflows/deleted.yaml") || !strings.Contains(manifestText, "path: workflows/demo.kept.yaml") {
 		t.Fatalf("用户工作流插件清单未按实际文件刷新: %s", manifestText)
+	}
+}
+
+func TestWorkflowDeleteAPIRemovesUserWorkflowAsset(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	saveReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.deleted/save", strings.NewReader(`{"workflow":{"id":"demo.deleted","name":"待删除","category":"demo","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`))
+	saveRes := httptest.NewRecorder()
+	handler.ServeHTTP(saveRes, saveReq)
+	if saveRes.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", saveRes.Code, saveRes.Body.String())
+	}
+	workflowPath := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "workflows", "demo.deleted.yaml")
+	if _, err := os.Stat(workflowPath); err != nil {
+		t.Fatalf("未找到待删除工作流: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/workflows/demo.deleted", nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if _, err := os.Stat(workflowPath); !os.IsNotExist(err) {
+		t.Fatalf("工作流文件未被删除，err=%v", err)
+	}
+	if got := reg.Workflows["demo.deleted"]; got != nil {
+		t.Fatalf("注册表仍保留已删除工作流: %#v", got)
+	}
+	manifest, err := os.ReadFile(filepath.Join(reg.BaseDir, "plugins", "user.workflows", "plugin.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(manifest), "workflows/demo.deleted.yaml") {
+		t.Fatalf("用户工作流插件清单仍包含已删除工作流: %s", string(manifest))
+	}
+}
+
+func TestWorkflowDeleteAPIRejectsNonUserWorkflow(t *testing.T) {
+	reg := testRegistry(t)
+	req := httptest.NewRequest(http.MethodDelete, "/api/workflows/demo.flow", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if got := reg.Workflows["demo.flow"]; got == nil {
+		t.Fatalf("非用户工作流不应被删除")
+	}
+}
+
+func TestWorkflowDeleteAPIUnknownWorkflow(t *testing.T) {
+	reg := testRegistry(t)
+	req := httptest.NewRequest(http.MethodDelete, "/api/workflows/demo.missing", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
 	}
 }
 
@@ -1122,6 +1309,286 @@ func TestPluginEnableRemovesDisabledConfigAndRefreshesCatalog(t *testing.T) {
 	}
 }
 
+func TestPlatformFileUploadStoresFileUnderRunsUploads(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	req := fileUploadRequest(t, "artifact.txt", []byte("payload"))
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Data config.WorkflowUploadResult `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Data.FileName != "artifact.txt" || body.Data.Path == "" || body.Data.Size != int64(len("payload")) {
+		t.Fatalf("upload data = %#v", body.Data)
+	}
+	if !strings.Contains(filepath.ToSlash(body.Data.RelativePath), "runs/uploads/upload-") {
+		t.Fatalf("relative path = %q, want runs/uploads", body.Data.RelativePath)
+	}
+	data, err := os.ReadFile(body.Data.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "payload" {
+		t.Fatalf("uploaded content = %q", data)
+	}
+}
+
+func TestPlatformFileUploadStoresFileUnderTargetDir(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	req := fileUploadRequestWithTargetDir(t, "asset.zip", []byte("zip"), "assets/release")
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Data config.WorkflowUploadResult `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.ToSlash(body.Data.RelativePath)
+	if !strings.Contains(rel, "runs/uploads/assets/release/upload-") || !strings.HasSuffix(rel, "/asset.zip") {
+		t.Fatalf("relative path = %q, want target dir under uploads", rel)
+	}
+	if _, err := os.Stat(body.Data.Path); err != nil {
+		t.Fatalf("uploaded file missing: %v", err)
+	}
+}
+
+func TestPlatformFileUploadStoresMultipleFiles(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	req := multiFileUploadRequest(t, "batch", []uploadRequestFile{
+		{Name: "a.txt", Data: []byte("a")},
+		{Name: "b.txt", Data: []byte("bb")},
+	})
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Data config.WorkflowUploadResult `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Data.Count != 2 || body.Data.TotalSize != 3 || len(body.Data.Files) != 2 {
+		t.Fatalf("upload data = %#v", body.Data)
+	}
+	if body.Data.FileName != "a.txt" || body.Data.Size != 1 {
+		t.Fatalf("single-file compatibility fields = %#v", body.Data)
+	}
+	for _, item := range body.Data.Files {
+		if _, err := os.Stat(item.Path); err != nil {
+			t.Fatalf("uploaded file missing: %s err=%v", item.Path, err)
+		}
+	}
+}
+
+func TestPlatformFileUploadStoresDirectoryRelativePaths(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	req := multiFileUploadRequest(t, "", []uploadRequestFile{
+		{Name: "a.txt", RelativePath: "dir/a.txt", Data: []byte("a")},
+		{Name: "b.txt", RelativePath: "dir/sub/b.txt", Data: []byte("bb")},
+	})
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Data config.WorkflowUploadResult `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Data.Files) != 2 {
+		t.Fatalf("files = %#v", body.Data.Files)
+	}
+	relPaths := []string{filepath.ToSlash(body.Data.Files[0].RelativePath), filepath.ToSlash(body.Data.Files[1].RelativePath)}
+	if !strings.Contains(relPaths[0], "/dir/a.txt") || !strings.Contains(relPaths[1], "/dir/sub/b.txt") {
+		t.Fatalf("relative paths = %#v", relPaths)
+	}
+}
+
+func TestPlatformFileUploadRejectsInvalidRelativePath(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	req := multiFileUploadRequest(t, "", []uploadRequestFile{{Name: "bad.txt", RelativePath: "../bad.txt", Data: []byte("bad")}})
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("upload status = %d, want 400; body = %s", res.Code, res.Body.String())
+	}
+}
+
+func TestPlatformFileUploadRejectsInvalidTargetDir(t *testing.T) {
+	cases := []string{"..", "a/../b", "/tmp/uploads", `C:\tmp\uploads`, "http://example.com/a"}
+	for _, targetDir := range cases {
+		t.Run(targetDir, func(t *testing.T) {
+			reg := testRegistry(t)
+			handler := NewHandler(reg)
+			req := fileUploadRequestWithTargetDir(t, "asset.zip", []byte("zip"), targetDir)
+			res := httptest.NewRecorder()
+
+			handler.ServeHTTP(res, req)
+
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("upload status = %d, want 400; body = %s", res.Code, res.Body.String())
+			}
+		})
+	}
+}
+
+func TestPlatformFileUploadSanitizesFilename(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	req := fileUploadRequest(t, `..\secret.txt`, []byte("payload"))
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Data config.WorkflowUploadResult `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Data.FileName != "secret.txt" {
+		t.Fatalf("filename = %q, want basename", body.Data.FileName)
+	}
+	uploadRoot := filepath.Join(reg.BaseDir, "runs", "uploads")
+	absPath, err := filepath.Abs(body.Data.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absRoot, err := filepath.Abs(uploadRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(absPath, absRoot+string(os.PathSeparator)) {
+		t.Fatalf("uploaded path escaped upload root: %s", body.Data.Path)
+	}
+}
+
+func TestPlatformFileUploadRejectsNonPost(t *testing.T) {
+	res := httptest.NewRecorder()
+	NewHandler(testRegistry(t)).ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/files/upload", nil))
+	if res.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", res.Code)
+	}
+}
+
+func TestRunUploadNodeAPIUploadsOnlyWhenStepWaiting(t *testing.T) {
+	reg := testRegistry(t)
+	configureHelperTool(t, reg, "demo.hello", "path=${OPS_PARAM_PATH}")
+	handler := NewHandler(reg)
+	body := `{"params":{},"workflow":{"id":"demo.upload.async","name":"上传流程","nodes":[{"id":"upload","type":"upload","upload":{"target_dir":"assets"}},{"id":"consume","tool":"demo.hello","params":{"path":"{{ .steps.upload.file.path }}"}}],"edges":[{"from":"upload","to":"consume"}]}}`
+	startReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.upload.async/run?async=true", strings.NewReader(body))
+	startRes := httptest.NewRecorder()
+
+	handler.ServeHTTP(startRes, startReq)
+
+	if startRes.Code != http.StatusOK {
+		t.Fatalf("start status = %d, body = %s", startRes.Code, startRes.Body.String())
+	}
+	var started response
+	if err := json.Unmarshal(startRes.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	waitForServerRunStepStatus(t, handler, started.ID, "upload", "waiting")
+
+	uploadReq := fileUploadRequestWithTargetDir(t, "artifact.txt", []byte("payload"), "assets")
+	uploadReq.URL.Path = "/api/runs/" + started.ID + "/uploads/upload"
+	uploadRes := httptest.NewRecorder()
+	handler.ServeHTTP(uploadRes, uploadReq)
+
+	if uploadRes.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", uploadRes.Code, uploadRes.Body.String())
+	}
+	finalDetail := waitForServerRunStatus(t, handler, started.ID, "succeeded")
+	if !strings.Contains(finalDetail.Logs.Steps["upload"].Stdout, `"filename":"artifact.txt"`) {
+		t.Fatalf("upload stdout = %s", finalDetail.Logs.Steps["upload"].Stdout)
+	}
+	if consumeStep, ok := findRunStep(finalDetail.Record, "consume"); !ok || consumeStep.Status != "succeeded" {
+		t.Fatalf("consume step = %#v ok=%v", consumeStep, ok)
+	}
+}
+
+func TestRunUploadNodeAPIChunkedUploadCompletesWorkflow(t *testing.T) {
+	reg := testRegistry(t)
+	configureHelperTool(t, reg, "demo.hello", "chunked")
+	handler := NewHandler(reg)
+	body := `{"params":{},"workflow":{"id":"demo.upload.chunked","name":"分片上传流程","nodes":[{"id":"upload","type":"upload","upload":{"target_dir":"assets"}},{"id":"consume","tool":"demo.hello","params":{"path":"{{ .steps.upload.files.relative_paths }}"}}],"edges":[{"from":"upload","to":"consume"}]}}`
+	startReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.upload.chunked/run?async=true", strings.NewReader(body))
+	startRes := httptest.NewRecorder()
+	handler.ServeHTTP(startRes, startReq)
+	if startRes.Code != http.StatusOK {
+		t.Fatalf("start status = %d, body = %s", startRes.Code, startRes.Body.String())
+	}
+	var started response
+	if err := json.Unmarshal(startRes.Body.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	waitForServerRunStepStatus(t, handler, started.ID, "upload", "waiting")
+
+	startUploadBody := `{"target_dir":"assets","files":[{"name":"a.txt","relative_path":"dir/a.txt","size":5}]}`
+	chunkStartReq := httptest.NewRequest(http.MethodPost, "/api/runs/"+started.ID+"/uploads/upload/start", strings.NewReader(startUploadBody))
+	chunkStartRes := httptest.NewRecorder()
+	handler.ServeHTTP(chunkStartRes, chunkStartReq)
+	if chunkStartRes.Code != http.StatusOK {
+		t.Fatalf("chunk start status = %d, body = %s", chunkStartRes.Code, chunkStartRes.Body.String())
+	}
+	var chunkStart struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(chunkStartRes.Body.Bytes(), &chunkStart); err != nil {
+		t.Fatal(err)
+	}
+	chunkReq := httptest.NewRequest(http.MethodPost, "/api/runs/"+started.ID+"/uploads/upload/chunk?session_id="+chunkStart.Data.ID+"&file_index=0&offset=0", strings.NewReader("hello"))
+	chunkRes := httptest.NewRecorder()
+	handler.ServeHTTP(chunkRes, chunkReq)
+	if chunkRes.Code != http.StatusOK {
+		t.Fatalf("chunk status = %d, body = %s", chunkRes.Code, chunkRes.Body.String())
+	}
+	finishReq := httptest.NewRequest(http.MethodPost, "/api/runs/"+started.ID+"/uploads/upload/finish", strings.NewReader(`{"session_id":"`+chunkStart.Data.ID+`"}`))
+	finishRes := httptest.NewRecorder()
+	handler.ServeHTTP(finishRes, finishReq)
+	if finishRes.Code != http.StatusOK {
+		t.Fatalf("finish status = %d, body = %s", finishRes.Code, finishRes.Body.String())
+	}
+
+	finalDetail := waitForServerRunStatus(t, handler, started.ID, "succeeded")
+	if !strings.Contains(finalDetail.Logs.Steps["upload"].Stdout, "dir/a.txt") {
+		t.Fatalf("upload stdout = %s", finalDetail.Logs.Steps["upload"].Stdout)
+	}
+}
+
 func TestPluginEnableRollsBackConfigOnReloadFailure(t *testing.T) {
 	baseReg := testRegistry(t)
 	installTestPlugin(t, baseReg.BaseDir, "vendor.enablerollback", "1.0.0")
@@ -1703,6 +2170,135 @@ func TestRunDetailAPIIncludesLogs(t *testing.T) {
 	}
 	if !strings.Contains(res.Body.String(), "标准输出") || !strings.Contains(res.Body.String(), "错误输出") {
 		t.Fatalf("响应缺少日志内容: %s", res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), `"items"`) || !strings.Contains(res.Body.String(), `"kind":"tool_run"`) {
+		t.Fatalf("响应缺少结构化日志项: %s", res.Body.String())
+	}
+}
+
+func TestRunDetailAPIIncludesLoopAggregateAndIterationItems(t *testing.T) {
+	reg := testRegistry(t)
+	runDir := filepath.Join(reg.BaseDir, "runs", "logs", "run-loop")
+	if err := os.MkdirAll(filepath.Join(runDir, "repeat", "1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(runDir, "repeat", "2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result := `{"id":"run-loop","kind":"workflow","target":"demo.loop","status":"succeeded","steps":[{"id":"repeat","type":"loop","tool":"demo.hello","status":"succeeded","loop_iterations":2}]}`
+	if err := os.WriteFile(filepath.Join(runDir, "result.json"), []byte(result), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "repeat", "stdout.log"), []byte("聚合输出\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "repeat", "1", "stdout.log"), []byte("第1次\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "repeat", "2", "stderr.log"), []byte("第2次错误\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/run-loop", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	body := res.Body.String()
+	for _, want := range []string{`"kind":"workflow_step"`, `"children"`, `"kind":"loop_iteration"`, "聚合输出", "第1次", "第2次错误"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("响应缺少 %q: %s", want, body)
+		}
+	}
+}
+
+func TestRunEventsAPIStreamsExistingLogsAndCompletes(t *testing.T) {
+	reg := testRegistry(t)
+	runDir := filepath.Join(reg.BaseDir, "runs", "logs", "run-events")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "result.json"), []byte(`{"id":"run-events","kind":"tool","target":"demo.hello","status":"succeeded"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "stdout.log"), []byte("line-1\nline-2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/run-events/events", nil)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if contentType := res.Header().Get("Content-Type"); !strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream", contentType)
+	}
+	body := res.Body.String()
+	for _, want := range []string{"event: log", `"text":"line-1"`, `"text":"line-2"`, "event: complete", `"status":"succeeded"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("事件流缺少 %q: %s", want, body)
+		}
+	}
+}
+
+func TestRunEventsAPIStreamsAppendedLogsAndCompletes(t *testing.T) {
+	reg := testRegistry(t)
+	runDir := filepath.Join(reg.BaseDir, "runs", "logs", "run-follow")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resultPath := filepath.Join(runDir, "result.json")
+	if err := os.WriteFile(resultPath, []byte(`{"id":"run-follow","kind":"tool","target":"demo.hello","status":"running"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdoutPath := filepath.Join(runDir, "stdout.log")
+	if err := os.WriteFile(stdoutPath, []byte("old-line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(reg))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/runs/run-follow/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	bodyCh := make(chan string, 1)
+	go func() {
+		data, _ := io.ReadAll(resp.Body)
+		bodyCh <- string(data)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if err := os.WriteFile(stdoutPath, []byte("old-line\nnew-line\nnew-line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resultPath, []byte(`{"id":"run-follow","kind":"tool","target":"demo.hello","status":"succeeded"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case body := <-bodyCh:
+		if strings.Count(body, `"text":"old-line"`) != 1 {
+			t.Fatalf("历史日志发送次数不正确: %s", body)
+		}
+		if strings.Count(body, `"text":"new-line"`) != 1 {
+			t.Fatalf("增量重复日志未被抑制: %s", body)
+		}
+		if !strings.Contains(body, "event: complete") || !strings.Contains(body, `"status":"succeeded"`) {
+			t.Fatalf("事件流缺少 complete: %s", body)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("事件流未在运行结束后关闭")
 	}
 }
 
@@ -2437,6 +3033,100 @@ func pluginUploadRequest(t *testing.T, zipData []byte, replace bool) *http.Reque
 	req := httptest.NewRequest(http.MethodPost, path, &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	return req
+}
+
+func fileUploadRequest(t *testing.T, name string, data []byte) *http.Request {
+	return fileUploadRequestWithTargetDir(t, name, data, "")
+}
+
+func fileUploadRequestWithTargetDir(t *testing.T, name string, data []byte, targetDir string) *http.Request {
+	t.Helper()
+	return multiFileUploadRequest(t, targetDir, []uploadRequestFile{{Name: name, Data: data}})
+}
+
+type uploadRequestFile struct {
+	Name         string
+	RelativePath string
+	Data         []byte
+}
+
+func multiFileUploadRequest(t *testing.T, targetDir string, files []uploadRequestFile) *http.Request {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if targetDir != "" {
+		if err := writer.WriteField("target_dir", targetDir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, file := range files {
+		if err := writer.WriteField("relative_path", file.RelativePath); err != nil {
+			t.Fatal(err)
+		}
+		part, err := writer.CreateFormFile("file", file.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := part.Write(file.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/files/upload", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	return req
+}
+
+func waitForServerRunStepStatus(t *testing.T, handler http.Handler, runID, stepID, status string) runDetail {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		detail, ok := fetchServerRunDetail(t, handler, runID)
+		if ok {
+			for _, step := range detail.Record.Steps {
+				if step.ID == stepID && step.Status == status {
+					return detail
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s step %s did not reach %s", runID, stepID, status)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func waitForServerRunStatus(t *testing.T, handler http.Handler, runID, status string) runDetail {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		detail, ok := fetchServerRunDetail(t, handler, runID)
+		if ok && detail.Record.Status == status {
+			return detail
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s did not reach %s", runID, status)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func fetchServerRunDetail(t *testing.T, handler http.Handler, runID string) (runDetail, bool) {
+	t.Helper()
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/runs/"+runID, nil))
+	if res.Code != http.StatusOK {
+		return runDetail{}, false
+	}
+	var body struct {
+		Data runDetail `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	return body.Data, true
 }
 
 func pluginZip(t *testing.T, id, version string, renamedTool bool) []byte {

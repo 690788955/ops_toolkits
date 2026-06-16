@@ -356,6 +356,10 @@ func printWorkflowDetails(reg *registry.Registry, id string, out io.Writer) erro
 			fmt.Fprintf(out, "  %s [编排节点/循环] 工具=%s 次数=%d\n", node.ID, title(node.Loop.Tool, "未配置"), node.Loop.MaxIterations)
 			continue
 		}
+		if workflowNodeType(node) == config.WorkflowNodeTypeUpload {
+			fmt.Fprintf(out, "  %s [编排节点/上传文件] 目标目录=%s\n", node.ID, title(node.Upload.TargetDir, "默认"))
+			continue
+		}
 		fmt.Fprintf(out, "  %s [工具节点] 工具=%s\n", node.ID, node.Tool)
 	}
 	if len(wf.Config.Edges) > 0 {
@@ -380,6 +384,9 @@ func workflowNodeType(node config.WorkflowNode) string {
 	}
 	if node.Loop.Tool != "" || node.Loop.Target != "" || node.Loop.MaxIterations != 0 || len(node.Loop.Params) > 0 {
 		return config.WorkflowNodeTypeLoop
+	}
+	if node.Upload.TargetDir != "" {
+		return config.WorkflowNodeTypeUpload
 	}
 	return ""
 }
@@ -420,6 +427,9 @@ func displayStepType(step runner.StepRecord) string {
 	}
 	if step.Type == config.WorkflowNodeTypeLoop {
 		return "编排节点/循环"
+	}
+	if step.Type == config.WorkflowNodeTypeUpload {
+		return "编排节点/上传文件"
 	}
 	return "工具节点"
 }

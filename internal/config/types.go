@@ -1,7 +1,10 @@
 package config
 
 import (
+	"fmt"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -60,8 +63,9 @@ type PluginsConfig struct {
 }
 
 type UIConfig struct {
-	Enabled bool   `yaml:"enabled" json:"enabled"`
-	Title   string `yaml:"title" json:"title"`
+	Enabled     bool   `yaml:"enabled" json:"enabled"`
+	Title       string `yaml:"title" json:"title"`
+	LogFontSize int    `yaml:"log_font_size" json:"log_font_size"`
 }
 
 type HTTPConfig struct {
@@ -188,6 +192,7 @@ type WorkflowNode struct {
 	Tool      string                 `yaml:"tool" json:"tool"`
 	Condition WorkflowCondition      `yaml:"condition" json:"condition"`
 	Loop      WorkflowLoop           `yaml:"loop" json:"loop"`
+	Upload    WorkflowUpload         `yaml:"upload" json:"upload"`
 	DependsOn []string               `yaml:"depends_on" json:"depends_on"`
 	Params    map[string]interface{} `yaml:"params" json:"params"`
 	Optional  bool                   `yaml:"optional" json:"optional"`
@@ -201,6 +206,28 @@ type WorkflowLoop struct {
 	Params        map[string]interface{} `yaml:"params" json:"params"`
 	MaxIterations int                    `yaml:"max_iterations" json:"max_iterations"`
 	Target        string                 `yaml:"target" json:"target,omitempty"`
+}
+
+type WorkflowUpload struct {
+	TargetDir string `yaml:"target_dir" json:"target_dir"`
+}
+
+type WorkflowUploadResult struct {
+	ID           string               `yaml:"id" json:"id"`
+	FileName     string               `yaml:"filename" json:"filename"`
+	Path         string               `yaml:"path" json:"path"`
+	RelativePath string               `yaml:"relative_path" json:"relative_path"`
+	Size         int64                `yaml:"size" json:"size"`
+	Files        []WorkflowUploadFile `yaml:"files" json:"files,omitempty"`
+	Count        int                  `yaml:"count" json:"count"`
+	TotalSize    int64                `yaml:"total_size" json:"total_size"`
+}
+
+type WorkflowUploadFile struct {
+	FileName     string `yaml:"filename" json:"filename"`
+	Path         string `yaml:"path" json:"path"`
+	RelativePath string `yaml:"relative_path" json:"relative_path"`
+	Size         int64  `yaml:"size" json:"size"`
 }
 
 type WorkflowCondition struct {
@@ -228,7 +255,37 @@ const (
 	WorkflowNodeTypeParallel  = "parallel"
 	WorkflowNodeTypeJoin      = "join"
 	WorkflowNodeTypeLoop      = "loop"
+	WorkflowNodeTypeUpload    = "upload"
 )
+
+func NormalizeUploadTargetDir(value string) (string, error) {
+	raw := strings.TrimSpace(value)
+	if raw == "" {
+		return "", nil
+	}
+	if strings.Contains(raw, "://") {
+		return "", fmt.Errorf("上传目标目录必须是 uploads 下的相对子目录")
+	}
+	if len(raw) >= 2 && raw[1] == ':' {
+		return "", fmt.Errorf("上传目标目录不能是绝对路径")
+	}
+	raw = strings.ReplaceAll(raw, "\\", "/")
+	if filepath.IsAbs(raw) || strings.HasPrefix(raw, "/") {
+		return "", fmt.Errorf("上传目标目录不能是绝对路径")
+	}
+	parts := strings.Split(raw, "/")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("上传目标目录不能包含空路径、. 或 ..")
+		}
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(raw)))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+		return "", fmt.Errorf("上传目标目录不能逃逸 uploads 目录")
+	}
+	return clean, nil
+}
 
 func (c RootConfig) DisplayName() string {
 	if c.App.Name != "" {

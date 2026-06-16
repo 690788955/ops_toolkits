@@ -23,11 +23,12 @@ plugins:
   disabled: []
   allowed_commands:
     - docker
+host_config_files:
+  allowed_dirs: []
 ui:
   enabled: true
   title: 运维工作流控制台
-host_config_files:
-  allowed_dirs: []
+  log_font_size: 18
 config_defaults: {}
 name: ''
 description: ''

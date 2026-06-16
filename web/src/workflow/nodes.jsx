@@ -12,7 +12,7 @@ function FlowchartShape({kind, marker}) {
 
 function controlShapeKind(type) {
   if (type === 'condition') return 'decision'
-  if (type === 'parallel' || type === 'join' || type === 'loop') return `gateway ${type}`
+  if (type === 'parallel' || type === 'join' || type === 'loop' || type === 'upload') return `gateway ${type}`
   return 'planned'
 }
 
@@ -21,6 +21,7 @@ function controlShapeMarker(type) {
   if (type === 'parallel') return '+'
   if (type === 'join') return '∧'
   if (type === 'loop') return '↻'
+  if (type === 'upload') return '↑'
   return '·'
 }
 
@@ -29,6 +30,7 @@ function controlShapeLabel(type) {
   if (type === 'parallel') return 'Gateway 并行分支'
   if (type === 'join') return 'Gateway 合流'
   if (type === 'loop') return 'Loop 固定次数循环'
+  if (type === 'upload') return 'Upload 上传文件'
   return '流程节点'
 }
 
@@ -37,6 +39,7 @@ function controlNodeHelp(type) {
   if (type === 'parallel') return '将后续任务拆分为多个分支路径'
   if (type === 'join') return '等待多个上游分支完成后继续流程'
   if (type === 'loop') return '按固定次数重复执行一个内嵌选择的插件工具'
+  if (type === 'upload') return '运行前上传本地文件、批量文件或目录到平台目录'
   return '编排控制节点'
 }
 
@@ -188,7 +191,12 @@ function ControlNode({id, data, selected}) {
   const loop = data.loop || {}
   const loopSummary = loop.tool ? `工具 ${loop.tool} × ${loop.max_iterations || 0}` : '未配置循环工具'
   const runLoopSummary = data.run?.loopIterations ? `实际迭代 ${data.run.loopIterations} 次` : ''
-  const helpText = data.controlType === 'loop' ? [loopSummary, runLoopSummary].filter(Boolean).join('；') : controlNodeHelp(data.controlType)
+  const uploadSummary = data.upload?.target_dir ? `目标 uploads/${data.upload.target_dir}` : '目标默认 uploads 目录'
+  const helpText = data.controlType === 'loop'
+    ? [loopSummary, runLoopSummary].filter(Boolean).join('；')
+    : data.controlType === 'upload'
+      ? uploadSummary
+      : controlNodeHelp(data.controlType)
   const runTitle = formatNodeRunTitle(data.run)
   const nodeTitle = [data.name || id, controlShapeLabel(data.controlType), helpText, runTitle].filter(Boolean).join('\n')
   return (

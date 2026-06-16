@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {Background, Controls, MiniMap, ReactFlow, reconnectEdge, useEdgesState, useNodesState} from '@xyflow/react'
-import {fetchJSON, fetchRunDetail, postJSON} from '../api.js'
+import {deleteJSON, fetchJSON, fetchRunDetail, postJSON, postRunUploadNodeChunked} from '../api.js'
 import {filterEntries, readableAPIError, summarizeAPIResponse} from '../utils.js'
 import * as workflowModel from './model.js'
 import {controlShapeMarker, nodeTypes, normalizeRunStatus, runStatusLabel} from './nodes.jsx'
 import {EdgeConfigModal, NodeConfigEditor, NodeConfigModal, ValidationSummary} from './inspectors.jsx'
 import {CanvasDock, NodePickerPanel} from './picker.jsx'
+import FileUploadInput from '../FileUploadInput.jsx'
 
 const conditionOperators = [
   {value: 'eq', label: '等于'},
@@ -17,6 +18,8 @@ const conditionOperators = [
   {value: 'exists', label: '存在'},
   {value: 'empty', label: '为空'}
 ]
+
+const MAX_PLATFORM_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
 
 const controlNodeCatalog = [
   {
@@ -54,6 +57,15 @@ const controlNodeCatalog = [
     capabilities: ['固定次数', '内嵌工具', '安全上限'],
     help: '执行到循环节点时，按最大次数重复运行已选择的插件工具',
     enabled: true
+  },
+  {
+    type: 'upload',
+    title: '上传文件',
+    secondary: 'Upload',
+    description: '运行前上传本地文件、批量文件或目录到平台受控目录',
+    capabilities: ['批量文件', '目录结构', '输出文件路径'],
+    help: '上传节点会在工作流启动前选择文件或目录，运行时输出上传结果 JSON',
+    enabled: true
   }
 ]
 
@@ -89,12 +101,15 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   const [canvasRunState, setCanvasRunState] = useState(() => emptyCanvasRunState())
   const [activeRun, setActiveRun] = useState(null)
   const [cancellingRunID, setCancellingRunID] = useState('')
+  const [uploadNodeFiles, setUploadNodeFiles] = useState({})
+  const [uploadProgress, setUploadProgress] = useState(null)
   const canvasRunVersionRef = useRef(0)
 
   const clearCanvasRunOverlay = useCallback(() => {
     canvasRunVersionRef.current += 1
     setActiveRun(null)
     setCancellingRunID('')
+    setUploadProgress(null)
     setCanvasRunState(current => current.status === 'idle' ? current : emptyCanvasRunState())
   }, [])
 
@@ -134,6 +149,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   const mappingSources = useMemo(() => buildMappingSources(workflowParameters, selectedNodeID, nodes, edges), [workflowParameters, selectedNodeID, nodes, edges])
   const isEditingCanvas = canvasMode === 'edit'
   const workflowConfirm = effectiveWorkflowConfirm(workflow, selectedWorkflowID, catalog.workflows || [])
+  const canDeleteWorkflow = Boolean(selectedWorkflowID)
   const activeRunID = activeRun?.id || ''
   const activeRunStatus = normalizeRunStatus(activeRun?.status || canvasRunState.status)
   const isActiveRunRunning = activeRunStatus === 'running'
@@ -224,6 +240,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       setSelectedEdgeID('')
       setNodeConfigModalOpen(false)
       setEdgeConfigModalOpen(false)
+      setUploadNodeFiles({})
       closeNodePicker()
       fitCanvasViewAfterLayout()
       setResult({message: `已加载工作流 ${id}`})
@@ -353,6 +370,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     setPendingInsertEdge(null)
     setNodeConfigModalOpen(false)
     setEdgeConfigModalOpen(false)
+    setUploadNodeFiles({})
   }
 
   function defaultCanvasInsertPosition() {
@@ -531,6 +549,12 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   function updateSelectedNodeLoop(nextLoop) {
     clearCanvasRunOverlay()
     setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, loop: normalizeLoopConfig(nextLoop)}} : node))
+    setEditorValidation(null)
+  }
+
+  function updateSelectedNodeUpload(nextUpload) {
+    clearCanvasRunOverlay()
+    setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, upload: workflowModel.normalizeUploadConfig(nextUpload)}} : node))
     setEditorValidation(null)
   }
 
@@ -717,6 +741,14 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     workflowModel.findMissingRequiredNodeParams(nodes, catalog.tools || []).forEach(item => {
       errors.push(`节点 ${item.nodeID}（${item.toolName}）缺少必填参数：${item.paramName}`)
     })
+    if (mode === 'run') {
+      uploadFlowNodes(nodes).forEach(node => {
+        const files = uploadFilesForNode(uploadNodeFiles, node.id)
+        const totalSize = uploadFilesTotalSize(files)
+        if (files.length === 0) errors.push(`上传节点 ${node.id} 请选择要上传的文件或目录。`)
+        if (totalSize > MAX_PLATFORM_UPLOAD_BYTES) errors.push(`上传节点 ${node.id} 文件总大小 ${formatBytes(totalSize)} 超过平台上限 ${formatBytes(MAX_PLATFORM_UPLOAD_BYTES)}。`)
+      })
+    }
     const title = mode === 'save' ? '保存前检查未通过' : mode === 'run' ? '执行前检查未通过' : '校验前检查未通过'
     return {draft, errors, warnings: [], title}
   }
@@ -758,6 +790,36 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     }
   }
 
+  async function deleteWorkflow() {
+    const id = selectedWorkflowID
+    if (!id) return
+    const label = workflow.name || id
+    if (!window.confirm(`确认删除工作流「${label}」？\n\n该操作会删除 Web 页面保存的工作流配置，且不可撤销。`)) return
+    try {
+      const body = await deleteJSON(`/api/workflows/${encodeURIComponent(id)}`)
+      clearCanvasRunOverlay()
+      const next = emptyWorkflow(activeCategory)
+      setCanvasMode('edit')
+      setWorkflow(next)
+      setWorkflowParamsText('[]')
+      setRunParamsText('{}')
+      setNodes([])
+      setEdges([])
+      setSelectedWorkflowID('')
+      setSelectedNodeID('')
+      setSelectedEdgeID('')
+      setNodeConfigModalOpen(false)
+      setEdgeConfigModalOpen(false)
+      setEditorValidation(null)
+      setUploadNodeFiles({})
+      closeNodePicker()
+      await refreshCatalog({keepCategory: true})
+      setResult({message: summarizeAPIResponse(body, '工作流已删除。'), response: body})
+    } catch (err) {
+      setResult({message: readableAPIError(err, '工作流删除失败。'), response: err.body})
+    }
+  }
+
   async function runDraft() {
     if (isActiveRunRunning) {
       setResult({message: `当前工作流正在运行：${activeRunID || '等待运行记录 ID'}，请先等待完成或取消运行。`, run: activeRun || undefined})
@@ -777,6 +839,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     }
     const runVersion = canvasRunVersionRef.current + 1
     canvasRunVersionRef.current = runVersion
+    setUploadProgress(null)
     const runNodesSnapshot = nodes
     setCanvasRunState(buildRunningCanvasRunState(runNodesSnapshot, check.draft.edges))
     const applyRunOverlay = nextState => {
@@ -794,11 +857,12 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
         showEditorValidation(status)
         return
       }
-      setResult({message: '执行工作流...'})
+      const uploadNodeFilesSnapshot = uploadNodeFiles
+      setResult({message: '执行工作流...', uploadProgress: null})
       const body = await postJSON(`/api/workflows/${check.draft.id}/run?async=true`, {params: runParams, workflow: check.draft, confirm: confirmRequired})
       if (body.id) {
         setActiveRun({id: body.id, status: body.status || 'running', target: body.target || check.draft.id})
-        await pollRunDetail(body.id, body, runVersion, runNodesSnapshot, applyRunOverlay)
+        await pollRunDetail(body.id, body, runVersion, runNodesSnapshot, applyRunOverlay, uploadNodeFilesSnapshot)
         return
       }
       setActiveRun(null)
@@ -822,7 +886,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
         applyRunOverlay(buildFailedCanvasRunState(runNodesSnapshot, readableAPIError(err, '工作流执行失败。')))
       }
       setActiveRun(runID ? {id: runID, status: body.status || 'failed'} : null)
-      setResult({message: readableAPIError(err, '工作流执行失败。'), response: body, detail: detail ? {data: detail} : undefined, run: runID ? {id: runID, status: body.status || 'failed'} : undefined})
+      setResult(current => ({...current, message: readableAPIError(err, '工作流执行失败。'), response: body, detail: detail ? {data: detail} : undefined, run: runID ? {id: runID, status: body.status || 'failed'} : undefined}))
     }
   }
 
@@ -840,9 +904,10 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     }
   }
 
-  async function pollRunDetail(runID, initialRun, runVersion, runNodesSnapshot, applyRunOverlay) {
+  async function pollRunDetail(runID, initialRun, runVersion, runNodesSnapshot, applyRunOverlay, uploadNodeFilesSnapshot = {}) {
     const maxMissingAttempts = 8
     let missingAttempts = 0
+    const submittedUploadNodes = new Set()
     while (canvasRunVersionRef.current === runVersion) {
       try {
         const detail = await fetchRunDetail(runID)
@@ -851,7 +916,10 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
           const status = normalizeRunStatus(detailData.record.status || initialRun?.status || 'running')
           applyRunOverlay(buildCanvasRunStateFromDetail(detailData, runNodesSnapshot))
           setActiveRun({id: runID, status, target: detailData.record.target || initialRun?.target})
-          setResult({run: {...initialRun, status, id: runID}, detail: {data: detailData}})
+          setResult(current => ({...current, run: {...initialRun, status, id: runID}, detail: {data: detailData}}))
+          if (status === 'running') {
+            await submitWaitingUploadNodes(runID, detailData, runNodesSnapshot, uploadNodeFilesSnapshot, submittedUploadNodes, setResult, setUploadProgress)
+          }
           if (status !== 'running') return detail
         }
       } catch (err) {
@@ -948,6 +1016,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
           <button className="secondary" type="button" onClick={createWorkflow}>新建</button>
           <button className="secondary" type="button" onClick={validateDraft}>校验</button>
           <button className="primary" type="button" onClick={saveDraft}>保存</button>
+          <button className="secondary danger" type="button" onClick={deleteWorkflow} disabled={!canDeleteWorkflow}>删除工作流</button>
         </div>
         <div className="buttonRow">
           <button className="secondary danger" type="button" onClick={removeSelectedNode} disabled={!selectedNode}>删除节点</button>
@@ -1022,12 +1091,37 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
             {workflowParameters.map((param, index) => (
               <label key={param.name || index} className={param.required ? 'requiredField' : ''}>
                 <span title={param.description || param.name || `参数 ${index + 1}`}>{param.description || param.name || `参数 ${index + 1}`}{param.required ? ' *' : ''}</span>
-                <input
-                  value={formatRunParamInputValue(runParams[param.name])}
-                  placeholder={param.name || '参数名'}
-                  onChange={event => updateRunParam(param.name, event.target.value)}
-                  disabled={!param.name || isActiveRunRunning}
-                />
+                {param.type === 'bool' ? (
+                  <input
+                    type="checkbox"
+                    checked={parseBoolParamValue(runParams[param.name])}
+                    onChange={event => updateRunParam(param.name, event.target.checked)}
+                    disabled={!param.name || isActiveRunRunning}
+                  />
+                ) : param.type === 'file' ? (
+                  <FileUploadInput
+                    value={formatRunParamInputValue(runParams[param.name])}
+                    onChange={value => updateRunParam(param.name, value)}
+                    disabled={!param.name || isActiveRunRunning}
+                  />
+                ) : Array.isArray(param.options) && param.options.length > 0 ? (
+                  <select
+                    value={formatRunParamInputValue(runParams[param.name])}
+                    onChange={event => updateRunParam(param.name, event.target.value)}
+                    disabled={!param.name || isActiveRunRunning}
+                  >
+                    {param.options.map(opt => (
+                      <option key={opt} value={opt}>{opt || '（默认）'}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    value={formatRunParamInputValue(runParams[param.name])}
+                    placeholder={param.name || '参数名'}
+                    onChange={event => updateRunParam(param.name, event.target.value)}
+                    disabled={!param.name || isActiveRunRunning}
+                  />
+                )}
               </label>
             ))}
           </div>
@@ -1041,16 +1135,86 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
             {group.parameters.map(param => (
               <label key={param.name} className={param.required ? 'requiredField' : ''}>
                 <span title={param.description || param.name}>{param.description || param.name}{param.required ? ' *' : ''}</span>
-                <input
-                  value={formatRunParamInputValue(group.params[param.name])}
-                  placeholder={param.name}
-                  onChange={event => updateExecutableNodeParam(group.nodeID, param.name, event.target.value)}
-                  disabled={isActiveRunRunning}
-                />
+                {param.type === 'bool' ? (
+                  <input
+                    type="checkbox"
+                    checked={parseBoolParamValue(group.params[param.name])}
+                    onChange={event => updateExecutableNodeParam(group.nodeID, param.name, event.target.checked)}
+                    disabled={isActiveRunRunning}
+                  />
+                ) : param.type === 'file' ? (
+                  <FileUploadInput
+                    value={formatRunParamInputValue(group.params[param.name])}
+                    onChange={value => updateExecutableNodeParam(group.nodeID, param.name, value)}
+                    disabled={isActiveRunRunning}
+                  />
+                ) : Array.isArray(param.options) && param.options.length > 0 ? (
+                  <select
+                    value={formatRunParamInputValue(group.params[param.name])}
+                    onChange={event => updateExecutableNodeParam(group.nodeID, param.name, event.target.value)}
+                    disabled={isActiveRunRunning}
+                  >
+                    {param.options.map(opt => (
+                      <option key={opt} value={opt}>{opt || '（默认）'}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    value={formatRunParamInputValue(group.params[param.name])}
+                    placeholder={param.name}
+                    onChange={event => updateExecutableNodeParam(group.nodeID, param.name, event.target.value)}
+                    disabled={isActiveRunRunning}
+                  />
+                )}
               </label>
             ))}
           </div>
         ))}
+        {uploadFlowNodes(nodes).length > 0 && (
+          <div className="workflowRunParamSection">
+          <strong title="上传节点会在工作流执行到对应节点时上传文件">上传文件</strong>
+            {uploadFlowNodes(nodes).map(node => {
+              const upload = workflowModel.normalizeUploadConfig(node.data.upload || {})
+              const uploadState = uploadStateForNode(uploadNodeFiles, node.id)
+              return (
+                <label key={node.id} className="requiredField">
+                  <span title={upload.target_dir ? `目标子目录：${upload.target_dir}` : '目标子目录：默认'}>{node.data.name || node.id} *</span>
+                  <span className="uploadPickerControl">
+                    <select
+                      value={uploadState.mode}
+                      disabled={isActiveRunRunning}
+                      onChange={event => setUploadNodeFiles(current => ({...current, [node.id]: {mode: event.target.value, files: []}}))}
+                    >
+                      <option value="files">文件</option>
+                      <option value="directory">目录</option>
+                    </select>
+                    {uploadState.mode === 'directory' ? (
+                      <input
+                        key={`${node.id}-directory`}
+                        type="file"
+                        multiple
+                        webkitdirectory=""
+                        directory=""
+                        disabled={isActiveRunRunning}
+                        onChange={event => setUploadNodeFiles(current => ({...current, [node.id]: {mode: 'directory', files: Array.from(event.target.files || [])}}))}
+                      />
+                    ) : (
+                      <input
+                        key={`${node.id}-files`}
+                        type="file"
+                        multiple
+                        disabled={isActiveRunRunning}
+                        onChange={event => setUploadNodeFiles(current => ({...current, [node.id]: {mode: 'files', files: Array.from(event.target.files || [])}}))}
+                      />
+                    )}
+                  </span>
+                  <small>{uploadFileSummary(uploadNodeFiles, node.id)} · {upload.target_dir ? `uploads/${upload.target_dir}` : '默认 uploads 目录'}</small>
+                  {uploadProgress?.nodeID === node.id && <UploadProgressInline progress={uploadProgress} />}
+                </label>
+              )
+            })}
+          </div>
+        )}
         {parsedRunParams.invalid && (
           <div className="empty small" title="高级 JSON 当前无效，逐项输入会以空对象重新生成参数。">高级 JSON 当前无效。</div>
         )}
@@ -1187,6 +1351,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
             onNameChange={updateSelectedNodeName}
             onConditionChange={updateSelectedNodeCondition}
             onLoopChange={updateSelectedNodeLoop}
+            onUploadChange={updateSelectedNodeUpload}
             loopTool={selectedLoopTool}
             tools={toolOptions}
             onParamChange={updateMappedParam}
@@ -1241,6 +1406,123 @@ function parseJSONObject(value) {
 function formatRunParamInputValue(value) {
   if (value === undefined || value === null) return ''
   return typeof value === 'string' ? value : String(value)
+}
+
+function parseBoolParamValue(value) {
+  return value === true || value === 'true' || value === '1' || value === 'yes' || value === 'on'
+}
+
+function uploadFlowNodes(nodes) {
+  return (nodes || []).filter(node => node.type === 'controlNode' && node.data?.controlType === 'upload')
+}
+
+function uploadStateForNode(uploadNodeFiles, nodeID) {
+  const value = uploadNodeFiles?.[nodeID]
+  if (!value) return {mode: 'files', files: []}
+  if (Array.isArray(value)) return {mode: 'files', files: value.filter(Boolean)}
+  return {
+    mode: value.mode === 'directory' ? 'directory' : 'files',
+    files: Array.isArray(value.files) ? value.files.filter(Boolean) : []
+  }
+}
+
+function uploadFilesForNode(uploadNodeFiles, nodeID) {
+  return uploadStateForNode(uploadNodeFiles, nodeID).files
+}
+
+function uploadFileSummary(uploadNodeFiles, nodeID) {
+  const files = uploadFilesForNode(uploadNodeFiles, nodeID)
+  if (files.length === 0) return '未选择'
+  const totalSize = uploadFilesTotalSize(files)
+  return `${files.length} 个文件 · ${formatBytes(totalSize)}`
+}
+
+function uploadFilesTotalSize(files) {
+  return (files || []).reduce((total, file) => total + Number(file.size || 0), 0)
+}
+
+async function submitWaitingUploadNodes(runID, detailData, nodes, uploadNodeFilesSnapshot, submittedUploadNodes, setResult, setUploadProgress) {
+  const uploadNodes = new Map(uploadFlowNodes(nodes).map(node => [node.id, node]))
+  const waitingSteps = (detailData?.record?.steps || []).filter(step => step?.type === 'upload' && normalizeRunStatus(step.status) === 'waiting')
+  for (const step of waitingSteps) {
+    if (submittedUploadNodes.has(step.id)) continue
+    const node = uploadNodes.get(step.id)
+    if (!node) continue
+    const files = uploadFilesForNode(uploadNodeFilesSnapshot, step.id)
+    if (files.length === 0) {
+      throw new Error(`上传节点 ${step.id} 缺少已选择的文件或目录。`)
+    }
+    submittedUploadNodes.add(step.id)
+    const targetDir = workflowModel.normalizeUploadConfig(node.data.upload || {}).target_dir
+    try {
+      setUploadProgress(uploadProgressState(step.id, files, 0, 'uploading', '准备上传'))
+      await postRunUploadNodeChunked(runID, step.id, files, targetDir, progress => {
+        const percent = progress.total > 0 ? Math.floor(progress.uploaded / progress.total * 100) : 0
+        const nextProgress = uploadProgressState(step.id, files, progress.uploaded, 'uploading', progress.fileName || '')
+        setUploadProgress(nextProgress)
+        setResult({
+          message: `上传节点 ${step.id} 正在上传：${formatBytes(progress.uploaded)} / ${formatBytes(progress.total)} (${percent}%)`,
+          uploadProgress: nextProgress,
+          detail: {data: detailData},
+          run: {id: runID, status: 'running'}
+        })
+      })
+      const doneProgress = uploadProgressState(step.id, files, uploadFilesTotalSize(files), 'succeeded', '上传完成')
+      setUploadProgress(doneProgress)
+      setResult({
+        message: `上传节点 ${step.id} 上传完成：${formatBytes(doneProgress.uploaded)} / ${formatBytes(doneProgress.total)}`,
+        uploadProgress: doneProgress,
+        detail: {data: detailData},
+        run: {id: runID, status: 'running'}
+      })
+    } catch (err) {
+      submittedUploadNodes.delete(step.id)
+      setUploadProgress(current => current?.nodeID === step.id ? {...current, status: 'failed', label: '上传失败'} : current)
+      const message = readableAPIError(err, `上传节点 ${step.id} 上传失败。`)
+      throw Object.assign(new Error(message), {body: err.body})
+    }
+  }
+}
+
+function uploadProgressState(nodeID, files, uploaded, status, label) {
+  const total = uploadFilesTotalSize(files)
+  const percent = total > 0 ? Math.min(100, Math.floor(uploaded / total * 100)) : 0
+  return {
+    nodeID,
+    uploaded,
+    total,
+    percent,
+    status,
+    label,
+    fileCount: files.length
+  }
+}
+
+function UploadProgressInline({progress}) {
+  return (
+    <div className={`uploadProgressInline uploadProgress${capitalizeProgressStatus(progress.status)}`}>
+      <div className="uploadProgressMeta">
+        <span>{progress.label || '上传中'}</span>
+        <span>{formatBytes(progress.uploaded)} / {formatBytes(progress.total)} · {progress.percent}%</span>
+      </div>
+      <div className="uploadProgressTrack" role="progressbar" aria-valuenow={progress.percent} aria-valuemin="0" aria-valuemax="100">
+        <span style={{width: `${progress.percent}%`}} />
+      </div>
+    </div>
+  )
+}
+
+function capitalizeProgressStatus(status) {
+  const value = String(status || 'uploading')
+  return value.charAt(0).toUpperCase() + value.slice(1)
+}
+
+function formatBytes(value) {
+  const size = Number(value || 0)
+  if (size >= 1024 * 1024 * 1024) return `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`
+  if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${size} B`
 }
 
 function buildExecutableParamGroups(nodes, toolMap) {
@@ -1797,6 +2079,7 @@ function newControlFlowNode(control, id, position, onRemove) {
     onRemove
   }
   if (control.type === 'loop') data.loop = defaultLoop()
+  if (control.type === 'upload') data.upload = workflowModel.defaultUpload()
   return {
     id,
     type: 'controlNode',
@@ -1811,6 +2094,10 @@ function defaultLoop() {
     params: {},
     max_iterations: 3
   }
+}
+
+function defaultUpload() {
+  return workflowModel.defaultUpload()
 }
 
 function normalizeLoopConfig(loop) {
@@ -1928,7 +2215,7 @@ function workflowNodeToFlowNode(node, index, onRemove, workflowNodes = []) {
       position: {x: 80 + index * 220, y: 120 + (index % 3) * 90}
     }
   }
-  if (nodeType === 'parallel' || nodeType === 'join' || nodeType === 'loop') {
+  if (nodeType === 'parallel' || nodeType === 'join' || nodeType === 'loop' || nodeType === 'upload') {
     const control = controlNodeCatalog.find(item => item.type === nodeType) || {type: nodeType, title: controlNodeTitle(nodeType)}
     const flowNode = newControlFlowNode(control, node.id, {x: 80 + index * 220, y: 120 + (index % 3) * 90}, onRemove)
     flowNode.data.name = node.name || node.id
@@ -1943,6 +2230,7 @@ function workflowNodeToFlowNode(node, index, onRemove, workflowNodes = []) {
       }
       flowNode.data.loop = loop
     }
+    if (nodeType === 'upload') flowNode.data.upload = workflowModel.normalizeUploadConfig(node.upload || defaultUpload())
     return flowNode
   }
   return {
@@ -1986,6 +2274,7 @@ function buildWorkflowDraft(workflow, nodes, edges, category, parameters) {
           name: node.data.name || node.id
         }
         if (node.data.controlType === 'loop') draftNode.loop = normalizeLoopConfig(node.data.loop || defaultLoop())
+        if (node.data.controlType === 'upload') draftNode.upload = workflowModel.normalizeUploadConfig(node.data.upload || defaultUpload())
         return draftNode
       }
       return {
@@ -2206,6 +2495,10 @@ function validateControlDraft(nodes, edges, tools = []) {
       if (loop.tool && !toolMap.has(loop.tool)) errors.push(`循环节点 ${node.id} 引用了不存在的工具：${loop.tool}`)
       if (!Number.isInteger(loop.max_iterations) || loop.max_iterations < 1 || loop.max_iterations > 20) errors.push(`循环节点 ${node.id} 的最大循环次数必须在 1 到 20 之间。`)
     }
+    if (node.data.controlType === 'upload') {
+      const targetDir = workflowModel.normalizeUploadTargetDir(node.data.upload?.target_dir || '')
+      if (targetDir.error) errors.push(`上传节点 ${node.id} 的目标子目录无效：${targetDir.error}`)
+    }
     if (node.data.controlType === 'parallel' && !edges.some(edge => edge.source === node.id)) {
       errors.push(`并行分支节点 ${node.id} 至少需要一条出边。`)
     }
@@ -2303,6 +2596,12 @@ function buildMappingSources(workflowParameters, selectedNodeID, nodes, edges) {
     if (!node) return
     sources.push({label: `${nodeID} / 标准输出 stdout`, value: `{{ .steps.${nodeID}.stdout }}`})
     sources.push({label: `${nodeID} / 错误输出 stderr`, value: `{{ .steps.${nodeID}.stderr }}`})
+    if (node.type === 'controlNode' && node.data?.controlType === 'upload') {
+      sources.push({label: `${nodeID} / 上传目录`, value: `{{ .steps.${nodeID}.file.dir }}`})
+      sources.push({label: `${nodeID} / 上传目录（相对路径）`, value: `{{ .steps.${nodeID}.file.relative_dir }}`})
+      sources.push({label: `${nodeID} / 全部文件路径`, value: `{{ .steps.${nodeID}.files.paths }}`})
+      sources.push({label: `${nodeID} / 全部文件名`, value: `{{ .steps.${nodeID}.files.filenames }}`})
+    }
     Object.keys(node.data.params || {}).forEach(name => {
       sources.push({label: `${nodeID} / 参数 ${name}`, value: `{{ .steps.${nodeID}.params.${name} }}`})
     })

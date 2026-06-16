@@ -356,6 +356,10 @@ func (r *Registry) addCategory(category config.Category) {
 }
 
 func normalizePluginTool(root *config.RootConfig, pkg plugin.Package, contributed plugin.Tool, packageDefaultConfig, hostConfig map[string]interface{}) (*config.ToolConfig, string, error) {
+	toolType := strings.TrimSpace(contributed.Type)
+	if toolType == "" {
+		toolType = "shell"
+	}
 	commandEntry := normalizePluginCommandEntry(contributed.Command)
 	if commandHasPath(contributed.Command) {
 		if _, err := plugin.SafePath(pkg.Dir, contributed.Command); err != nil {
@@ -407,7 +411,7 @@ func normalizePluginTool(root *config.RootConfig, pkg plugin.Package, contribute
 		Tags:        contributed.Tags,
 		Help:        contributed.Help,
 		Execution: config.ExecutionConfig{
-			Type:    "shell",
+			Type:    toolType,
 			Entry:   commandEntry,
 			Args:    contributed.Args,
 			Timeout: contributed.Timeout,

@@ -91,6 +91,10 @@ func printWorkflowHelp(out io.Writer, wf *registry.Workflow) {
 			printLoopNodeHelp(out, node)
 			continue
 		}
+		if nodeType == config.WorkflowNodeTypeUpload {
+			printUploadNodeHelp(out, node)
+			continue
+		}
 		fmt.Fprintf(out, "  %s\t工具节点\t工具=%s", node.ID, node.Tool)
 		if node.Name != "" {
 			fmt.Fprintf(out, "\t%s", node.Name)
@@ -169,6 +173,15 @@ func printLoopNodeHelp(out io.Writer, node config.WorkflowNode) {
 	for _, key := range keys {
 		fmt.Fprintf(out, "      %s=%v\n", key, node.Loop.Params[key])
 	}
+}
+
+func printUploadNodeHelp(out io.Writer, node config.WorkflowNode) {
+	fmt.Fprintf(out, "  %s\t编排节点/上传文件", node.ID)
+	if node.Name != "" {
+		fmt.Fprintf(out, "\t%s", node.Name)
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "    目标目录: %s\n", fallbackText(node.Upload.TargetDir, "默认"))
 }
 
 func printParameters(out io.Writer, params []config.Parameter) {

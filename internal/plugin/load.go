@@ -127,6 +127,13 @@ func validateTool(pkg Package, tool Tool, seen map[string]bool, cfg config.Plugi
 	if strings.TrimSpace(tool.Category) == "" {
 		return fmt.Errorf("插件工具 %s 的分类必填", tool.ID)
 	}
+	toolType := strings.TrimSpace(tool.Type)
+	if toolType == "" {
+		toolType = "shell"
+	}
+	if toolType != "shell" {
+		return fmt.Errorf("插件工具 %s 的 type 不支持: %s", tool.ID, tool.Type)
+	}
 	if strings.TrimSpace(tool.Command) == "" {
 		return fmt.Errorf("插件工具 %s 的 command 必填", tool.ID)
 	}

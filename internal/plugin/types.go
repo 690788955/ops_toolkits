@@ -29,6 +29,7 @@ type Tool struct {
 	Name           string                 `yaml:"name" json:"name"`
 	Description    string                 `yaml:"description" json:"description"`
 	Version        string                 `yaml:"version" json:"version"`
+	Type           string                 `yaml:"type" json:"type"`
 	Category       string                 `yaml:"category" json:"category"`
 	Tags           []string               `yaml:"tags" json:"tags"`
 	Help           config.HelpConfig      `yaml:"help" json:"help"`

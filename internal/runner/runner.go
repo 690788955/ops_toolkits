@@ -25,6 +25,8 @@ type Runner struct {
 	RunsDir  string
 }
 
+const workflowUploadResultFile = "upload-result.json"
+
 type RunRecord struct {
 	ID        string                 `json:"id"`
 	Kind      string                 `json:"kind"`
@@ -83,6 +85,32 @@ func (r *Runner) RunToolValues(ctx context.Context, id string, params map[string
 	return record, err
 }
 
+func (r *Runner) StartToolValues(ctx context.Context, id string, params map[string]interface{}, out, errOut io.Writer) (*RunRecord, error) {
+	tool, err := r.Registry.Tool(id)
+	if err != nil {
+		return nil, err
+	}
+	finalValues, finalParams, sensitivePaths, err := r.resolveToolValues(tool, params)
+	if err != nil {
+		return nil, err
+	}
+	record := newRecord("tool", id, config.RedactSensitive(finalValues, sensitivePaths))
+	runDir, err := r.prepareRun(record.ID)
+	if err != nil {
+		return record, err
+	}
+	if err := r.saveRecord(runDir, record); err != nil {
+		return record, err
+	}
+	response := *record
+	go func() {
+		runErr := r.executeTool(ctx, tool, finalValues, finalParams, runDir, out, errOut)
+		finishRecord(record, runErr)
+		_ = r.saveRecord(runDir, record)
+	}()
+	return &response, nil
+}
+
 func (r *Runner) RunWorkflow(ctx context.Context, id string, params map[string]string, out, errOut io.Writer) (*RunRecord, error) {
 	return r.RunWorkflowWithConfirmation(ctx, id, params, false, out, errOut)
 }
@@ -96,14 +124,22 @@ func (r *Runner) RunWorkflowWithConfirmation(ctx context.Context, id string, par
 }
 
 func (r *Runner) RunWorkflowConfigWithConfirmation(ctx context.Context, wf *config.WorkflowConfig, params map[string]string, confirmed bool, out, errOut io.Writer) (*RunRecord, error) {
+	return r.RunWorkflowConfigWithUploads(ctx, wf, params, confirmed, nil, out, errOut)
+}
+
+func (r *Runner) RunWorkflowConfigWithUploads(ctx context.Context, wf *config.WorkflowConfig, params map[string]string, confirmed bool, uploads map[string]config.WorkflowUploadResult, out, errOut io.Writer) (*RunRecord, error) {
 	record, finalParams, runDir, err := r.prepareWorkflowRun(wf, params)
 	if err != nil {
 		return record, err
 	}
-	return r.runWorkflowPrepared(ctx, wf, finalParams, confirmed, out, errOut, record, runDir)
+	return r.runWorkflowPrepared(ctx, wf, finalParams, confirmed, uploads, out, errOut, record, runDir)
 }
 
 func (r *Runner) StartWorkflowConfigWithConfirmation(ctx context.Context, wf *config.WorkflowConfig, params map[string]string, confirmed bool, out, errOut io.Writer) (*RunRecord, error) {
+	return r.StartWorkflowConfigWithUploads(ctx, wf, params, confirmed, nil, out, errOut)
+}
+
+func (r *Runner) StartWorkflowConfigWithUploads(ctx context.Context, wf *config.WorkflowConfig, params map[string]string, confirmed bool, uploads map[string]config.WorkflowUploadResult, out, errOut io.Writer) (*RunRecord, error) {
 	record, finalParams, runDir, err := r.prepareWorkflowRun(wf, params)
 	if err != nil {
 		return record, err
@@ -113,7 +149,7 @@ func (r *Runner) StartWorkflowConfigWithConfirmation(ctx context.Context, wf *co
 	}
 	response := *record
 	go func() {
-		_, _ = r.runWorkflowPrepared(ctx, wf, finalParams, confirmed, out, errOut, record, runDir)
+		_, _ = r.runWorkflowPrepared(ctx, wf, finalParams, confirmed, uploads, out, errOut, record, runDir)
 	}()
 	return &response, nil
 }
@@ -135,7 +171,7 @@ func (r *Runner) prepareWorkflowRun(wf *config.WorkflowConfig, params map[string
 	return record, finalParams, runDir, nil
 }
 
-func (r *Runner) runWorkflowPrepared(ctx context.Context, wf *config.WorkflowConfig, finalParams map[string]string, confirmed bool, out, errOut io.Writer, record *RunRecord, runDir string) (*RunRecord, error) {
+func (r *Runner) runWorkflowPrepared(ctx context.Context, wf *config.WorkflowConfig, finalParams map[string]string, confirmed bool, uploads map[string]config.WorkflowUploadResult, out, errOut io.Writer, record *RunRecord, runDir string) (*RunRecord, error) {
 	_ = r.saveRecord(runDir, record)
 	ordered, err := registry.OrderWorkflow(wf)
 	if err != nil {
@@ -208,6 +244,43 @@ func (r *Runner) runWorkflowPrepared(ctx context.Context, wf *config.WorkflowCon
 		if nodeType == config.WorkflowNodeTypeParallel || nodeType == config.WorkflowNodeTypeJoin {
 			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "succeeded", StartedAt: time.Now(), EndedAt: time.Now()}
 			record.Steps = append(record.Steps, stepRecord)
+			_ = r.saveRecord(runDir, record)
+			activatePlainBranches(node.ID, edgesByFrom, active)
+			continue
+		}
+		if nodeType == config.WorkflowNodeTypeUpload {
+			status := "waiting"
+			if hasUploadResult(uploads, node.ID) {
+				status = "running"
+			}
+			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: status, StartedAt: time.Now()}
+			stepRunDir := filepath.Join(runDir, node.ID)
+			stepIndex := appendStepRecord(record, stepRecord)
+			_ = r.saveRecord(runDir, record)
+			upload, uploadErr := waitForUploadNode(ctx, node, uploads, stepRunDir)
+			stepRecord.Status = "running"
+			record.Steps[stepIndex] = stepRecord
+			_ = r.saveRecord(runDir, record)
+			if uploadErr == nil {
+				uploadErr = executeUploadNode(node, upload, stepRunDir)
+			}
+			stepRecord.EndedAt = time.Now()
+			if uploadErr != nil {
+				if errors.Is(uploadErr, context.Canceled) {
+					stepRecord.Status = "cancelled"
+					stepRecord.Error = "运行已取消"
+				} else {
+					stepRecord.Status = "failed"
+					stepRecord.Error = uploadErr.Error()
+				}
+				record.Steps[stepIndex] = stepRecord
+				_ = r.saveRecord(runDir, record)
+				err = uploadErr
+				break
+			}
+			addUploadContext(workflowContext, node.ID, upload, stepRunDir)
+			stepRecord.Status = "succeeded"
+			record.Steps[stepIndex] = stepRecord
 			_ = r.saveRecord(runDir, record)
 			activatePlainBranches(node.ID, edgesByFrom, active)
 			continue
@@ -334,6 +407,9 @@ func workflowNodeType(node config.WorkflowNode) string {
 	if node.Loop.Tool != "" || node.Loop.Target != "" || node.Loop.MaxIterations != 0 || len(node.Loop.Params) > 0 {
 		return config.WorkflowNodeTypeLoop
 	}
+	if node.Upload.TargetDir != "" {
+		return config.WorkflowNodeTypeUpload
+	}
 	return ""
 }
 
@@ -448,10 +524,223 @@ func loopToolID(node config.WorkflowNode, nodes map[string]config.WorkflowNode) 
 	return ""
 }
 
+func hasUploadResult(uploads map[string]config.WorkflowUploadResult, nodeID string) bool {
+	if uploads == nil {
+		return false
+	}
+	upload, ok := uploads[nodeID]
+	return ok && upload.ID != ""
+}
+
+func waitForUploadNode(ctx context.Context, node config.WorkflowNode, uploads map[string]config.WorkflowUploadResult, runDir string) (config.WorkflowUploadResult, error) {
+	if uploads != nil {
+		if upload, ok := uploads[node.ID]; ok {
+			return upload, nil
+		}
+	}
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return config.WorkflowUploadResult{}, err
+	}
+	appendUploadStdout(runDir, fmt.Sprintf("WAIT 上传节点 %s 等待选择的文件上传到平台", node.ID))
+	resultPath := filepath.Join(runDir, workflowUploadResultFile)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		upload, err := readWorkflowUploadResult(resultPath)
+		if err == nil {
+			return upload, nil
+		}
+		if !os.IsNotExist(err) {
+			return config.WorkflowUploadResult{}, fmt.Errorf("上传节点 %s 读取上传结果失败: %w", node.ID, err)
+		}
+		select {
+		case <-ctx.Done():
+			return config.WorkflowUploadResult{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func readWorkflowUploadResult(path string) (config.WorkflowUploadResult, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return config.WorkflowUploadResult{}, err
+	}
+	var upload config.WorkflowUploadResult
+	if err := json.Unmarshal(data, &upload); err != nil {
+		return config.WorkflowUploadResult{}, err
+	}
+	return upload, nil
+}
+
+func WriteWorkflowUploadResult(runDir, nodeID string, upload config.WorkflowUploadResult) error {
+	stepDir := filepath.Join(runDir, nodeID)
+	if err := os.MkdirAll(stepDir, 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(upload, "", "  ")
+	if err != nil {
+		return err
+	}
+	tempPath := filepath.Join(stepDir, workflowUploadResultFile+".tmp")
+	resultPath := filepath.Join(stepDir, workflowUploadResultFile)
+	if err := os.WriteFile(tempPath, data, 0o644); err != nil {
+		return err
+	}
+	if err := appendUploadStdout(stepDir, fmt.Sprintf("LOG 上传节点 %s 已接收上传文件：%s，文件数：%d，总大小：%d bytes", nodeID, upload.FileName, upload.Count, upload.TotalSize)); err != nil {
+		return err
+	}
+	for index, item := range normalizedUploadFiles(upload) {
+		if err := appendUploadStdout(stepDir, fmt.Sprintf("LOG 上传文件 %d：%s -> %s (%d bytes)", index+1, item.FileName, item.RelativePath, item.Size)); err != nil {
+			return err
+		}
+	}
+	return os.Rename(tempPath, resultPath)
+}
+
 func addLoopContext(context map[string]string, nodeID string, maxIterations int, runDir string) {
 	context["steps."+nodeID+".loop.iterations"] = fmt.Sprint(maxIterations)
 	context["steps."+nodeID+".stdout"] = strings.TrimSpace(readLoopText(runDir, nodeID, "stdout.log", maxIterations))
 	context["steps."+nodeID+".stderr"] = strings.TrimSpace(readLoopText(runDir, nodeID, "stderr.log", maxIterations))
+}
+
+func executeUploadNode(node config.WorkflowNode, upload config.WorkflowUploadResult, runDir string) error {
+	if upload.ID == "" || upload.Path == "" || upload.FileName == "" || upload.Count == 0 && len(upload.Files) == 0 {
+		runErr := fmt.Errorf("上传节点 %s 缺少上传文件", node.ID)
+		_ = writeUploadStderr(runDir, runErr)
+		return runErr
+	}
+	data, err := json.Marshal(upload)
+	if err != nil {
+		runErr := fmt.Errorf("上传节点 %s 生成上传结果失败: %w", node.ID, err)
+		_ = writeUploadStderr(runDir, runErr)
+		return runErr
+	}
+	if err := appendUploadStdout(runDir, fmt.Sprintf("SUCCESS 上传节点 %s 上传完成，平台路径：%s", node.ID, upload.RelativePath)); err != nil {
+		return err
+	}
+	if upload.Path != "" {
+		if err := appendUploadStdout(runDir, fmt.Sprintf("DIR 上传目录（绝对路径）：%s", filepath.Dir(upload.Path))); err != nil {
+			return err
+		}
+	}
+	if upload.RelativePath != "" {
+		if err := appendUploadStdout(runDir, fmt.Sprintf("DIR 上传目录（相对路径）：%s", filepath.ToSlash(filepath.Dir(upload.RelativePath)))); err != nil {
+			return err
+		}
+	}
+	if err := appendUploadStdout(runDir, "JSON "+string(data)); err != nil {
+		return err
+	}
+	return writeUploadStderr(runDir, nil)
+}
+
+func writeUploadLogs(runDir string, stdout []byte, runErr error) error {
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return err
+	}
+	if stdout == nil {
+		stdout = []byte{}
+	}
+	if len(stdout) > 0 && stdout[len(stdout)-1] != '\n' {
+		stdout = append(stdout, '\n')
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "stdout.log"), stdout, 0o644); err != nil {
+		return err
+	}
+	stderr := []byte{}
+	if runErr != nil {
+		stderr = []byte(runErr.Error() + "\n")
+	}
+	return os.WriteFile(filepath.Join(runDir, "stderr.log"), stderr, 0o644)
+}
+
+func appendUploadStdout(runDir, line string) error {
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return err
+	}
+	if !strings.HasSuffix(line, "\n") {
+		line += "\n"
+	}
+	file, err := os.OpenFile(filepath.Join(runDir, "stdout.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = file.WriteString(line)
+	return err
+}
+
+func writeUploadStderr(runDir string, runErr error) error {
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return err
+	}
+	stderr := []byte{}
+	if runErr != nil {
+		stderr = []byte(runErr.Error() + "\n")
+	}
+	return os.WriteFile(filepath.Join(runDir, "stderr.log"), stderr, 0o644)
+}
+
+func addUploadContext(context map[string]string, nodeID string, upload config.WorkflowUploadResult, runDir string) {
+	prefix := "steps." + nodeID + "."
+	context[prefix+"stdout"] = strings.TrimSpace(readTextFile(filepath.Join(runDir, "stdout.log")))
+	context[prefix+"stderr"] = strings.TrimSpace(readTextFile(filepath.Join(runDir, "stderr.log")))
+	context[prefix+"file.id"] = upload.ID
+	context[prefix+"file.filename"] = upload.FileName
+	context[prefix+"file.path"] = upload.Path
+	context[prefix+"file.relative_path"] = upload.RelativePath
+	context[prefix+"file.size"] = fmt.Sprint(upload.Size)
+	if upload.Path != "" {
+		context[prefix+"file.dir"] = filepath.Dir(upload.Path)
+	}
+	if upload.RelativePath != "" {
+		context[prefix+"file.relative_dir"] = filepath.ToSlash(filepath.Dir(upload.RelativePath))
+	}
+	files := normalizedUploadFiles(upload)
+	context[prefix+"files.count"] = fmt.Sprint(len(files))
+	context[prefix+"files.total_size"] = fmt.Sprint(totalUploadSize(files))
+	context[prefix+"files.paths"] = strings.Join(uploadFileValues(files, func(item config.WorkflowUploadFile) string { return item.Path }), ", ")
+	context[prefix+"files.relative_paths"] = strings.Join(uploadFileValues(files, func(item config.WorkflowUploadFile) string { return item.RelativePath }), ", ")
+	context[prefix+"files.filenames"] = strings.Join(uploadFileValues(files, func(item config.WorkflowUploadFile) string { return item.FileName }), ", ")
+	for index, item := range files {
+		itemPrefix := fmt.Sprintf("%sfiles.%d.", prefix, index)
+		context[itemPrefix+"filename"] = item.FileName
+		context[itemPrefix+"path"] = item.Path
+		context[itemPrefix+"relative_path"] = item.RelativePath
+		context[itemPrefix+"size"] = fmt.Sprint(item.Size)
+	}
+}
+
+func normalizedUploadFiles(upload config.WorkflowUploadResult) []config.WorkflowUploadFile {
+	if len(upload.Files) > 0 {
+		return upload.Files
+	}
+	if upload.FileName == "" && upload.Path == "" {
+		return nil
+	}
+	return []config.WorkflowUploadFile{{
+		FileName:     upload.FileName,
+		Path:         upload.Path,
+		RelativePath: upload.RelativePath,
+		Size:         upload.Size,
+	}}
+}
+
+func totalUploadSize(files []config.WorkflowUploadFile) int64 {
+	var total int64
+	for _, item := range files {
+		total += item.Size
+	}
+	return total
+}
+
+func uploadFileValues(files []config.WorkflowUploadFile, value func(config.WorkflowUploadFile) string) []string {
+	out := make([]string, 0, len(files))
+	for _, item := range files {
+		out = append(out, value(item))
+	}
+	return out
 }
 
 func readLoopText(runDir, nodeID, fileName string, maxIterations int) string {
@@ -772,7 +1061,32 @@ func (r *Runner) saveRecord(dir string, record *RunRecord) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "result.json"), data, 0o644)
+	tempPath := filepath.Join(dir, fmt.Sprintf("result.json.%d.tmp", time.Now().UnixNano()))
+	resultPath := filepath.Join(dir, "result.json")
+	if err := os.WriteFile(tempPath, data, 0o644); err != nil {
+		return err
+	}
+	var lastErr error
+	for attempt := 0; attempt < 25; attempt++ {
+		if err := os.Rename(tempPath, resultPath); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if err := os.Remove(resultPath); err != nil && !os.IsNotExist(err) {
+			lastErr = err
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		if err := os.Rename(tempPath, resultPath); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = os.Remove(tempPath)
+	return lastErr
 }
 
 func newRecord(kind, target string, params map[string]interface{}) *RunRecord {
@@ -798,7 +1112,7 @@ func finishRecord(record *RunRecord, err error) {
 
 func markRunningStepsCancelled(record *RunRecord) {
 	for index := range record.Steps {
-		if record.Steps[index].Status != "running" {
+		if record.Steps[index].Status != "running" && record.Steps[index].Status != "waiting" {
 			continue
 		}
 		record.Steps[index].Status = "cancelled"
