@@ -113,6 +113,131 @@ contributes:
 	}
 }
 
+func TestValidatePackageValidatesToolOutputs(t *testing.T) {
+	dir := t.TempDir()
+	pkg := writePlugin(t, dir, "outputs", `id: vendor.outputs
+name: Outputs
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.outputs.tool
+      category: demo
+      command: scripts/run.sh
+      outputs:
+        - name: result
+          type: string
+          required: true
+          json_path: data.result
+`)
+	if err := os.MkdirAll(filepath.Join(dir, "plugins", "outputs", "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plugins", "outputs", "scripts", "run.sh"), []byte("#!/usr/bin/env bash\necho run\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePackage(pkg); err != nil {
+		t.Fatalf("ValidatePackage returned error: %v", err)
+	}
+}
+
+func TestValidatePackageRejectsInvalidToolOutputs(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "plugins", "outputs", "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plugins", "outputs", "scripts", "run.sh"), []byte("#!/usr/bin/env bash\necho run\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		manifest string
+		want     string
+	}{
+		{
+			name: "missing name",
+			manifest: `id: vendor.outputs
+name: Outputs
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.outputs.tool
+      category: demo
+      command: scripts/run.sh
+      outputs:
+        - json_path: data.result
+`,
+			want: "outputs.name 必填",
+		},
+		{
+			name: "duplicate name",
+			manifest: `id: vendor.outputsdup
+name: Outputs
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.outputsdup.tool
+      category: demo
+      command: scripts/run.sh
+      outputs:
+        - name: result
+          json_path: data.result
+        - name: result
+          json_path: data.other
+`,
+			want: "outputs.name 重复",
+		},
+		{
+			name: "missing json path",
+			manifest: `id: vendor.outputspath
+name: Outputs
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.outputspath.tool
+      category: demo
+      command: scripts/run.sh
+      outputs:
+        - name: result
+`,
+			want: "json_path 必填",
+		},
+		{
+			name: "invalid type",
+			manifest: `id: vendor.outputstype
+name: Outputs
+version: 1.0.0
+contributes:
+  tools:
+    - id: vendor.outputstype.tool
+      category: demo
+      command: scripts/run.sh
+      outputs:
+        - name: result
+          type: object
+          json_path: data.result
+`,
+			want: "type 只支持",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pkg := writePlugin(t, dir, tc.name, tc.manifest)
+			pluginDir := filepath.Join(dir, "plugins", tc.name)
+			if err := os.MkdirAll(filepath.Join(pluginDir, "scripts"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(pluginDir, "scripts", "run.sh"), []byte("#!/usr/bin/env bash\necho run\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			err := ValidatePackage(pkg)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidatePackage error = %v, want %s", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidatePackageAllowsConfigDirOutsidePlugin(t *testing.T) {
 	dir := t.TempDir()
 	pkg := writePlugin(t, dir, "shared", `id: vendor.shared

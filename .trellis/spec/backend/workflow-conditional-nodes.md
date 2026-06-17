@@ -216,3 +216,86 @@ Why correct:
 - Outgoing edges from condition nodes must display their selected case label.
 - Save/run/validate preflight should catch missing input, empty cases, duplicate case IDs, illegal operators, missing edge case, and dangling case references before calling the backend.
 - Load/save mapping must preserve all condition fields and edge `case` labels; do not drop unknown branch metadata during round-trip.
+
+## Scenario: Rerun a Workflow Node in an Existing Run
+
+### 1. Scope / Trigger
+
+- Trigger: adding or changing node-level workflow rerun behavior, run record reuse, or Web/API rerun actions.
+- Applies when changing `/api/runs/{runID}/nodes/{nodeID}/rerun`, `runner.RerunWorkflowNode*`, run record persistence, or canvas rerun UI.
+
+### 2. Signatures
+
+- API: `POST /api/runs/{runID}/nodes/{nodeID}/rerun`
+- Request body reuses the workflow run request shape: `workflow?`, `params?`, and `confirm`.
+- Runner entrypoints:
+  - `RerunWorkflowNode(ctx, wf, record, runDir, nodeID, confirmed, out, errOut)`
+  - `RerunWorkflowNodeWithParams(ctx, wf, record, runDir, nodeID, params, confirmed, out, errOut)`
+
+### 3. Contracts
+
+- The route is POST-only; non-POST mutating methods must return `405 method not allowed`.
+- The target run must already exist and must not currently be active or recorded as `running`.
+- If a workflow draft is supplied, `workflow.id` must match the original run record target.
+- Rerun reuses the same `runID` and run directory, removes records/log directories for the selected node and its downstream nodes, then executes only that affected subgraph.
+- Unaffected successful upstream steps rebuild workflow context from existing step logs and upload result files.
+- Upload nodes inside the affected subgraph require an existing reusable upload result; rerun must fail clearly instead of silently waiting for a new upload.
+- Confirmation checks still apply to workflow/tool confirmation requirements.
+
+### 4. Validation & Error Matrix
+
+| Condition | Expected behavior |
+|---|---|
+| Non-POST mutating rerun request | `405 method not allowed` |
+| Missing run ID or node ID | `404 not found` |
+| Run is active or `running` | reject with readable Chinese conflict/error |
+| Run record is not a workflow | reject before execution |
+| Requested node does not exist in workflow | reject with node-specific Chinese error |
+| Supplied workflow ID differs from run target | reject with workflow mismatch error |
+| Required workflow params are missing after override merge | reject before modifying affected steps |
+| Affected upload node has no reusable upload result | fail that node and return a clear upload-result error |
+
+### 5. Good/Base/Bad Cases
+
+- Good: rerun node `second` in a completed `first -> second -> third` workflow; `first` logs remain unchanged and `second`/`third` are rewritten.
+- Base: rerun with new workflow params; affected nodes resolve the new params while unaffected upstream logs remain intact.
+- Bad: `PUT /api/runs/run-1/nodes/step-1/rerun` must not trigger rerun execution or request-body decoding.
+
+### 6. Tests Required
+
+- API test asserts rerun overwrites the same run ID and returns updated run detail.
+- API test asserts params override affects rerun output.
+- API test asserts non-POST mutating methods return `405`.
+- Runner test asserts only selected/downstream nodes are removed and rerun.
+- Runner test asserts affected upload nodes without reusable upload results fail explicitly.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+if strings.Contains(path, "/rerun") {
+    handleRunNodeRerun(w, req, state, reg, runID, nodeID)
+}
+```
+
+Why wrong:
+
+- It can route non-POST methods into a mutating operation.
+- It does not preserve the existing `/api/runs/{id}` read contract.
+
+#### Correct
+
+```go
+if req.Method == http.MethodPost {
+    if runID, nodeID, ok := parseRunNodeRerunPath(id); ok {
+        handleRunNodeRerun(w, req, state, reg, runID, nodeID)
+        return
+    }
+}
+```
+
+Why correct:
+
+- Rerun remains an explicit mutating POST action.
+- GET requests keep their existing run-detail behavior.

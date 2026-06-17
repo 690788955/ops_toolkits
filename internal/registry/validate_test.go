@@ -189,6 +189,49 @@ func TestValidateWorkflowAcceptsUploadNode(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowAcceptsExtractConfigNode(t *testing.T) {
+	reg := &Registry{Tools: map[string]*Tool{}}
+	wf := &config.WorkflowConfig{
+		ID: "demo.extract",
+		Nodes: []config.WorkflowNode{
+			{ID: "upload", Type: config.WorkflowNodeTypeUpload, Upload: config.WorkflowUpload{TargetDir: "assets"}},
+			{ID: "extract", Type: config.WorkflowNodeTypeExtractConfig, Extract: config.WorkflowExtractConfig{FileName: "{{ .steps.upload.file.filename }}", TargetPath: "conf/app.yaml"}},
+		},
+		Edges: []config.WorkflowEdge{{From: "upload", To: "extract"}},
+	}
+
+	if err := reg.ValidateWorkflow(wf); err != nil {
+		t.Fatalf("ValidateWorkflow error = %v", err)
+	}
+}
+
+func TestValidateWorkflowAcceptsDirectoryExtractConfigNode(t *testing.T) {
+	reg := &Registry{Tools: map[string]*Tool{}}
+	wf := &config.WorkflowConfig{
+		ID: "demo.extract.dir",
+		Nodes: []config.WorkflowNode{
+			{ID: "upload", Type: config.WorkflowNodeTypeUpload, Upload: config.WorkflowUpload{TargetDir: "assets"}},
+			{
+				ID:   "extract",
+				Type: config.WorkflowNodeTypeExtractConfig,
+				Extract: config.WorkflowExtractConfig{
+					SourceType: "directory",
+					SourceDir:  "{{ .steps.upload.file.relative_dir }}",
+					Files: []config.WorkflowExtractConfigFile{
+						{SourcePath: "conf/app.yaml", Label: "应用配置", Replace: true},
+						{SourcePath: "conf/db.yaml", Label: "数据库配置"},
+					},
+				},
+			},
+		},
+		Edges: []config.WorkflowEdge{{From: "upload", To: "extract"}},
+	}
+
+	if err := reg.ValidateWorkflow(wf); err != nil {
+		t.Fatalf("ValidateWorkflow error = %v", err)
+	}
+}
+
 func TestValidateWorkflowRejectsInvalidUploadNode(t *testing.T) {
 	reg := &Registry{Tools: map[string]*Tool{"demo.tool": {}}}
 	cases := []struct {
@@ -204,6 +247,32 @@ func TestValidateWorkflowRejectsInvalidUploadNode(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := reg.ValidateWorkflow(&config.WorkflowConfig{ID: "demo.upload", Nodes: []config.WorkflowNode{tc.node}})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidateWorkflow error = %v, want %s", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateWorkflowRejectsInvalidExtractConfigNode(t *testing.T) {
+	reg := &Registry{Tools: map[string]*Tool{}}
+	cases := []struct {
+		name string
+		node config.WorkflowNode
+		want string
+	}{
+		{name: "tool forbidden", node: config.WorkflowNode{ID: "extract", Type: config.WorkflowNodeTypeExtractConfig, Tool: "demo.tool", Extract: config.WorkflowExtractConfig{FileName: "a.yaml", TargetPath: "b.yaml"}}, want: "不能配置 tool"},
+		{name: "missing file name", node: config.WorkflowNode{ID: "extract", Type: config.WorkflowNodeTypeExtractConfig, Extract: config.WorkflowExtractConfig{TargetPath: "b.yaml"}}, want: "file_name 必填"},
+		{name: "bad file name", node: config.WorkflowNode{ID: "extract", Type: config.WorkflowNodeTypeExtractConfig, Extract: config.WorkflowExtractConfig{FileName: "../bad.yaml", TargetPath: "b.yaml"}}, want: "file_name 不安全"},
+		{name: "bad target path", node: config.WorkflowNode{ID: "extract", Type: config.WorkflowNodeTypeExtractConfig, Extract: config.WorkflowExtractConfig{FileName: "a.yaml", TargetPath: "../bad.yaml"}}, want: "target_path 不安全"},
+		{name: "directory missing source dir", node: config.WorkflowNode{ID: "extract", Type: config.WorkflowNodeTypeExtractConfig, Extract: config.WorkflowExtractConfig{SourceType: "directory", Files: []config.WorkflowExtractConfigFile{{SourcePath: "a.yaml"}}}}, want: "source_dir 必填"},
+		{name: "directory missing files", node: config.WorkflowNode{ID: "extract", Type: config.WorkflowNodeTypeExtractConfig, Extract: config.WorkflowExtractConfig{SourceType: "directory", SourceDir: "conf"}}, want: "files 必填"},
+		{name: "directory bad source path", node: config.WorkflowNode{ID: "extract", Type: config.WorkflowNodeTypeExtractConfig, Extract: config.WorkflowExtractConfig{SourceType: "directory", SourceDir: "conf", Files: []config.WorkflowExtractConfigFile{{SourcePath: "../bad.yaml"}}}}, want: "source_path 不安全"},
+		{name: "directory templated source path", node: config.WorkflowNode{ID: "extract", Type: config.WorkflowNodeTypeExtractConfig, Extract: config.WorkflowExtractConfig{SourceType: "directory", SourceDir: "conf", Files: []config.WorkflowExtractConfigFile{{SourcePath: "{{ .bad }}"}}}}, want: "source_path 不能包含模板"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := reg.ValidateWorkflow(&config.WorkflowConfig{ID: "demo.extract", Nodes: []config.WorkflowNode{tc.node}})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("ValidateWorkflow error = %v, want %s", err, tc.want)
 			}

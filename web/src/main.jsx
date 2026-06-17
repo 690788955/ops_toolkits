@@ -5,12 +5,12 @@ import './styles.css'
 import * as yaml from 'js-yaml'
 import {deleteJSON, fetchJSON, fetchRunDetail, postJSON, postPluginZip, putJSON} from './api.js'
 import {buildTextDiff} from './configDiff.js'
-import {combineWorkflowStepLogs, filterEntries, readableAPIError, summarizeAPIResponse, tagsForEntries} from './utils.js'
+import {filterEntries, readableAPIError, summarizeAPIResponse, tagsForEntries} from './utils.js'
 import FileUploadInput from './FileUploadInput.jsx'
-import LiveRunTerminal from './LiveRunTerminal.jsx'
 import {normalizeLogFontSize} from './logUtils.js'
 
 const WorkflowEditor = React.lazy(() => import('./workflow/WorkflowEditor.jsx'))
+const LiveRunTerminal = React.lazy(() => import('./LiveRunTerminal.jsx'))
 
 function App() {
   const [catalog, setCatalog] = useState(null)
@@ -24,6 +24,7 @@ function App() {
   const [pluginModalOpen, setPluginModalOpen] = useState(false)
   const [pluginUploadState, setPluginUploadState] = useState({message: '请选择插件 ZIP 包。'})
   const [configSelectedPlugin, setConfigSelectedPlugin] = useState(null)
+  const [configSelectedWorkflow, setConfigSelectedWorkflow] = useState(null)
   const [platformSettingsOpen, setPlatformSettingsOpen] = useState(false)
   const [globalEnvOpen, setGlobalEnvOpen] = useState(false)
   const [resultExpanded, setResultExpanded] = useState(false)
@@ -64,7 +65,9 @@ function App() {
 
   const hasConfigTab = useMemo(() => {
     const tools = catalog?.tools || []
-    return tools.some(tool => (tool.config_file_entries && tool.config_file_entries.length > 0) || (tool.config_files && tool.config_files.length > 0))
+    const workflows = catalog?.workflows || []
+    return tools.some(tool => (tool.config_file_entries && tool.config_file_entries.length > 0) || (tool.config_files && tool.config_files.length > 0)) ||
+      workflows.some(workflow => (workflow.config_files || []).length > 0)
   }, [catalog])
 
   const toolEntries = useMemo(() => {
@@ -210,7 +213,7 @@ function App() {
         <div className="tabs">
           <button className={activeTab === 'tools' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('tools'); setSelected(null); setActiveTag(''); resetResult() }}>工具</button>
           <button className={activeTab === 'workflows' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('workflows'); setSelected(null); setActiveTag(''); resetResult() }}>工作流</button>
-          {hasConfigTab && <button className={activeTab === 'config' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('config'); setSelected(null); setActiveTag(''); setConfigSelectedPlugin(null); resetResult() }}>配置</button>}
+          {hasConfigTab && <button className={activeTab === 'config' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('config'); setSelected(null); setActiveTag(''); setConfigSelectedPlugin(null); setConfigSelectedWorkflow(null); resetResult() }}>配置</button>}
           <button className={activeTab === 'runs' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('runs'); setSelected(null); setActiveTag(''); resetResult() }}>运行记录</button>
         </div>
 
@@ -232,7 +235,15 @@ function App() {
         ) : activeTab === 'runs' ? (
           <RunHistoryPanel />
         ) : (activeTab === 'config' && hasConfigTab) ? (
-          <ConfigPanel catalog={catalog} activeCategory={activeCategory} configSelectedPlugin={configSelectedPlugin} setConfigSelectedPlugin={setConfigSelectedPlugin} refreshCatalog={refreshCatalog} />
+          <ConfigPanel
+            catalog={catalog}
+            activeCategory={activeCategory}
+            configSelectedPlugin={configSelectedPlugin}
+            setConfigSelectedPlugin={setConfigSelectedPlugin}
+            configSelectedWorkflow={configSelectedWorkflow}
+            setConfigSelectedWorkflow={setConfigSelectedWorkflow}
+            refreshCatalog={refreshCatalog}
+          />
         ) : (
           <RunPanel entries={entries} totalEntries={toolEntries.length} selected={selected} params={params} setParams={setParams} selectEntry={selectEntry} runSelected={runSelected} searchText={searchText} setSearchText={setSearchText} activeTag={activeTag} setActiveTag={setActiveTag} availableTags={availableTags} />
         )}
@@ -442,8 +453,10 @@ function formatRunTime(value) {
   return date.toLocaleString()
 }
 
-function ConfigPanel({catalog, activeCategory, configSelectedPlugin, setConfigSelectedPlugin, refreshCatalog}) {
-  const configItems = useMemo(() => buildConfigItems(catalog, activeCategory), [catalog, activeCategory])
+function ConfigPanel({catalog, activeCategory, configSelectedPlugin, setConfigSelectedPlugin, configSelectedWorkflow, setConfigSelectedWorkflow, refreshCatalog}) {
+  const [configView, setConfigView] = useState('tools')
+  const toolConfigItems = useMemo(() => buildToolConfigItems(catalog, activeCategory), [catalog, activeCategory])
+  const workflowConfigItems = useMemo(() => buildWorkflowConfigItems(catalog, activeCategory), [catalog, activeCategory])
 
   if (configSelectedPlugin) {
     return (
@@ -456,21 +469,46 @@ function ConfigPanel({catalog, activeCategory, configSelectedPlugin, setConfigSe
       />
     )
   }
+  if (configSelectedWorkflow) {
+    return (
+      <WorkflowConfigPanel
+        workflow={configSelectedWorkflow}
+        onBack={() => setConfigSelectedWorkflow(null)}
+        onSaved={async () => {
+          await refreshCatalog()
+        }}
+      />
+    )
+  }
+
+  const activeItems = configView === 'tools' ? toolConfigItems : workflowConfigItems
+  const activeTitle = configView === 'tools' ? '工具配置' : '工作流配置'
+  const activeEmptyText = configView === 'tools'
+    ? '当前没有工具配置。工具配置只维护插件工具声明的一份配置文件。'
+    : '当前没有工作流配置。'
 
   return (
-    <div className="grid">
+    <div className="configPanelShell">
+      <div className="tabs configSubTabs">
+        <button className={configView === 'tools' ? 'tab active' : 'tab'} onClick={() => setConfigView('tools')}>工具配置 <span>{toolConfigItems.length}</span></button>
+        <button className={configView === 'workflows' ? 'tab active' : 'tab'} onClick={() => setConfigView('workflows')}>工作流配置 <span>{workflowConfigItems.length}</span></button>
+      </div>
       <section className="card listCard">
         <div className="cardHeader">
-          <h3>配置项</h3>
-          <span>{configItems.length} 项</span>
+          <h3>{activeTitle}</h3>
+          <span>{activeItems.length} 项</span>
         </div>
-        <ConfigItemsList items={configItems} onSelect={setConfigSelectedPlugin} />
+        <ConfigItemsList
+          items={activeItems}
+          onSelect={configView === 'tools' ? setConfigSelectedPlugin : setConfigSelectedWorkflow}
+          emptyText={activeEmptyText}
+        />
       </section>
     </div>
   )
 }
 
-function buildConfigItems(catalog, activeCategory) {
+function buildToolConfigItems(catalog, activeCategory) {
   const items = []
 
   const plugins = catalog?.plugins || []
@@ -531,6 +569,25 @@ function buildConfigItems(catalog, activeCategory) {
   return items
 }
 
+function buildWorkflowConfigItems(catalog, activeCategory) {
+  return (catalog?.workflows || [])
+    .filter(workflow => !activeCategory || workflow.category === activeCategory)
+    .map(workflow => {
+      const files = (workflow.config_files || []).map(normalizeWorkflowConfigListItem)
+      return {
+        type: 'workflow',
+        id: workflow.id,
+        name: workflow.name || workflow.id,
+        typeLabel: '工作流',
+        description: workflow.description || `工作流 ${workflow.id} 的真实挂载路径配置文件`,
+        files,
+        category: workflow.category,
+        source: workflow.source
+      }
+    })
+    .sort((left, right) => String(left.name || left.id).localeCompare(String(right.name || right.id), 'zh-CN'))
+}
+
 
 function normalizeConfigFileItem(file, pluginID) {
   if (typeof file === 'string') {
@@ -547,8 +604,21 @@ function normalizeConfigFileItem(file, pluginID) {
   }
 }
 
+function normalizeWorkflowConfigListItem(file) {
+  if (typeof file === 'string') {
+    return {path: file, label: '配置文件'}
+  }
+  const path = file.path || file.id || ''
+  const configDir = file.display_root || file.displayRoot || file.config_dir || file.configDir || ''
+  const displayPath = file.display_path || file.displayPath || [configDir, path].filter(Boolean).join('/') || path
+  return {
+    path: displayPath,
+    label: file.label || '配置文件'
+  }
+}
 
-function ConfigItemsList({items, onSelect}) {
+
+function ConfigItemsList({items, onSelect, emptyText = '当前没有可配置项。'}) {
   return (
     <div className="list">
       {items.map(item => (
@@ -573,7 +643,7 @@ function ConfigItemsList({items, onSelect}) {
           </div>
         </button>
       ))}
-      {items.length === 0 && <div className="empty">当前没有可配置项。</div>}
+      {items.length === 0 && <div className="empty">{emptyText}</div>}
     </div>
   )
 }
@@ -1281,6 +1351,39 @@ function normalizePluginConfigFile(file) {
   }
 }
 
+function normalizeWorkflowConfigFile(file) {
+  if (typeof file === 'string') {
+    return {
+      id: file,
+      label: file,
+      path: file,
+      displayPath: file,
+      display_root: '',
+      scope: 'plugin',
+      access: 'read_write',
+      create: true,
+      exists: true,
+      readable: true,
+      writable: true,
+      reason: ''
+    }
+  }
+  const path = file.path || file.id || ''
+  const configDir = file.config_dir || file.configDir || ''
+  const displayRoot = file.display_root || file.displayRoot || configDir || ''
+  return {
+    ...file,
+    id: file.id || path,
+    label: file.label || file.name || file.id || path,
+    path,
+    config_dir: configDir || file.config_dir,
+    display_root: displayRoot,
+    displayPath: file.display_path || file.displayPath || [displayRoot, path].filter(Boolean).join('/') || path || file.id || '',
+    scope: file.scope || 'plugin',
+    access: file.access || 'read_write'
+  }
+}
+
 function buildPluginConfigFileTree(files, pluginID) {
   const root = {key: 'root', type: 'root', children: []}
   const roots = new Map()
@@ -1432,16 +1535,26 @@ function pluginConfigFileSaveBlockReason(file) {
   return ''
 }
 
+function workflowConfigFileSaveBlockReason(file) {
+  return pluginConfigFileSaveBlockReason(file)
+}
+
+function canDeleteConfigFile(file) {
+  return Boolean(file?.id)
+}
+
 function PluginConfigFileEditor({pluginID, file, onBack}) {
   const [content, setContent] = useState('')
   const [originalContent, setOriginalContent] = useState('')
   const [showDiff, setShowDiff] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
   const [message, setMessage] = useState('正在读取配置文件...')
   const fileID = file?.id || ''
   const saveBlockReason = pluginConfigFileSaveBlockReason(file)
   const canSave = !saveBlockReason
+  const canDelete = canDeleteConfigFile(file)
   const diff = useMemo(() => buildTextDiff(originalContent, content), [originalContent, content])
 
   useEffect(() => {
@@ -1515,10 +1628,221 @@ function PluginConfigFileEditor({pluginID, file, onBack}) {
       </div>
       {showDiff && <ConfigDiffView diff={diff} />}
       <div className="buttonRow">
-        <button className="primary" disabled={loading || saving || !canSave} onClick={saveFile}>保存配置文件</button>
-        <button className="secondary" disabled={saving} onClick={onBack}>返回列表</button>
+        <button className="primary" disabled={loading || saving || deleting || !canSave} onClick={saveFile}>保存配置文件</button>
+        <button className="secondary" disabled={saving || deleting} onClick={onBack}>返回列表</button>
       </div>
       <pre className="modalResult">{message}</pre>
+    </div>
+  )
+}
+
+function WorkflowConfigFileEditor({workflowID, file, onBack}) {
+  const [content, setContent] = useState('')
+  const [originalContent, setOriginalContent] = useState('')
+  const [showDiff, setShowDiff] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [message, setMessage] = useState('正在读取工作流配置文件...')
+  const fileID = file?.id || ''
+  const saveBlockReason = workflowConfigFileSaveBlockReason(file)
+  const canSave = !saveBlockReason
+  const canDelete = canDeleteConfigFile(file)
+  const diff = useMemo(() => buildTextDiff(originalContent, content), [originalContent, content])
+
+  useEffect(() => {
+    setShowDiff(false)
+    loadFile()
+  }, [workflowID, fileID])
+
+  async function loadFile() {
+    setLoading(true)
+    setMessage('正在读取工作流配置文件...')
+    try {
+      const body = await fetchJSON(`/api/workflows/${encodeURIComponent(workflowID)}/files/${encodeURIComponent(fileID)}`)
+      const loadedContent = body.data?.content || ''
+      setContent(loadedContent)
+      setOriginalContent(loadedContent)
+      setMessage('已加载工作流配置文件。')
+    } catch (err) {
+      setMessage(readableAPIError(err, '读取工作流配置文件失败。'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function saveFile() {
+    if (!canSave) {
+      setMessage(saveBlockReason)
+      return
+    }
+    setSaving(true)
+    setMessage('正在保存工作流配置文件...')
+    try {
+      await putJSON(`/api/workflows/${encodeURIComponent(workflowID)}/files/${encodeURIComponent(fileID)}`, {content})
+      setOriginalContent(content)
+      setShowDiff(false)
+      setMessage('工作流配置文件已保存。')
+    } catch (err) {
+      setMessage(readableAPIError(err, '保存工作流配置文件失败。'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function deleteFile() {
+    if (!canDelete) return
+    const displayName = file?.displayPath || file?.path || fileID
+    if (file?.exists !== false && !window.confirm(`将删除工作流配置文件 ${displayName}，是否继续？`)) return
+    setDeleting(true)
+    setMessage('正在删除工作流配置文件...')
+    try {
+      await deleteJSON(`/api/workflows/${encodeURIComponent(workflowID)}/files/${encodeURIComponent(fileID)}`)
+      setMessage('工作流配置文件已删除。')
+      onBack()
+    } catch (err) {
+      setMessage(readableAPIError(err, '删除工作流配置文件失败。'))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  return (
+    <div className="pluginConfigEditor">
+      <div className="configFileEditorSummary">
+        <div>
+          <strong>{file?.label || fileID}</strong>
+          <span>{file?.displayPath || file?.path || fileID}</span>
+        </div>
+        <ConfigFileStatusBadges file={file || {}} />
+        {file?.reason && <small className="configFileReason">{file.reason}</small>}
+        {saveBlockReason && <small className="configFileSaveHint">{saveBlockReason}</small>}
+      </div>
+      <label>
+        <span>文件内容</span>
+        <textarea
+          value={content}
+          disabled={loading || saving || deleting || !canSave}
+          placeholder="输入配置文件内容..."
+          onChange={event => setContent(event.target.value)}
+        />
+      </label>
+      <div className="configDiffToolbar">
+        <div>
+          <strong>{diff.changed ? '当前草稿有未保存差异' : '当前草稿与已加载内容一致'}</strong>
+          <span>+{diff.stats.added} / -{diff.stats.removed} / 未变 {diff.stats.unchanged}</span>
+        </div>
+        <button className="secondary" type="button" disabled={loading} onClick={() => setShowDiff(current => !current)}>
+          {showDiff ? '隐藏差异' : '查看差异'}
+        </button>
+      </div>
+      {showDiff && <ConfigDiffView diff={diff} />}
+      <div className="buttonRow">
+        <button className="primary" disabled={loading || saving || deleting || !canSave} onClick={saveFile}>保存工作流配置文件</button>
+        <button className="secondary danger" disabled={loading || saving || deleting || !canDelete} onClick={deleteFile}>删除配置文件</button>
+        <button className="secondary" disabled={saving || deleting} onClick={onBack}>返回列表</button>
+      </div>
+      <pre className="modalResult">{message}</pre>
+    </div>
+  )
+}
+
+function buildWorkflowConfigFileTree(files, workflowID) {
+  const root = {key: 'root', type: 'root', children: []}
+  const roots = new Map()
+
+  files.forEach(file => {
+    const rootLabel = file.display_root || file.config_dir || '运行根目录'
+    const rootKey = `workflow:${rootLabel}`
+    let rootNode = roots.get(rootKey)
+    if (!rootNode) {
+      rootNode = {key: rootKey, type: 'dir', name: rootLabel, path: rootLabel, scope: file.scope || 'plugin', children: [], childMap: new Map()}
+      roots.set(rootKey, rootNode)
+      root.children.push(rootNode)
+    }
+
+    const rawPath = file.path || file.displayPath || file.id || file.label || ''
+    const segments = splitConfigPath(rawPath)
+    insertConfigFileTreeNode(rootNode, segments.length > 0 ? segments : [file.label || file.id || '未命名配置文件'], file)
+  })
+
+  sortConfigFileTree(root)
+  return root
+}
+
+function WorkflowConfigFilesPanel({workflowID, onBack, onSaved}) {
+  const [files, setFiles] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [message, setMessage] = useState('正在加载工作流配置文件列表...')
+  const [editingFile, setEditingFile] = useState(null)
+  const fileTree = useMemo(() => buildWorkflowConfigFileTree(files, workflowID), [files, workflowID])
+
+  useEffect(() => {
+    loadFiles()
+  }, [workflowID])
+
+  async function loadFiles() {
+    setLoading(true)
+    setMessage('正在加载工作流配置文件列表...')
+    try {
+      const body = await fetchJSON(`/api/workflows/${encodeURIComponent(workflowID)}/files`)
+      const fileList = (body.data?.files || []).map(normalizeWorkflowConfigFile)
+      setFiles(fileList)
+      setMessage(fileList.length > 0 ? `已加载 ${fileList.length} 个工作流配置文件。` : '当前没有工作流配置文件。')
+    } catch (err) {
+      setMessage(readableAPIError(err, '加载工作流配置文件列表失败。'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  if (editingFile) {
+    return (
+      <WorkflowConfigFileEditor
+        workflowID={workflowID}
+        file={editingFile}
+        onBack={() => {
+          setEditingFile(null)
+          loadFiles()
+          onSaved?.()
+        }}
+      />
+    )
+  }
+
+  return (
+    <div className="pluginConfigFilesPanel">
+      <div className="empty small">工作流配置文件来自真实挂载路径；可在此直接查看和编辑。目录默认展开，可按目录折叠查找。</div>
+      <div className="configFilesTree" role="tree" aria-label="工作流配置文件目录树">
+        {fileTree.children.map(node => (
+          <ConfigFileTreeNode key={node.key} node={node} depth={0} onSelectFile={setEditingFile} />
+        ))}
+        {files.length === 0 && !loading && (
+          <div className="empty">当前没有工作流配置文件。</div>
+        )}
+      </div>
+      <div className="buttonRow">
+        <button className="secondary" onClick={onBack}>返回列表</button>
+      </div>
+      <pre className="modalResult">{message}</pre>
+    </div>
+  )
+}
+
+function WorkflowConfigPanel({workflow, onBack, onSaved}) {
+  const workflowID = workflow?.id || ''
+
+  return (
+    <div className="grid">
+      <section className="card pluginConfigCard">
+        <div className="cardHeader">
+          <div>
+            <h3>工作流配置文件</h3>
+            <p>{workflow.name || workflowID}：管理该工作流挂载的真实配置文件</p>
+          </div>
+        </div>
+        <WorkflowConfigFilesPanel workflowID={workflowID} onBack={onBack} onSaved={onSaved} />
+      </section>
     </div>
   )
 }
@@ -1614,7 +1938,6 @@ function MessageWithDetails({message, details}) {
 function RunDetail({detail, run}) {
   const record = detail.record || {}
   const logs = detail.logs || {}
-  const combinedStepLogs = combineWorkflowStepLogs(logs.steps, record)
   const runID = record.id || run?.id
   const status = record.status || run?.status
   const items = logs.items || []
@@ -1627,20 +1950,58 @@ function RunDetail({detail, run}) {
         {runID && <a href={`/api/runs/${encodeURIComponent(runID)}/support.zip`}>导出支持包</a>}
       </div>
       {runID ? (
-        <LiveRunTerminal runID={runID} running={status === 'running'} initialItems={items} />
-      ) : combinedStepLogs ? (
-        <LogBlock title="工作流日志" value={combinedStepLogs} />
+        <React.Suspense fallback={<div className="empty small">正在加载实时日志终端...</div>}>
+          <LiveRunTerminal runID={runID} running={status === 'running'} initialItems={items} />
+        </React.Suspense>
       ) : (
         <>
           <LogBlock title="标准输出" value={logs.stdout} />
           <LogBlock title="错误输出" value={logs.stderr} />
         </>
       )}
+      {items.length > 0 && <StepLogs items={items} />}
       <details>
         <summary>查看完整运行记录</summary>
         <pre>{JSON.stringify(detail, null, 2)}</pre>
       </details>
     </div>
+  )
+}
+
+function StepLogs({items}) {
+  return (
+    <section className="stepLogs">
+      <h4>节点日志</h4>
+      {(items || []).map(item => (
+        <StepLogItem key={item.id} item={item} />
+      ))}
+    </section>
+  )
+}
+
+function StepLogItem({item}) {
+  const hasStdout = Boolean(String(item.stdout || '').trim())
+  const hasStderr = Boolean(String(item.stderr || '').trim())
+  const children = item.children || []
+  const summary = [
+    item.status || '-',
+    item.type || '',
+    item.tool || ''
+  ].filter(Boolean).join(' · ')
+  return (
+    <details className="stepLogItem">
+      <summary>
+        <strong>{item.title || item.id}</strong>
+        <span>{summary || item.id}</span>
+      </summary>
+      {hasStdout ? <LogBlock title="标准输出" value={item.stdout} /> : <div className="empty small">无标准输出。</div>}
+      {hasStderr ? <LogBlock title="错误输出" value={item.stderr} /> : null}
+      {children.length > 0 && (
+        <div className="stepLogChildren">
+          {children.map(child => <StepLogItem key={child.id} item={child} />)}
+        </div>
+      )}
+    </details>
   )
 }
 

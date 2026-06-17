@@ -2,7 +2,9 @@ package registry
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"shell_ops/internal/config"
 )
@@ -53,6 +55,9 @@ func (r *Registry) ValidateWorkflow(wf *config.WorkflowConfig) error {
 			return err
 		}
 	}
+	if err := validateWorkflowConfigFiles(wf); err != nil {
+		return err
+	}
 	if err := validateWorkflowEdges(wf, nodes); err != nil {
 		return err
 	}
@@ -75,6 +80,9 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		if hasUploadConfig(node.Upload) {
 			return fmt.Errorf("工具节点 %s 不能配置 upload", node.ID)
 		}
+		if hasExtractConfig(node.Extract) {
+			return fmt.Errorf("工具节点 %s 不能配置 extract_config", node.ID)
+		}
 		if _, ok := r.Tools[node.Tool]; !ok {
 			return fmt.Errorf("节点 %s 引用了不存在的工具 %s", node.ID, node.Tool)
 		}
@@ -87,6 +95,9 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		}
 		if hasUploadConfig(node.Upload) {
 			return fmt.Errorf("条件节点 %s 不能配置 upload", node.ID)
+		}
+		if hasExtractConfig(node.Extract) {
+			return fmt.Errorf("条件节点 %s 不能配置 extract_config", node.ID)
 		}
 		if node.Condition.Input == "" {
 			return fmt.Errorf("条件节点 %s 的 condition.input 必填", node.ID)
@@ -129,6 +140,9 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		if hasUploadConfig(node.Upload) {
 			return fmt.Errorf("编排节点 %s 不能配置 upload", node.ID)
 		}
+		if hasExtractConfig(node.Extract) {
+			return fmt.Errorf("编排节点 %s 不能配置 extract_config", node.ID)
+		}
 	case config.WorkflowNodeTypeUpload:
 		if node.Tool != "" {
 			return fmt.Errorf("上传节点 %s 不能配置 tool", node.ID)
@@ -139,8 +153,37 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		if hasLoopConfig(node.Loop) {
 			return fmt.Errorf("上传节点 %s 不能配置 loop", node.ID)
 		}
+		if hasExtractConfig(node.Extract) {
+			return fmt.Errorf("上传节点 %s 不能配置 extract_config", node.ID)
+		}
 		if _, err := config.NormalizeUploadTargetDir(node.Upload.TargetDir); err != nil {
 			return fmt.Errorf("上传节点 %s 的 upload.target_dir 无效: %w", node.ID, err)
+		}
+		seenExports := map[string]bool{}
+		for _, item := range node.Upload.ConfigExports {
+			if err := validateWorkflowUploadConfigExport(node.ID, item); err != nil {
+				return err
+			}
+			if seenExports[item.ID] {
+				return fmt.Errorf("上传节点 %s 的 config_exports id 重复: %s", node.ID, item.ID)
+			}
+			seenExports[item.ID] = true
+		}
+	case config.WorkflowNodeTypeExtractConfig:
+		if node.Tool != "" {
+			return fmt.Errorf("提取配置节点 %s 不能配置 tool", node.ID)
+		}
+		if node.Condition.Input != "" || len(node.Condition.Cases) > 0 || node.Condition.DefaultCase != "" {
+			return fmt.Errorf("提取配置节点 %s 不能配置 condition", node.ID)
+		}
+		if hasLoopConfig(node.Loop) {
+			return fmt.Errorf("提取配置节点 %s 不能配置 loop", node.ID)
+		}
+		if hasUploadConfig(node.Upload) {
+			return fmt.Errorf("提取配置节点 %s 不能配置 upload", node.ID)
+		}
+		if err := validateWorkflowExtractConfig(node.ID, node.Extract); err != nil {
+			return err
 		}
 	case config.WorkflowNodeTypeLoop:
 		if node.Tool != "" {
@@ -151,6 +194,9 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		}
 		if hasUploadConfig(node.Upload) {
 			return fmt.Errorf("循环节点 %s 不能配置 upload", node.ID)
+		}
+		if hasExtractConfig(node.Extract) {
+			return fmt.Errorf("循环节点 %s 不能配置 extract_config", node.ID)
 		}
 		if node.Loop.Target != "" {
 			if node.Loop.Tool != "" {
@@ -176,6 +222,75 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		}
 	default:
 		return fmt.Errorf("节点 %s 使用未知类型: %s", node.ID, nodeType)
+	}
+	return nil
+}
+
+func validateWorkflowConfigFiles(wf *config.WorkflowConfig) error {
+	seen := map[string]bool{}
+	for _, entry := range wf.ConfigFiles {
+		if entry.Scope != "" && entry.Scope != config.ConfigFileScopePlugin {
+			return fmt.Errorf("工作流配置文件 %s 只支持 plugin scope", entry.ID)
+		}
+		if entry.Access != "" && entry.Access != config.ConfigFileAccessRead && entry.Access != config.ConfigFileAccessReadWrite {
+			return fmt.Errorf("工作流配置文件 %s access 只支持 read 或 read_write", entry.ID)
+		}
+		if strings.TrimSpace(entry.ID) == "" {
+			return fmt.Errorf("工作流配置文件 ID 必填")
+		}
+		if seen[entry.ID] {
+			return fmt.Errorf("工作流配置文件 ID 重复: %s", entry.ID)
+		}
+		seen[entry.ID] = true
+		if err := validateWorkflowRelativePath(entry.Path); err != nil {
+			return fmt.Errorf("工作流配置文件 %s 的 path 不安全: %w", entry.ID, err)
+		}
+		if strings.TrimSpace(entry.ConfigDir) != "" && strings.TrimSpace(entry.ConfigDir) != "." {
+			if err := validateWorkflowRelativePath(entry.ConfigDir); err != nil {
+				return fmt.Errorf("工作流配置文件 %s 的 config_dir 不安全: %w", entry.ID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateWorkflowUploadConfigExport(nodeID string, item config.WorkflowUploadConfigExport) error {
+	if strings.TrimSpace(item.ID) == "" {
+		return fmt.Errorf("上传节点 %s 的 config_exports.id 必填", nodeID)
+	}
+	if strings.TrimSpace(item.TargetPath) == "" {
+		return fmt.Errorf("上传节点 %s 的 config_exports.target_path 必填", nodeID)
+	}
+	if item.Access != "" && item.Access != config.ConfigFileAccessRead && item.Access != config.ConfigFileAccessReadWrite {
+		return fmt.Errorf("上传节点 %s 的 config_exports access 只支持 read 或 read_write", nodeID)
+	}
+	if item.SourcePath != "" {
+		if err := validateWorkflowRelativePath(item.SourcePath); err != nil {
+			return fmt.Errorf("上传节点 %s 的 config_exports.source_path 不安全: %w", nodeID, err)
+		}
+	}
+	if err := validateWorkflowRelativePath(item.TargetPath); err != nil {
+		return fmt.Errorf("上传节点 %s 的 config_exports.target_path 不安全: %w", nodeID, err)
+	}
+	return nil
+}
+
+func validateWorkflowRelativePath(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("不能为空")
+	}
+	if strings.Contains(value, "://") || filepath.IsAbs(value) || strings.HasPrefix(value, "/") || strings.HasPrefix(value, "\\") || len(value) >= 2 && value[1] == ':' {
+		return fmt.Errorf("不能是绝对路径")
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(value)))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+		return fmt.Errorf("不能逃逸工作流配置目录")
+	}
+	for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("包含不安全路径片段")
+		}
 	}
 	return nil
 }
@@ -225,6 +340,9 @@ func effectiveNodeType(node config.WorkflowNode) string {
 	if hasUploadConfig(node.Upload) {
 		return config.WorkflowNodeTypeUpload
 	}
+	if hasExtractConfig(node.Extract) {
+		return config.WorkflowNodeTypeExtractConfig
+	}
 	return ""
 }
 
@@ -233,7 +351,83 @@ func hasLoopConfig(loop config.WorkflowLoop) bool {
 }
 
 func hasUploadConfig(upload config.WorkflowUpload) bool {
-	return upload.TargetDir != ""
+	return upload.TargetDir != "" || len(upload.ConfigExports) > 0
+}
+
+func hasExtractConfig(item config.WorkflowExtractConfig) bool {
+	return item.SourceType != "" || item.FileName != "" || item.TargetPath != "" || item.Label != "" || item.Replace || len(item.Files) > 0 || item.SourceNode != "" || item.SourceDir != "" || item.SourcePath != ""
+}
+
+func validateWorkflowExtractConfig(nodeID string, item config.WorkflowExtractConfig) error {
+	if workflowExtractSourceType(item) == "directory" {
+		if strings.TrimSpace(item.SourceDir) == "" {
+			return fmt.Errorf("提取配置节点 %s 的 extract_config.source_dir 必填", nodeID)
+		}
+		if !strings.Contains(item.SourceDir, "{{") {
+			if err := validateWorkflowRelativePath(item.SourceDir); err != nil {
+				return fmt.Errorf("提取配置节点 %s 的 extract_config.source_dir 不安全: %w", nodeID, err)
+			}
+		}
+		if len(item.Files) == 0 {
+			return fmt.Errorf("提取配置节点 %s 的 extract_config.files 必填", nodeID)
+		}
+		for index, file := range item.Files {
+			sourcePath := strings.TrimSpace(file.SourcePath)
+			if sourcePath == "" {
+				sourcePath = strings.TrimSpace(file.FileName)
+			}
+			if sourcePath == "" {
+				return fmt.Errorf("提取配置节点 %s 的 extract_config.files[%d].source_path 必填", nodeID, index)
+			}
+			if strings.Contains(sourcePath, "{{") {
+				return fmt.Errorf("提取配置节点 %s 的 extract_config.files[%d].source_path 不能包含模板", nodeID, index)
+			}
+			if err := validateWorkflowRelativePath(sourcePath); err != nil {
+				return fmt.Errorf("提取配置节点 %s 的 extract_config.files[%d].source_path 不安全: %w", nodeID, index, err)
+			}
+			targetPath := strings.TrimSpace(file.TargetPath)
+			if targetPath == "" {
+				targetPath = sourcePath
+			}
+			if err := validateWorkflowRelativePath(targetPath); err != nil {
+				return fmt.Errorf("提取配置节点 %s 的 extract_config.files[%d].target_path 不安全: %w", nodeID, index, err)
+			}
+		}
+		return nil
+	}
+	file := workflowExtractConfigItem(item)
+	if strings.TrimSpace(file.FileName) == "" {
+		return fmt.Errorf("提取配置节点 %s 的 extract_config.file_name 必填", nodeID)
+	}
+	if !strings.Contains(file.FileName, "{{") {
+		if err := validateWorkflowRelativePath(file.FileName); err != nil {
+			return fmt.Errorf("提取配置节点 %s 的 extract_config.file_name 不安全: %w", nodeID, err)
+		}
+	}
+	if strings.TrimSpace(file.TargetPath) == "" {
+		return fmt.Errorf("提取配置节点 %s 的 extract_config.target_path 必填", nodeID)
+	}
+	if err := validateWorkflowRelativePath(file.TargetPath); err != nil {
+		return fmt.Errorf("提取配置节点 %s 的 extract_config.target_path 不安全: %w", nodeID, err)
+	}
+	return nil
+}
+
+func workflowExtractSourceType(item config.WorkflowExtractConfig) string {
+	if strings.EqualFold(strings.TrimSpace(item.SourceType), "directory") || strings.TrimSpace(item.SourceDir) != "" || len(item.Files) > 0 {
+		return "directory"
+	}
+	return "file"
+}
+
+func workflowExtractConfigItem(item config.WorkflowExtractConfig) config.WorkflowExtractConfigFile {
+	if item.FileName != "" || item.TargetPath != "" || item.Label != "" || item.Replace {
+		return config.WorkflowExtractConfigFile{FileName: item.FileName, SourcePath: item.SourcePath, TargetPath: item.TargetPath, Label: item.Label, Replace: item.Replace}
+	}
+	if len(item.Files) > 0 {
+		return item.Files[0]
+	}
+	return config.WorkflowExtractConfigFile{FileName: item.SourcePath, SourcePath: item.SourcePath, TargetPath: item.TargetPath, Label: item.Label, Replace: item.Replace}
 }
 
 func conditionCaseExists(node config.WorkflowNode, caseID string) bool {

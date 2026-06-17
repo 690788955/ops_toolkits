@@ -181,6 +181,34 @@ func validateTool(pkg Package, tool Tool, seen map[string]bool, cfg config.Plugi
 			return fmt.Errorf("插件工具 %s 的 config_files 无法访问: %w", tool.ID, err)
 		}
 	}
+	if err := validateToolOutputs(tool.ID, tool.Outputs); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateToolOutputs(toolID string, outputs []config.ToolOutput) error {
+	seen := map[string]bool{}
+	for _, output := range outputs {
+		name := strings.TrimSpace(output.Name)
+		if name == "" {
+			return fmt.Errorf("插件工具 %s 的 outputs.name 必填", toolID)
+		}
+		if seen[name] {
+			return fmt.Errorf("插件工具 %s 的 outputs.name 重复: %s", toolID, name)
+		}
+		seen[name] = true
+		if strings.TrimSpace(output.JSONPath) == "" {
+			return fmt.Errorf("插件工具 %s 的 outputs.%s json_path 必填", toolID, name)
+		}
+		outputType := strings.TrimSpace(output.Type)
+		if outputType == "" {
+			outputType = "string"
+		}
+		if outputType != "string" && outputType != "number" && outputType != "bool" {
+			return fmt.Errorf("插件工具 %s 的 outputs.%s type 只支持 string、number 或 bool", toolID, name)
+		}
+	}
 	return nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -258,11 +259,43 @@ func normalizeTool(cfg *ToolConfig) {
 	if cfg.PassMode.FileName == "" {
 		cfg.PassMode.FileName = "params.yaml"
 	}
+	for i := range cfg.Outputs {
+		normalizeToolOutput(&cfg.Outputs[i])
+	}
+}
+
+func NormalizeToolConfig(cfg *ToolConfig) {
+	normalizeTool(cfg)
+}
+
+func normalizeToolOutput(output *ToolOutput) {
+	if output == nil {
+		return
+	}
+	output.Name = strings.TrimSpace(output.Name)
+	output.Description = strings.TrimSpace(output.Description)
+	output.Type = strings.TrimSpace(output.Type)
+	if output.Type == "" {
+		output.Type = "string"
+	}
+	output.JSONPath = strings.TrimSpace(output.JSONPath)
 }
 
 func NormalizeWorkflow(cfg *WorkflowConfig) {
 	if len(cfg.Nodes) == 0 {
 		cfg.Nodes = cfg.Steps
+	}
+	for i := range cfg.ConfigFiles {
+		NormalizeConfigFileRef(&cfg.ConfigFiles[i])
+		if cfg.ConfigFiles[i].Access == "" {
+			cfg.ConfigFiles[i].Access = ConfigFileAccessReadWrite
+		}
+		if cfg.ConfigFiles[i].Path == "" {
+			cfg.ConfigFiles[i].Path = cfg.ConfigFiles[i].ID
+		}
+		if cfg.ConfigFiles[i].ID == "" {
+			cfg.ConfigFiles[i].ID = cfg.ConfigFiles[i].Path
+		}
 	}
 	if len(cfg.Edges) == 0 {
 		cfg.Edges = edgesFromDependsOn(cfg.Nodes)

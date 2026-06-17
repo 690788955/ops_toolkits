@@ -198,6 +198,19 @@ button { cursor: pointer; }
   background: var(--color-surface);
   box-shadow: var(--shadow-whisper);
 }
+.configPanelShell {
+  display: grid;
+  gap: 16px;
+}
+.configSubTabs {
+  margin-bottom: 0;
+}
+.configSubTabs .tab span {
+  margin-left: 6px;
+  color: inherit;
+  font-size: 12px;
+  opacity: .8;
+}
 .tab {
   border-radius: 8px;
   padding: 9px 15px;
@@ -272,6 +285,19 @@ button { cursor: pointer; }
 .tagInputRow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .paramMappings { display: grid; gap: 18px; }
 .paramMappings > strong { color: var(--color-text); font-size: 14px; font-weight: 800; }
+.toolOutputsView { display: grid; gap: 10px; }
+.toolOutputsView > strong { color: var(--color-text); font-size: 14px; font-weight: 800; }
+.toolOutputRow {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-panel);
+}
+.toolOutputRow span { color: var(--color-text); font-size: 13px; font-weight: 800; line-height: 1.4; }
+.toolOutputRow code { color: var(--color-primary); font-size: 12px; }
+.toolOutputRow small { color: var(--color-muted); }
 
 .mappingRow,
 .caseEditor,
@@ -582,6 +608,46 @@ input:disabled { color: var(--color-muted); background: var(--color-bg); }
 .compactResult { min-height: 74px; margin-top: 14px; font-size: 12px; }
 .logBlock, .stepLogs { display: grid; gap: 8px; }
 .logBlock h4, .stepLogs h4 { margin: 0; color: var(--color-text); font-size: 14px; font-weight: 800; }
+.stepLogs {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--color-surface);
+}
+.stepLogItem {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-panel);
+}
+.stepLogItem summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  color: var(--color-text);
+}
+.stepLogItem summary strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.stepLogItem summary span {
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.stepLogItem .logBlock,
+.stepLogItem .empty.small {
+  margin: 0 12px 12px;
+}
+.stepLogChildren {
+  display: grid;
+  gap: 8px;
+  margin: 0 12px 12px;
+  padding-left: 12px;
+  border-left: 2px solid var(--color-border);
+}
 details summary { cursor: pointer; color: var(--color-link); font-weight: 800; }
 .liveTerminal {
   border: 1px solid var(--color-dark-border);
@@ -836,7 +902,7 @@ pre {
 }
 
 .executeModeLayout {
-  grid-template-columns: minmax(280px, 340px) minmax(760px, 1fr);
+  grid-template-columns: minmax(420px, 510px) minmax(620px, 1fr);
   grid-template-areas:
     "toolbar canvas"
     "params canvas"
@@ -918,6 +984,86 @@ pre {
 .workflowResultCard details pre {
   min-height: 140px;
   max-height: 220px;
+}
+
+.canvasNodeLogPanel {
+  position: absolute;
+  top: 70px;
+  right: 18px;
+  z-index: 18;
+  display: grid;
+  gap: 10px;
+  width: min(760px, calc(100% - 36px));
+  max-height: min(720px, calc(100% - 92px));
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 12px;
+  background: rgba(255,255,255,.98);
+  box-shadow: var(--shadow-card);
+}
+
+.canvasNodeLogPanel.minimized {
+  top: 18px;
+  width: min(420px, calc(100% - 36px));
+  max-height: none;
+  overflow: visible;
+}
+
+.canvasNodeLogHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.canvasNodeLogHeader > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.canvasNodeLogHeader strong {
+  color: var(--color-black);
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.canvasNodeLogHeader span {
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.canvasNodeLogActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.canvasInlineLogBlock {
+  display: grid;
+  gap: 6px;
+}
+
+.canvasInlineLogBlock h4 {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.canvasInlineLogBlock pre {
+  max-height: 340px;
+  margin: 0;
+  overflow: auto;
+}
+
+.canvasNodeLogChildren {
+  display: grid;
+  gap: 8px;
 }
 
 .workflowDescriptionInput {
@@ -1270,7 +1416,7 @@ pre {
   gap: 9px;
   border-bottom: 1px solid rgba(15,23,42,.08);
   border-radius: 8px 8px 0 0;
-  padding: 8px 34px 8px 14px;
+  padding: 8px 14px;
   background: linear-gradient(180deg, #ffffff, #f2f5f9);
 }
 
@@ -1367,6 +1513,17 @@ pre {
 .controlNode.selected small,
 .react-flow__node.selected .controlNode small { margin-top: 5px; }
 .controlNodeInspector { display: grid; gap: 10px; }
+.configMappingList { display: grid; gap: 10px; }
+.configMappingRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+.configMappingRow .danger { justify-self: start; }
 
 .conditionNode {
   display: grid;
@@ -1383,7 +1540,7 @@ pre {
 }
 
 .conditionTopBar {
-  padding-right: 12px;
+  padding-right: 14px;
 }
 
 .conditionDiamond {
@@ -1646,6 +1803,32 @@ pre {
   border-radius: 10px;
 }
 .nodeDelete:hover { color: var(--color-surface); background: var(--color-danger); border-color: var(--color-danger); }
+
+.nodeRerun {
+  position: absolute;
+  top: -14px;
+  right: 42px;
+  z-index: 14;
+  border: 1px solid rgba(13,116,206,.28);
+  border-radius: 7px;
+  padding: 4px 8px;
+  color: var(--color-link);
+  background: #eef7ff;
+  box-shadow: var(--shadow-whisper);
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1;
+}
+.nodeRerun:hover:not(:disabled),
+.nodeRerun:focus-visible:not(:disabled) {
+  color: var(--color-surface);
+  background: var(--color-link);
+  border-color: var(--color-link);
+}
+.nodeRerun:disabled {
+  cursor: not-allowed;
+  opacity: .58;
+}
 
 .quickNodeActions {
   position: absolute;
@@ -2289,6 +2472,19 @@ fieldset legend {
 }
 .caseEditor button { justify-self: start; }
 
+.sectionHeaderCompact {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.sectionHeaderCompact strong {
+  color: var(--color-text);
+  font-size: 14px;
+  font-weight: 900;
+}
+
 @media (max-width: 1280px) {
   .editorLayout {
     grid-template-columns: 1fr;
@@ -2929,6 +3125,19 @@ fieldset legend {
 .uploadPickerControl input,
 .uploadPickerControl select {
   width: 100%;
+}
+
+.workflowUploadPicker {
+  display: grid;
+  gap: 8px;
+}
+
+.workflowUploadPicker .buttonRow {
+  gap: 8px;
+}
+
+.hiddenFileInput {
+  display: none;
 }
 
 .workflowRunParamsPanel input:disabled {

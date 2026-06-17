@@ -12,3 +12,4 @@ graphify-out/
 .tmp-build/go-cache/trim.txt
 .tmp-build/go-cache/
 .tmp-build/gocache/
+.trellis/spec/backend/workflow-conditional-nodes.md

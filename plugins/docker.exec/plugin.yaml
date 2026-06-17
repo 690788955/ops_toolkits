@@ -133,6 +133,22 @@ contributes:
           options:
             - "yes"
             - "no"
+      outputs:
+        - name: output_file
+          description: 合并后的输出文件名
+          type: string
+          required: true
+          json_path: output_file
+        - name: output_path
+          description: 合并后的输出文件路径
+          type: string
+          required: true
+          json_path: output_path
+        - name: extract_dir
+          description: 解压目录
+          type: string
+          required: false
+          json_path: extract_dir
       confirm:
         required: true
         message: 确认校验并合并上传目录中的分片包？请确认 md5.txt 和分片文件来自可信来源。

@@ -1,5 +1,15 @@
 import React, {useState} from 'react'
 import FileUploadInput from '../FileUploadInput.jsx'
+import {
+  defaultExtractConfig as modelDefaultExtractConfig,
+  defaultCondition,
+  defaultLoop as modelDefaultLoop,
+  defaultUpload as modelDefaultUpload,
+  defaultParams,
+  normalizeExtractConfig,
+  normalizeLoopConfig,
+  normalizeUploadConfig
+} from './model.js'
 
 const conditionOperators = [
   {value: 'eq', label: '等于'},
@@ -33,14 +43,14 @@ function NodeConfigModal({node, kindLabel, children, onClose, onSave}) {
   )
 }
 
-function NodeConfigEditor({node, tool, loopTool, tools, sources, paramsText, setParamsText, onNameChange, onConditionChange, onLoopChange, onUploadChange, onParamChange, onLoopParamChange, onApplyParams}) {
+function NodeConfigEditor({node, tool, loopTool, tools, nodes, sources, paramsText, setParamsText, onNameChange, onConditionChange, onLoopChange, onUploadChange, onExtractConfigChange, onParamChange, onLoopParamChange, onApplyParams}) {
   if (!node) return null
   return (
     <div className="form nodeConfigEditor">
       {node.type === 'conditionNode' ? (
         <ConditionEditor node={node} sources={sources} onNameChange={onNameChange} onChange={onConditionChange} />
       ) : node.type === 'controlNode' ? (
-        <ControlNodeInspector node={node} tools={tools} loopTool={loopTool} sources={sources} onNameChange={onNameChange} onLoopChange={onLoopChange} onUploadChange={onUploadChange} onLoopParamChange={onLoopParamChange} />
+        <ControlNodeInspector node={node} tools={tools} nodes={nodes} loopTool={loopTool} sources={sources} onNameChange={onNameChange} onLoopChange={onLoopChange} onUploadChange={onUploadChange} onExtractConfigChange={onExtractConfigChange} onLoopParamChange={onLoopParamChange} />
       ) : (
         <ToolNodeConfigEditor
           node={node}
@@ -68,6 +78,7 @@ function ToolNodeConfigEditor({node, tool, sources, paramsText, setParamsText, o
         <input value={node.data.tool} disabled />
       </label>
       <ParamMappingEditor tool={tool} params={node.data.params || {}} sources={sources} onChange={onParamChange} />
+      <ToolOutputsView tool={tool} />
       <details className="advancedParams">
         <summary>高级 JSON 编辑</summary>
         <label>
@@ -178,13 +189,18 @@ function ConditionEditor({node, sources, onNameChange, onChange}) {
   )
 }
 
-function ControlNodeInspector({node, tools, loopTool, sources, onNameChange, onLoopChange, onUploadChange, onLoopParamChange}) {
+function ControlNodeInspector({node, tools, nodes, loopTool, sources, onNameChange, onLoopChange, onUploadChange, onExtractConfigChange, onLoopParamChange}) {
   const isLoop = node.data.controlType === 'loop'
-  const loop = normalizeLoopConfig(node.data.loop || defaultLoop())
+  const loop = normalizeLoopConfig(node.data.loop || modelDefaultLoop())
   const isUpload = node.data.controlType === 'upload'
-  const upload = node.data.upload || {target_dir: ''}
+  const isExtractConfig = node.data.controlType === 'extract_config'
+  const upload = normalizeUploadConfig(node.data.upload || modelDefaultUpload())
+  const extract = normalizeExtractConfig(node.data.extract_config || modelDefaultExtractConfig())
   function updateLoop(patch) {
     onLoopChange(normalizeLoopConfig({...loop, ...patch}))
+  }
+  function updateExtract(patch) {
+    onExtractConfigChange(normalizeExtractConfig({...extract, ...patch}))
   }
   function changeLoopTool(toolID) {
     const tool = (tools || []).find(item => item.id === toolID)
@@ -224,14 +240,99 @@ function ControlNodeInspector({node, tools, loopTool, sources, onNameChange, onL
         <>
           <label>
             <span>目标子目录</span>
-            <input value={upload.target_dir || ''} placeholder="可留空，例如 assets/release" onChange={event => onUploadChange({target_dir: event.target.value})} />
+            <input value={upload.target_dir || ''} placeholder="可留空，例如 assets/release" onChange={event => onUploadChange({...upload, target_dir: event.target.value})} />
           </label>
           <div className="empty small">目标子目录只能是平台 uploads 下的相对路径；运行前在执行面板选择本地文件、多个文件或目录。</div>
+        </>
+      ) : isExtractConfig ? (
+        <>
+          <label>
+            <span>来源类型</span>
+            <select value={extract.source_type || 'file'} onChange={event => updateExtract({source_type: event.target.value})}>
+              <option value="file">文件</option>
+              <option value="directory">目录</option>
+            </select>
+          </label>
+          {extract.source_type === 'directory' ? (
+            <DirectoryExtractEditor extract={extract} sources={sources} onChange={updateExtract} />
+          ) : (
+            <FileExtractEditor extract={extract} sources={sources} onChange={updateExtract} />
+          )}
+          <div className="empty small">执行成功后，会从本次运行已上传的文件中匹配来源并复制到工作流配置中心。</div>
         </>
       ) : (
         <div className="empty small">{controlNodeHelp(node.data.controlType)}。该节点不需要配置工具或参数，运行时自身记录为成功。</div>
       )}
     </div>
+  )
+}
+
+function FileExtractEditor({extract, sources, onChange}) {
+  return (
+    <>
+      <label>
+        <span>源文件来源</span>
+        <select value={sources.some(source => source.value === extract.file_name) ? extract.file_name : ''} onChange={event => onChange({file_name: event.target.value})}>
+              <option value="">手动输入 / 不设置</option>
+              {sources.map(source => <option key={source.value} value={source.value}>{source.label}</option>)}
+        </select>
+        <input value={extract.file_name || ''} placeholder="app.yaml、conf/app.yaml 或 {{ .steps.prev.outputs.output_file }}" onChange={event => onChange({file_name: event.target.value})} />
+      </label>
+      <label>
+        <span>目标配置路径</span>
+        <input value={extract.target_path || ''} placeholder="app.yaml 或 conf/app.yaml" onChange={event => onChange({target_path: event.target.value})} />
+      </label>
+      <label>
+        <span>显示标签</span>
+        <input value={extract.label || ''} placeholder="应用配置" onChange={event => onChange({label: event.target.value})} />
+      </label>
+      <label className="checkboxLabel">
+        <input type="checkbox" checked={extract.replace === true} onChange={event => onChange({replace: event.target.checked})} />
+            <span>覆盖同名配置文件</span>
+      </label>
+    </>
+  )
+}
+
+function DirectoryExtractEditor({extract, sources, onChange}) {
+  const files = Array.isArray(extract.files) ? extract.files : []
+  function updateFile(index, patch) {
+    const nextFiles = files.map((item, current) => current === index ? {...item, ...patch} : item)
+    onChange({files: nextFiles})
+  }
+  function addFile() {
+    onChange({files: [...files, {source_path: '', target_path: '', label: '', replace: false}]})
+  }
+  function removeFile(index) {
+    onChange({files: files.filter((_, current) => current !== index)})
+  }
+  return (
+    <>
+      <label>
+        <span>源目录来源</span>
+        <select value={sources.some(source => source.value === extract.source_dir) ? extract.source_dir : ''} onChange={event => onChange({source_dir: event.target.value})}>
+          <option value="">手动输入 / 不设置</option>
+          {sources.map(source => <option key={source.value} value={source.value}>{source.label}</option>)}
+        </select>
+        <input value={extract.source_dir || ''} placeholder="{{ .steps.upload.file.relative_dir }}" onChange={event => onChange({source_dir: event.target.value})} />
+      </label>
+      <div className="caseList">
+        <strong>目录下文件映射</strong>
+        {files.map((file, index) => (
+          <div className="caseEditor" key={`${file.source_path || 'file'}-${index}`}>
+            <input value={file.source_path || ''} placeholder="conf/app.yaml" onChange={event => updateFile(index, {source_path: event.target.value, target_path: event.target.value})} />
+            <input value={file.target_path || file.source_path || ''} placeholder="默认跟随源相对路径" onChange={event => updateFile(index, {target_path: event.target.value})} />
+            <input value={file.label || ''} placeholder="应用配置" onChange={event => updateFile(index, {label: event.target.value})} />
+            <label className="checkboxLabel">
+              <input type="checkbox" checked={file.replace === true} onChange={event => updateFile(index, {replace: event.target.checked})} />
+              <span>覆盖</span>
+            </label>
+            <button className="secondary danger" onClick={() => removeFile(index)}>删除</button>
+          </div>
+        ))}
+        <button className="secondary" onClick={addFile}>添加目录文件</button>
+      </div>
+    </>
   )
 }
 
@@ -308,6 +409,23 @@ function ParamMappingEditor({tool, params, sources, onChange, emptyMessage}) {
   )
 }
 
+function ToolOutputsView({tool}) {
+  const outputs = tool?.outputs || []
+  if (outputs.length === 0) return <div className="empty small">当前工具没有声明输出参数。</div>
+  return (
+    <div className="toolOutputsView">
+      <strong>输出参数</strong>
+      {outputs.map(output => (
+        <div className="toolOutputRow" key={output.name}>
+          <span>{output.description || output.name}{output.required ? ' *' : ''}</span>
+          <code>{output.name}</code>
+          <small>{output.type || 'string'} · {output.json_path}</small>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function isTemplateValue(value) {
   return typeof value === 'string' && value.includes('{{')
 }
@@ -316,31 +434,13 @@ function parseBoolParamValue(value) {
   return value === true || value === 'true' || value === '1' || value === 'yes' || value === 'on'
 }
 
-function defaultLoop() {
-  return {tool: '', params: {}, max_iterations: 3}
-}
-
-function normalizeLoopConfig(loop) {
-  const params = loop?.params && typeof loop.params === 'object' && !Array.isArray(loop.params) ? loop.params : {}
-  return {
-    tool: String(loop?.tool || '').trim(),
-    params,
-    max_iterations: clampLoopIterations(loop?.max_iterations || loop?.maxIterations || 1)
-  }
-}
-
-function clampLoopIterations(value) {
-  const parsed = Number.parseInt(value, 10)
-  if (!Number.isFinite(parsed)) return 1
-  return Math.min(20, Math.max(1, parsed))
-}
-
 function controlNodeTitle(type) {
   if (type === 'condition') return '条件分支'
   if (type === 'parallel') return '并行分支'
   if (type === 'join') return '合流'
   if (type === 'loop') return '循环'
   if (type === 'upload') return '上传文件'
+  if (type === 'extract_config') return '提取配置'
   return type || '编排节点'
 }
 
@@ -348,6 +448,7 @@ function controlNodeHelp(type) {
   if (type === 'parallel') return '将后续任务拆分为多个分支路径'
   if (type === 'join') return '等待多个上游分支完成后继续流程'
   if (type === 'upload') return '运行前上传本地文件、批量文件或目录到平台目录'
+  if (type === 'extract_config') return '按文件名从上传结果提取到工作流配置中心'
   return '编排控制节点'
 }
 

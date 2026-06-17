@@ -106,6 +106,7 @@ type ToolConfig struct {
 	Entry          string                 `yaml:"entry" json:"entry"`
 	Execution      ExecutionConfig        `yaml:"execution" json:"execution"`
 	Parameters     []Parameter            `yaml:"parameters" json:"parameters"`
+	Outputs        []ToolOutput           `yaml:"outputs" json:"outputs"`
 	PassMode       PassMode               `yaml:"pass_mode" json:"pass_mode"`
 	Timeout        string                 `yaml:"timeout" json:"timeout"`
 	Confirm        Confirmation           `yaml:"confirm" json:"confirm"`
@@ -171,18 +172,27 @@ type Parameter struct {
 	Sensitive   bool        `yaml:"sensitive" json:"sensitive"`
 }
 
+type ToolOutput struct {
+	Name        string `yaml:"name" json:"name"`
+	Description string `yaml:"description" json:"description"`
+	Type        string `yaml:"type" json:"type"`
+	Required    bool   `yaml:"required" json:"required"`
+	JSONPath    string `yaml:"json_path" json:"json_path"`
+}
+
 type WorkflowConfig struct {
-	ID          string         `yaml:"id" json:"id"`
-	Name        string         `yaml:"name" json:"name"`
-	Description string         `yaml:"description" json:"description"`
-	Version     string         `yaml:"version" json:"version"`
-	Category    string         `yaml:"category" json:"category"`
-	Tags        []string       `yaml:"tags" json:"tags"`
-	Parameters  []Parameter    `yaml:"parameters" json:"parameters"`
-	Nodes       []WorkflowNode `yaml:"nodes" json:"nodes"`
-	Edges       []WorkflowEdge `yaml:"edges" json:"edges"`
-	Steps       []WorkflowNode `yaml:"steps" json:"-"`
-	Confirm     Confirmation   `yaml:"confirm" json:"confirm"`
+	ID          string          `yaml:"id" json:"id"`
+	Name        string          `yaml:"name" json:"name"`
+	Description string          `yaml:"description" json:"description"`
+	Version     string          `yaml:"version" json:"version"`
+	Category    string          `yaml:"category" json:"category"`
+	Tags        []string        `yaml:"tags" json:"tags"`
+	Parameters  []Parameter     `yaml:"parameters" json:"parameters"`
+	ConfigFiles []ConfigFileRef `yaml:"config_files" json:"config_files"`
+	Nodes       []WorkflowNode  `yaml:"nodes" json:"nodes"`
+	Edges       []WorkflowEdge  `yaml:"edges" json:"edges"`
+	Steps       []WorkflowNode  `yaml:"steps" json:"-"`
+	Confirm     Confirmation    `yaml:"confirm" json:"confirm"`
 }
 
 type WorkflowNode struct {
@@ -193,6 +203,7 @@ type WorkflowNode struct {
 	Condition WorkflowCondition      `yaml:"condition" json:"condition"`
 	Loop      WorkflowLoop           `yaml:"loop" json:"loop"`
 	Upload    WorkflowUpload         `yaml:"upload" json:"upload"`
+	Extract   WorkflowExtractConfig  `yaml:"extract_config" json:"extract_config"`
 	DependsOn []string               `yaml:"depends_on" json:"depends_on"`
 	Params    map[string]interface{} `yaml:"params" json:"params"`
 	Optional  bool                   `yaml:"optional" json:"optional"`
@@ -209,7 +220,38 @@ type WorkflowLoop struct {
 }
 
 type WorkflowUpload struct {
-	TargetDir string `yaml:"target_dir" json:"target_dir"`
+	TargetDir     string                       `yaml:"target_dir" json:"target_dir"`
+	ConfigExports []WorkflowUploadConfigExport `yaml:"config_exports" json:"config_exports"`
+}
+
+type WorkflowUploadConfigExport struct {
+	ID         string `yaml:"id" json:"id"`
+	Label      string `yaml:"label" json:"label,omitempty"`
+	SourcePath string `yaml:"source_path" json:"source_path"`
+	TargetPath string `yaml:"target_path" json:"target_path"`
+	Access     string `yaml:"access" json:"access"`
+	Create     bool   `yaml:"create" json:"create"`
+}
+
+type WorkflowExtractConfig struct {
+	SourceType string `yaml:"source_type,omitempty" json:"source_type,omitempty"`
+	FileName   string `yaml:"file_name" json:"file_name"`
+	TargetPath string `yaml:"target_path" json:"target_path"`
+	Label      string `yaml:"label" json:"label,omitempty"`
+	Replace    bool   `yaml:"replace" json:"replace"`
+
+	Files      []WorkflowExtractConfigFile `yaml:"files,omitempty" json:"files,omitempty"`
+	SourceNode string                      `yaml:"source_node,omitempty" json:"source_node,omitempty"`
+	SourceDir  string                      `yaml:"source_dir,omitempty" json:"source_dir,omitempty"`
+	SourcePath string                      `yaml:"source_path,omitempty" json:"source_path,omitempty"`
+}
+
+type WorkflowExtractConfigFile struct {
+	FileName   string `yaml:"file_name" json:"file_name"`
+	SourcePath string `yaml:"source_path,omitempty" json:"source_path,omitempty"`
+	TargetPath string `yaml:"target_path" json:"target_path"`
+	Label      string `yaml:"label" json:"label,omitempty"`
+	Replace    bool   `yaml:"replace" json:"replace"`
 }
 
 type WorkflowUploadResult struct {
@@ -250,12 +292,13 @@ type WorkflowEdge struct {
 }
 
 const (
-	WorkflowNodeTypeTool      = "tool"
-	WorkflowNodeTypeCondition = "condition"
-	WorkflowNodeTypeParallel  = "parallel"
-	WorkflowNodeTypeJoin      = "join"
-	WorkflowNodeTypeLoop      = "loop"
-	WorkflowNodeTypeUpload    = "upload"
+	WorkflowNodeTypeTool          = "tool"
+	WorkflowNodeTypeCondition     = "condition"
+	WorkflowNodeTypeParallel      = "parallel"
+	WorkflowNodeTypeJoin          = "join"
+	WorkflowNodeTypeLoop          = "loop"
+	WorkflowNodeTypeUpload        = "upload"
+	WorkflowNodeTypeExtractConfig = "extract_config"
 )
 
 func NormalizeUploadTargetDir(value string) (string, error) {

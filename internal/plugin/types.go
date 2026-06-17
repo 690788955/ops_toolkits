@@ -38,6 +38,7 @@ type Tool struct {
 	Workdir        string                 `yaml:"workdir" json:"workdir"`
 	Timeout        string                 `yaml:"timeout" json:"timeout"`
 	Parameters     []config.Parameter     `yaml:"parameters" json:"parameters"`
+	Outputs        []config.ToolOutput    `yaml:"outputs" json:"outputs"`
 	PassMode       config.PassMode        `yaml:"pass_mode" json:"pass_mode"`
 	ConfigDefaults map[string]interface{} `yaml:"config_defaults" json:"config_defaults"`
 	ConfigDir      string                 `yaml:"config_dir" json:"config_dir"`

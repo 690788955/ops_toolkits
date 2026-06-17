@@ -1,6 +1,6 @@
 import React from 'react'
 import {Handle, Position} from '@xyflow/react'
-import {conditionBranchRows, conditionOperators, defaultCondition} from './model.js'
+import {conditionBranchRows, conditionOperators, defaultCondition, normalizeExtractConfig} from './model.js'
 
 function FlowchartShape({kind, marker}) {
   return (
@@ -12,7 +12,7 @@ function FlowchartShape({kind, marker}) {
 
 function controlShapeKind(type) {
   if (type === 'condition') return 'decision'
-  if (type === 'parallel' || type === 'join' || type === 'loop' || type === 'upload') return `gateway ${type}`
+  if (type === 'parallel' || type === 'join' || type === 'loop' || type === 'upload' || type === 'extract_config') return `gateway ${type}`
   return 'planned'
 }
 
@@ -22,6 +22,7 @@ function controlShapeMarker(type) {
   if (type === 'join') return '∧'
   if (type === 'loop') return '↻'
   if (type === 'upload') return '↑'
+  if (type === 'extract_config') return '⇩'
   return '·'
 }
 
@@ -31,6 +32,7 @@ function controlShapeLabel(type) {
   if (type === 'join') return 'Gateway 合流'
   if (type === 'loop') return 'Loop 固定次数循环'
   if (type === 'upload') return 'Upload 上传文件'
+  if (type === 'extract_config') return 'Extract Config 提取配置'
   return '流程节点'
 }
 
@@ -40,6 +42,7 @@ function controlNodeHelp(type) {
   if (type === 'join') return '等待多个上游分支完成后继续流程'
   if (type === 'loop') return '按固定次数重复执行一个内嵌选择的插件工具'
   if (type === 'upload') return '运行前上传本地文件、批量文件或目录到平台目录'
+  if (type === 'extract_config') return '从上传结果提取文件到工作流配置中心'
   return '编排控制节点'
 }
 
@@ -123,6 +126,7 @@ function ToolNode({id, data, selected}) {
       <Handle type="target" position={Position.Left} />
       <RunStatusBadge run={data.run} />
       <NodeDeleteButton id={id} onRemove={data.onRemove} />
+      <NodeRerunButton id={id} onRerun={data.onRerun} disabled={data.rerunDisabled} />
       <div className="nodeTopBar">
         <span className="nodeHeaderShape process" aria-hidden="true" />
         <strong>{data.name || id}</strong>
@@ -150,6 +154,7 @@ function ConditionNode({id, data, selected}) {
       <Handle type="target" position={Position.Left} />
       <RunStatusBadge run={data.run} />
       <NodeDeleteButton id={id} onRemove={data.onRemove} />
+      <NodeRerunButton id={id} onRerun={data.onRerun} disabled={data.rerunDisabled} />
       <div className="conditionNodeMain">
         <div className="nodeTopBar conditionTopBar">
           <span className="conditionDiamond" aria-hidden="true"><span>?</span></span>
@@ -192,10 +197,20 @@ function ControlNode({id, data, selected}) {
   const loopSummary = loop.tool ? `工具 ${loop.tool} × ${loop.max_iterations || 0}` : '未配置循环工具'
   const runLoopSummary = data.run?.loopIterations ? `实际迭代 ${data.run.loopIterations} 次` : ''
   const uploadSummary = data.upload?.target_dir ? `目标 uploads/${data.upload.target_dir}` : '目标默认 uploads 目录'
+  const extractConfig = normalizeExtractConfig(data.extract_config || {})
+  const extractSummary = extractConfig.source_type === 'directory'
+    ? extractConfig.files.length > 0
+      ? `${extractConfig.source_dir || '未填源目录'} → ${extractConfig.files.length} 个文件`
+      : '未配置目录文件'
+    : extractConfig.target_path
+      ? `${extractConfig.file_name || '未填源文件'} → ${extractConfig.target_path}`
+      : '未配置提取映射'
   const helpText = data.controlType === 'loop'
     ? [loopSummary, runLoopSummary].filter(Boolean).join('；')
     : data.controlType === 'upload'
       ? uploadSummary
+      : data.controlType === 'extract_config'
+        ? extractSummary
       : controlNodeHelp(data.controlType)
   const runTitle = formatNodeRunTitle(data.run)
   const nodeTitle = [data.name || id, controlShapeLabel(data.controlType), helpText, runTitle].filter(Boolean).join('\n')
@@ -204,6 +219,7 @@ function ControlNode({id, data, selected}) {
       <Handle type="target" position={Position.Left} />
       <RunStatusBadge run={data.run} />
       <NodeDeleteButton id={id} onRemove={data.onRemove} />
+      <NodeRerunButton id={id} onRerun={data.onRerun} disabled={data.rerunDisabled} />
       <div className="nodeTopBar controlTopBar">
         <FlowchartShape kind={controlShapeKind(data.controlType)} marker={controlShapeMarker(data.controlType)} />
         <strong>{data.name || id}</strong>
@@ -222,11 +238,33 @@ function NodeDeleteButton({id, onRemove}) {
   return (
     <button
       className="nodeDelete nodrag nopan"
+      type="button"
+      onPointerDown={event => event.stopPropagation()}
       onMouseDown={event => event.stopPropagation()}
       onClick={event => { event.stopPropagation(); onRemove(id) }}
       title="删除节点"
     >
       ×
+    </button>
+  )
+}
+
+function NodeRerunButton({id, onRerun, disabled}) {
+  if (!onRerun) return null
+  return (
+    <button
+      type="button"
+      className="nodeRerun nodrag nopan"
+      disabled={disabled}
+      title={disabled ? '当前运行中，不能重跑节点' : '从该节点开始重跑'}
+      onPointerDown={event => event.stopPropagation()}
+      onMouseDown={event => event.stopPropagation()}
+      onClick={event => {
+        event.stopPropagation()
+        if (!disabled) onRerun(id)
+      }}
+    >
+      重跑
     </button>
   )
 }
@@ -239,6 +277,7 @@ function QuickAddDownstreamButton({id, onAddDownstream}) {
       className="quickNodeActions quickNodeActionsTrigger nodrag nopan"
       title="添加下游节点并自动连接"
       aria-label="添加下游节点"
+      onPointerDown={event => event.stopPropagation()}
       onMouseDown={event => event.stopPropagation()}
       onClick={event => {
         event.stopPropagation()

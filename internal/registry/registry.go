@@ -418,6 +418,7 @@ func normalizePluginTool(root *config.RootConfig, pkg plugin.Package, contribute
 			Workdir: filepath.ToSlash(filepath.Clean(workdir)),
 		},
 		Parameters:     contributed.Parameters,
+		Outputs:        contributed.Outputs,
 		PassMode:       pluginPassMode(contributed.PassMode),
 		ConfigDefaults: config.CopyValues(contributed.ConfigDefaults),
 		ConfigDir:      configDir,
@@ -435,6 +436,7 @@ func normalizePluginTool(root *config.RootConfig, pkg plugin.Package, contribute
 		Confirm: contributed.Confirm,
 		Env:     contributed.Env,
 	}
+	config.NormalizeToolConfig(cfg)
 	return cfg, pkg.Dir, nil
 }
 

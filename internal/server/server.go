@@ -638,6 +638,7 @@ type toolCatalogEntry struct {
 	Tags           []string               `json:"tags"`
 	Execution      config.ExecutionConfig `json:"execution"`
 	Parameters     []config.Parameter     `json:"parameters"`
+	Outputs        []config.ToolOutput    `json:"outputs"`
 	ConfigFiles    []string               `json:"config_files"`
 	ConfigFileRefs []config.ConfigFileRef `json:"config_file_entries,omitempty"`
 	Confirm        config.Confirmation    `json:"confirm"`
@@ -646,10 +647,11 @@ type toolCatalogEntry struct {
 
 type workflowCatalogEntry struct {
 	config.WorkflowRef
-	Tags       []string            `json:"tags"`
-	Parameters []config.Parameter  `json:"parameters"`
-	Confirm    config.Confirmation `json:"confirm"`
-	Source     registry.Source     `json:"source"`
+	Tags        []string               `json:"tags"`
+	Parameters  []config.Parameter     `json:"parameters"`
+	ConfigFiles []config.ConfigFileRef `json:"config_files,omitempty"`
+	Confirm     config.Confirmation    `json:"confirm"`
+	Source      registry.Source        `json:"source"`
 }
 
 type pluginCatalogEntry struct {
@@ -1117,7 +1119,15 @@ func workflowsHandler(state *serverState) http.HandlerFunc {
 		r := runner.New(reg)
 		path := strings.TrimPrefix(req.URL.Path, "/api/workflows/")
 		if req.Method == http.MethodGet {
+			if strings.HasSuffix(path, "/files") || strings.Contains(path, "/files/") {
+				handleWorkflowFilesRoute(w, req, state, path)
+				return
+			}
 			handleWorkflowGet(w, reg, path)
+			return
+		}
+		if (req.Method == http.MethodPut || req.Method == http.MethodDelete) && (strings.HasSuffix(path, "/files") || strings.Contains(path, "/files/")) {
+			handleWorkflowFilesRoute(w, req, state, path)
 			return
 		}
 		if req.Method == http.MethodDelete {
@@ -1132,6 +1142,10 @@ func workflowsHandler(state *serverState) http.HandlerFunc {
 			handleWorkflowRun(w, req, state, reg, r, strings.TrimSuffix(path, "/run"))
 			return
 		}
+		if strings.HasSuffix(path, "/files") || strings.Contains(path, "/files/") {
+			handleWorkflowFilesRoute(w, req, state, path)
+			return
+		}
 		if strings.HasSuffix(path, "/validate") {
 			handleWorkflowValidate(w, req, reg)
 			return
@@ -1142,6 +1156,25 @@ func workflowsHandler(state *serverState) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
 	}
+}
+
+func handleWorkflowFilesRoute(w http.ResponseWriter, req *http.Request, state *serverState, path string) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 2 || parts[1] != "files" {
+		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
+		return
+	}
+	workflowID := parts[0]
+	if len(parts) == 2 {
+		handleWorkflowConfigFiles(w, req, state, workflowID)
+		return
+	}
+	fileID, err := url.PathUnescape(strings.Join(parts[2:], "/"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: "配置文件 ID 格式错误"})
+		return
+	}
+	handleWorkflowConfigFile(w, req, state, workflowID, fileID)
 }
 
 func handleWorkflowGet(w http.ResponseWriter, reg *registry.Registry, path string) {
@@ -1322,12 +1355,144 @@ func handleWorkflowDelete(w http.ResponseWriter, reg *registry.Registry, path st
 		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
 		return
 	}
+	if err := os.RemoveAll(workflowConfigDir(reg, id)); err != nil && !os.IsNotExist(err) {
+		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+		return
+	}
 	delete(reg.Workflows, id)
 	if err := maintainUserWorkflowPluginManifest(reg); err != nil {
 		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, response{Status: "deleted", ID: id})
+}
+
+func handleWorkflowConfigFiles(w http.ResponseWriter, req *http.Request, state *serverState, workflowID string) {
+	if req.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	reg := state.registry()
+	wf, err := userWorkflow(reg, workflowID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	files, err := scanWorkflowConfigFiles(reg, wf.Config.ID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"files": files}})
+}
+
+func handleWorkflowConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, workflowID, fileID string) {
+	switch req.Method {
+	case http.MethodGet:
+		handleGetWorkflowConfigFile(w, state, workflowID, fileID)
+	case http.MethodPut:
+		handleSaveWorkflowConfigFile(w, req, state, workflowID, fileID)
+	case http.MethodDelete:
+		handleDeleteWorkflowConfigFile(w, state, workflowID, fileID)
+	default:
+		methodNotAllowed(w)
+	}
+}
+
+func handleGetWorkflowConfigFile(w http.ResponseWriter, state *serverState, workflowID, fileID string) {
+	reg := state.registry()
+	entry, _, err := declaredWorkflowConfigFile(reg, workflowID, fileID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	filePath, err := resolvedWorkflowConfigFilePath(reg, workflowID, entry)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	content, err := readConfigFileContent(filePath)
+	if err != nil {
+		if os.IsNotExist(err) && entry.Create {
+			writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"content": ""}})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"content": content}})
+}
+
+func handleSaveWorkflowConfigFile(w http.ResponseWriter, req *http.Request, state *serverState, workflowID, fileID string) {
+	defer req.Body.Close()
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: "请求格式错误"})
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	entry, _, err := declaredWorkflowConfigFile(state.reg, workflowID, fileID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	if entry.Access != config.ConfigFileAccessReadWrite {
+		writeJSON(w, http.StatusBadRequest, response{Error: "配置文件声明为只读，不能保存"})
+		return
+	}
+	if int64(len([]byte(body.Content))) > maxPluginConfigFileBytes {
+		writeJSON(w, http.StatusBadRequest, response{Error: "配置文件内容超过大小限制"})
+		return
+	}
+	filePath, err := resolvedWorkflowConfigFilePath(state.reg, workflowID, entry)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	if err := writeConfigFileContent(filePath, body.Content, entry.Create); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"message": "工作流配置文件已保存"}})
+}
+
+func handleDeleteWorkflowConfigFile(w http.ResponseWriter, state *serverState, workflowID, fileID string) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	entry, wf, err := declaredWorkflowConfigFile(state.reg, workflowID, fileID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	filePath, err := resolvedWorkflowConfigFilePath(state.reg, workflowID, entry)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	if wf != nil && wf.Config != nil && len(wf.Config.ConfigFiles) > 0 {
+		filtered := wf.Config.ConfigFiles[:0]
+		for _, item := range wf.Config.ConfigFiles {
+			normalized := normalizeWorkflowConfigFileRef(wf.Config.ID, item)
+			if normalized.ID == fileID {
+				continue
+			}
+			filtered = append(filtered, item)
+		}
+		wf.Config.ConfigFiles = filtered
+		if err := saveWorkflowAssetForWorkflow(state.reg, wf.Config); err != nil {
+			writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("更新工作流配置声明失败: %v", err)})
+			return
+		}
+		state.reg.Workflows[wf.Config.ID] = wf
+	}
+	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("删除工作流配置文件失败: %v", err)})
+		return
+	}
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{"message": "工作流配置文件已删除"}})
 }
 
 func runsHandler(state *serverState) http.HandlerFunc {
@@ -1341,6 +1506,10 @@ func runsHandler(state *serverState) http.HandlerFunc {
 		if req.Method == http.MethodPost {
 			if runID, ok := strings.CutSuffix(strings.Trim(id, "/"), "/cancel"); ok {
 				handleRunCancel(w, state, reg, strings.Trim(runID, "/"))
+				return
+			}
+			if runID, nodeID, ok := parseRunNodeRerunPath(id); ok {
+				handleRunNodeRerun(w, req, state, reg, strings.Trim(runID, "/"), strings.Trim(nodeID, "/"))
 				return
 			}
 			if runID, nodeID, action, ok := parseRunUploadPath(id); ok {
@@ -1378,6 +1547,14 @@ func runsHandler(state *serverState) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, response{Data: detail})
 	}
+}
+
+func parseRunNodeRerunPath(path string) (string, string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 4 || parts[1] != "nodes" || parts[3] != "rerun" {
+		return "", "", false
+	}
+	return parts[0], parts[2], true
 }
 
 func parseRunUploadPath(path string) (string, string, string, bool) {
@@ -1419,6 +1596,88 @@ func handleRunCancel(w http.ResponseWriter, state *serverState, reg *registry.Re
 		return
 	}
 	writeJSON(w, http.StatusOK, response{Status: "cancelling", Data: map[string]string{"id": id, "status": "cancelling"}})
+}
+
+func handleRunNodeRerun(w http.ResponseWriter, req *http.Request, state *serverState, reg *registry.Registry, runID, nodeID string) {
+	if req.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if strings.TrimSpace(runID) == "" || strings.TrimSpace(nodeID) == "" {
+		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
+		return
+	}
+	if state.hasActiveRun(runID) {
+		writeJSON(w, http.StatusConflict, response{Error: "运行任务正在执行，不能重跑节点"})
+		return
+	}
+	reqBody, err := decodeRunRequest(req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	detail, err := loadRunDetail(reg, runID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+		return
+	}
+	if detail.Record.Status == "running" {
+		writeJSON(w, http.StatusBadRequest, response{Error: "运行中的工作流不能重跑节点"})
+		return
+	}
+	workflowConfig := reqBody.Workflow
+	if workflowConfig == nil {
+		wf, err := reg.Workflow(detail.Record.Target)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+			return
+		}
+		workflowConfig = wf.Config
+	}
+	if workflowConfig.ID != detail.Record.Target {
+		writeJSON(w, http.StatusBadRequest, response{Error: "请求工作流与运行记录不一致"})
+		return
+	}
+	if workflowConfig.Confirm.Required && !reqBody.Confirm {
+		writeJSON(w, http.StatusBadRequest, response{Error: "该工作流需要确认后执行"})
+		return
+	}
+	if err := confirmWorkflowTools(reg, workflowConfig, reqBody.Confirm); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	rerunParams := config.ValuesToStringMap(config.MergeParamsValues(workflowConfig.Parameters, config.InterfaceMapToValues(detail.Record.Config), config.InterfaceMapToValues(reqBody.Params)))
+	if len(detail.Record.Config) == 0 {
+		rerunParams = config.ValuesToStringMap(config.MergeParamsValues(workflowConfig.Parameters, config.StringMapToValues(detail.Record.Params), config.InterfaceMapToValues(reqBody.Params)))
+	}
+	if err := config.ValidateRequired(workflowConfig.Parameters, rerunParams); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
+	runDir, err := runbundle.RunDir(reg, runID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+		return
+	}
+	r := runner.New(reg)
+	record := detail.Record
+	ctx, cancel := context.WithCancel(context.Background())
+	state.registerRun(runID, cancel)
+	defer func() {
+		state.finishRun(runID)
+		cancel()
+	}()
+	updated, err := r.RerunWorkflowNodeWithParams(ctx, workflowConfig, &record, runDir, nodeID, rerunParams, reqBody.Confirm, io.Discard, io.Discard)
+	if err != nil {
+		writeRunResponse(w, updated, err)
+		return
+	}
+	rerunDetail, err := loadRunDetail(reg, runID)
+	if err != nil {
+		writeJSON(w, http.StatusOK, response{ID: updated.ID, Status: updated.Status, Data: runDetail{Record: *updated}})
+		return
+	}
+	writeJSON(w, http.StatusOK, response{ID: updated.ID, Status: updated.Status, Data: rerunDetail})
 }
 
 func handleRunUploadNode(w http.ResponseWriter, req *http.Request, state *serverState, reg *registry.Registry, runID, nodeID, action string) {
@@ -2107,10 +2366,10 @@ func buildCatalog(reg *registry.Registry) catalogResponse {
 		out.Plugins = append(out.Plugins, item)
 	}
 	for _, tool := range reg.OrderedTools() {
-		out.Tools = append(out.Tools, toolCatalogEntry{ToolEntry: tool.Entry, Tags: tool.Config.Tags, Execution: tool.Config.Execution, Parameters: tool.Config.Parameters, ConfigFiles: tool.Config.ConfigFiles, ConfigFileRefs: declaredConfigFiles(tool.Config), Confirm: tool.Config.Confirm, Source: tool.Source})
+		out.Tools = append(out.Tools, toolCatalogEntry{ToolEntry: tool.Entry, Tags: tool.Config.Tags, Execution: tool.Config.Execution, Parameters: tool.Config.Parameters, Outputs: tool.Config.Outputs, ConfigFiles: tool.Config.ConfigFiles, ConfigFileRefs: declaredConfigFiles(tool.Config), Confirm: tool.Config.Confirm, Source: tool.Source})
 	}
 	for _, wf := range reg.Workflows {
-		out.Workflows = append(out.Workflows, workflowCatalogEntry{WorkflowRef: wf.Entry, Tags: wf.Config.Tags, Parameters: wf.Config.Parameters, Confirm: effectiveWorkflowConfirm(reg, wf.Config), Source: wf.Source})
+		out.Workflows = append(out.Workflows, workflowCatalogEntry{WorkflowRef: wf.Entry, Tags: wf.Config.Tags, Parameters: wf.Config.Parameters, ConfigFiles: workflowConfigFilesForCatalog(reg, wf.Config), Confirm: effectiveWorkflowConfirm(reg, wf.Config), Source: wf.Source})
 	}
 	return out
 }
@@ -2468,18 +2727,20 @@ func errorText(err error) string {
 const maxPluginConfigFileBytes int64 = 1024 * 1024
 
 type pluginConfigFileStatus struct {
-	ID        string `json:"id"`
-	Label     string `json:"label,omitempty"`
-	ConfigDir string `json:"config_dir,omitempty"`
-	Path      string `json:"path"`
-	Scope     string `json:"scope"`
-	Access    string `json:"access"`
-	Create    bool   `json:"create"`
-	Exists    bool   `json:"exists"`
-	Readable  bool   `json:"readable"`
-	Writable  bool   `json:"writable"`
-	Reason    string `json:"reason,omitempty"`
-	Size      int64  `json:"size,omitempty"`
+	ID          string `json:"id"`
+	Label       string `json:"label,omitempty"`
+	ConfigDir   string `json:"config_dir,omitempty"`
+	DisplayRoot string `json:"display_root,omitempty"`
+	Path        string `json:"path"`
+	DisplayPath string `json:"display_path,omitempty"`
+	Scope       string `json:"scope"`
+	Access      string `json:"access"`
+	Create      bool   `json:"create"`
+	Exists      bool   `json:"exists"`
+	Readable    bool   `json:"readable"`
+	Writable    bool   `json:"writable"`
+	Reason      string `json:"reason,omitempty"`
+	Size        int64  `json:"size,omitempty"`
 }
 
 func handlePluginConfigFiles(w http.ResponseWriter, req *http.Request, state *serverState, pluginID string) {
@@ -2716,6 +2977,383 @@ func declaredConfigFiles(toolCfg *config.ToolConfig) []config.ConfigFileRef {
 	return out
 }
 
+func workflowConfigDirRef(workflowID string) string {
+	return filepath.ToSlash(filepath.Join("config", "workflows", workflowFilenameBase(workflowID)))
+}
+
+func workflowFilenameBase(id string) string {
+	return strings.TrimSuffix(workflowFilename(id), ".yaml")
+}
+
+func workflowConfigDir(reg *registry.Registry, workflowID string) string {
+	return filepath.Join(userWorkflowPluginDir(reg), "config", "workflows", workflowFilenameBase(workflowID))
+}
+
+func resolvedWorkflowConfigFilePath(reg *registry.Registry, workflowID string, entry config.ConfigFileRef) (string, error) {
+	entry = normalizeWorkflowConfigFileRef(workflowID, entry)
+	if entry.Scope != config.ConfigFileScopePlugin {
+		return "", fmt.Errorf("工作流配置文件只支持 plugin scope")
+	}
+	if entry.Legacy {
+		return joinConfigFilePath(workflowConfigDir(reg, workflowID), entry.Path)
+	}
+	baseDir, err := resolvedWorkflowConfigDir(reg, entry.ConfigDir)
+	if err != nil {
+		return "", err
+	}
+	return joinConfigFilePath(baseDir, entry.Path)
+}
+
+func workflowConfigFilePath(reg *registry.Registry, workflowID, path string) (string, error) {
+	return resolvedWorkflowConfigFilePath(reg, workflowID, config.ConfigFileRef{
+		ID:        path,
+		ConfigDir: workflowConfigDirRef(workflowID),
+		Path:      path,
+		Scope:     config.ConfigFileScopePlugin,
+		Access:    config.ConfigFileAccessReadWrite,
+		Create:    true,
+	})
+}
+
+func declaredWorkflowConfigFile(reg *registry.Registry, workflowID, fileID string) (config.ConfigFileRef, *registry.Workflow, error) {
+	if strings.TrimSpace(fileID) == "" || strings.Contains(fileID, "\x00") {
+		return config.ConfigFileRef{}, nil, fmt.Errorf("配置文件 ID 不安全")
+	}
+	wf, err := userWorkflow(reg, workflowID)
+	if err != nil {
+		return config.ConfigFileRef{}, nil, err
+	}
+	if len(wf.Config.ConfigFiles) > 0 {
+		for _, entry := range declaredWorkflowConfigFiles(reg, wf) {
+			if entry.ID == fileID {
+				return entry, wf, nil
+			}
+		}
+		return config.ConfigFileRef{}, nil, fmt.Errorf("配置文件 %s 未在工作流 %s 中声明", fileID, workflowID)
+	}
+	files, err := scanWorkflowConfigFiles(reg, workflowID)
+	if err != nil {
+		return config.ConfigFileRef{}, nil, err
+	}
+	for _, entry := range files {
+		if entry.ID == fileID {
+			return workflowStatusToConfigRef(workflowID, entry), wf, nil
+		}
+	}
+	return config.ConfigFileRef{}, nil, fmt.Errorf("配置文件 %s 未在工作流 %s 中声明", fileID, workflowID)
+}
+
+func scanWorkflowConfigFiles(reg *registry.Registry, workflowID string) ([]pluginConfigFileStatus, error) {
+	wf, err := userWorkflow(reg, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	if len(wf.Config.ConfigFiles) > 0 {
+		return workflowDeclaredConfigFileStatuses(reg, wf)
+	}
+	root := workflowConfigDir(reg, workflowID)
+	if _, err := os.Stat(root); err != nil {
+		if os.IsNotExist(err) {
+			return []pluginConfigFileStatus{}, nil
+		}
+		return nil, err
+	}
+	files := []pluginConfigFileStatus{}
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		entry := pluginConfigFileStatus{
+			ID:          rel,
+			Label:       filepath.Base(rel),
+			ConfigDir:   workflowConfigDirRef(workflowID),
+			Path:        rel,
+			DisplayPath: workflowConfigDisplayPath(config.ConfigFileRef{ConfigDir: workflowConfigDirRef(workflowID), Path: rel}),
+			Scope:       config.ConfigFileScopePlugin,
+			Access:      config.ConfigFileAccessReadWrite,
+			Create:      true,
+		}
+		status := configFileStatus(nil, workflowStatusToConfigRef(workflowID, entry), path)
+		status.ConfigDir = entry.ConfigDir
+		status.DisplayPath = entry.DisplayPath
+		files = append(files, status)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].ID < files[j].ID })
+	return files, nil
+}
+
+func workflowStatusToConfigRef(workflowID string, status pluginConfigFileStatus) config.ConfigFileRef {
+	configDir := status.ConfigDir
+	if configDir == "" {
+		configDir = workflowConfigDirRef(workflowID)
+	}
+	return config.ConfigFileRef{
+		ID:        status.ID,
+		Label:     status.Label,
+		ConfigDir: configDir,
+		Path:      status.Path,
+		Scope:     status.Scope,
+		Access:    status.Access,
+		Create:    status.Create,
+		Legacy:    true,
+	}
+}
+
+func declaredWorkflowConfigFiles(reg *registry.Registry, wf *registry.Workflow) []config.ConfigFileRef {
+	if wf == nil || wf.Config == nil {
+		return nil
+	}
+	out := make([]config.ConfigFileRef, 0, len(wf.Config.ConfigFiles))
+	for _, entry := range wf.Config.ConfigFiles {
+		out = append(out, normalizeWorkflowConfigFileRef(wf.Config.ID, entry))
+	}
+	return out
+}
+
+func workflowDeclaredConfigFileStatuses(reg *registry.Registry, wf *registry.Workflow) ([]pluginConfigFileStatus, error) {
+	files := []pluginConfigFileStatus{}
+	for _, entry := range declaredWorkflowConfigFiles(reg, wf) {
+		filePath, err := resolvedWorkflowConfigFilePath(reg, wf.Config.ID, entry)
+		if err != nil {
+			files = append(files, workflowConfigFileStatus(entry, "", err.Error()))
+			continue
+		}
+		files = append(files, workflowConfigFileStatus(entry, filePath, ""))
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].ID < files[j].ID })
+	return files, nil
+}
+
+func workflowConfigFileStatus(entry config.ConfigFileRef, filePath, reason string) pluginConfigFileStatus {
+	status := pluginConfigFileStatus{
+		ID:          entry.ID,
+		Label:       entry.Label,
+		ConfigDir:   entry.ConfigDir,
+		DisplayRoot: workflowConfigDisplayRoot(entry),
+		Path:        entry.Path,
+		DisplayPath: workflowConfigDisplayPath(entry),
+		Scope:       entry.Scope,
+		Access:      entry.Access,
+		Create:      entry.Create,
+		Reason:      reason,
+	}
+	if filePath == "" {
+		return status
+	}
+	next := configFileStatus(nil, entry, filePath)
+	next.DisplayPath = workflowConfigDisplayPath(entry)
+	if reason != "" {
+		next.Reason = reason
+	}
+	return next
+}
+
+func workflowConfigFilesForCatalog(reg *registry.Registry, wf *config.WorkflowConfig) []config.ConfigFileRef {
+	if wf == nil {
+		return nil
+	}
+	if len(wf.ConfigFiles) > 0 {
+		out := make([]config.ConfigFileRef, 0, len(wf.ConfigFiles))
+		for _, entry := range wf.ConfigFiles {
+			out = append(out, normalizeWorkflowConfigFileRef(wf.ID, entry))
+		}
+		return out
+	}
+	files, err := scanWorkflowConfigFiles(reg, wf.ID)
+	if err == nil {
+		out := make([]config.ConfigFileRef, 0, len(files))
+		for _, file := range files {
+			out = append(out, workflowStatusToConfigRef(wf.ID, file))
+		}
+		return out
+	}
+	out := make([]config.ConfigFileRef, 0, len(wf.ConfigFiles))
+	for _, entry := range wf.ConfigFiles {
+		out = append(out, normalizeWorkflowConfigFileRef(wf.ID, entry))
+	}
+	return out
+}
+
+func normalizeWorkflowConfigFileRef(workflowID string, entry config.ConfigFileRef) config.ConfigFileRef {
+	legacy := entry.Legacy
+	config.NormalizeConfigFileRef(&entry)
+	entry.Legacy = legacy
+	entry.Scope = config.ConfigFileScopePlugin
+	if !entry.Legacy && entry.ConfigDir == workflowConfigDirRef(workflowID) {
+		entry.ConfigDir = "."
+	}
+	if entry.Access == "" {
+		entry.Access = config.ConfigFileAccessReadWrite
+	}
+	if entry.Path == "" {
+		entry.Path = entry.ID
+	}
+	if entry.ID == "" {
+		entry.ID = entry.Path
+	}
+	return entry
+}
+
+func resolvedWorkflowConfigDir(reg *registry.Registry, configDir string) (string, error) {
+	configDir = strings.TrimSpace(configDir)
+	if configDir == "" {
+		configDir = "config"
+	}
+	return joinWorkflowConfigDir(reg.BaseDir, configDir)
+}
+
+func joinWorkflowConfigDir(baseDir, configDir string) (string, error) {
+	if strings.TrimSpace(configDir) == "" {
+		return "", fmt.Errorf("工作流 config_dir 不能为空")
+	}
+	if strings.Contains(configDir, "://") || filepath.IsAbs(configDir) || strings.HasPrefix(configDir, "/") || strings.HasPrefix(configDir, "\\") || len(configDir) >= 2 && configDir[1] == ':' {
+		return "", fmt.Errorf("工作流 config_dir 不能是绝对路径")
+	}
+	cleanDir := filepath.Clean(filepath.FromSlash(configDir))
+	if cleanDir == "." {
+		cleanDir = ""
+	} else if cleanDir == ".." || strings.HasPrefix(cleanDir, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("工作流 config_dir 不能逃逸运行根目录")
+	}
+	for _, part := range strings.FieldsFunc(configDir, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == "" || part == ".." {
+			return "", fmt.Errorf("工作流 config_dir 包含不安全路径片段")
+		}
+	}
+	baseAbs, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", err
+	}
+	pathAbs, err := filepath.Abs(filepath.Join(baseAbs, cleanDir))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(baseAbs, pathAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("工作流 config_dir 逃逸运行根目录")
+	}
+	return pathAbs, nil
+}
+
+func workflowConfigDisplayPath(entry config.ConfigFileRef) string {
+	configDir := strings.TrimSpace(entry.ConfigDir)
+	if configDir == "" || configDir == "." {
+		return filepath.ToSlash(entry.Path)
+	}
+	return filepath.ToSlash(filepath.Join(filepath.FromSlash(configDir), filepath.FromSlash(entry.Path)))
+}
+
+func workflowConfigDisplayRoot(entry config.ConfigFileRef) string {
+	configDir := strings.TrimSpace(entry.ConfigDir)
+	if configDir == "" || configDir == "." {
+		return "运行根目录"
+	}
+	return filepath.ToSlash(configDir)
+}
+
+func userWorkflow(reg *registry.Registry, workflowID string) (*registry.Workflow, error) {
+	if strings.TrimSpace(workflowID) == "" || strings.ContainsAny(workflowID, `/\`) || strings.Contains(workflowID, "\x00") {
+		return nil, fmt.Errorf("工作流 ID 不安全")
+	}
+	wf, err := reg.Workflow(workflowID)
+	if err != nil {
+		return nil, err
+	}
+	if wf.Source.PluginID != userWorkflowPluginID || !isUserWorkflowPluginPath(reg, wf.Path) {
+		return nil, fmt.Errorf("只能维护 Web 页面保存的用户工作流配置")
+	}
+	return wf, nil
+}
+
+func readConfigFileContent(filePath string) (string, error) {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return "", fmt.Errorf("配置文件不可读: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("配置文件不是普通文件")
+	}
+	if info.Size() > maxPluginConfigFileBytes {
+		return "", fmt.Errorf("配置文件超过大小限制")
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("读取配置文件失败: %w", err)
+	}
+	return string(data), nil
+}
+
+func writeConfigFileContent(filePath, content string, create bool) error {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("检查配置文件失败: %w", err)
+		}
+		if !create {
+			return fmt.Errorf("配置文件不存在且声明不允许创建")
+		}
+		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+			return fmt.Errorf("创建配置目录失败: %w", err)
+		}
+	} else {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("配置文件不是普通文件")
+		}
+		file, err := os.OpenFile(filePath, os.O_WRONLY, 0)
+		if err != nil {
+			return fmt.Errorf("配置文件不可写: %w", err)
+		}
+		_ = file.Close()
+	}
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("保存配置文件失败: %w", err)
+	}
+	return nil
+}
+
+func readWorkflowUploadResult(path string) (config.WorkflowUploadResult, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return config.WorkflowUploadResult{}, fmt.Errorf("读取上传结果失败: %w", err)
+	}
+	var upload config.WorkflowUploadResult
+	if err := json.Unmarshal(data, &upload); err != nil {
+		return config.WorkflowUploadResult{}, fmt.Errorf("解析上传结果失败: %w", err)
+	}
+	return upload, nil
+}
+
+func saveWorkflowAssetForWorkflow(reg *registry.Registry, wf *config.WorkflowConfig) error {
+	path := workflowPath(reg, wf.ID)
+	if err := saveWorkflow(path, wf); err != nil {
+		return err
+	}
+	if err := maintainUserWorkflowPluginManifest(reg); err != nil {
+		return err
+	}
+	reg.Workflows[wf.ID] = &registry.Workflow{Entry: workflowEntryForSavedWorkflow(reg, path, wf), Config: wf, Path: path, Source: workflowSource(reg, path)}
+	return nil
+}
+
 func expandDeclaredConfigFiles(root *config.RootConfig, toolCfg *config.ToolConfig, entry config.ConfigFileRef) ([]config.ConfigFileRef, error) {
 	entry = normalizeServerConfigFileRef(entry)
 	baseDir, err := resolvedConfigDir(root, toolCfg, entry)
@@ -2941,7 +3579,7 @@ func resolveHostConfigFileForServer(cleanAbs string) (string, error) {
 
 func configFileStatus(toolCfg *config.ToolConfig, entry config.ConfigFileRef, filePath string) pluginConfigFileStatus {
 	entry = normalizeServerConfigFileRef(entry)
-	status := pluginConfigFileStatus{ID: entry.ID, Label: entry.Label, ConfigDir: entry.ConfigDir, Path: entry.Path, Scope: entry.Scope, Access: entry.Access, Create: entry.Create}
+	status := pluginConfigFileStatus{ID: entry.ID, Label: entry.Label, ConfigDir: entry.ConfigDir, Path: entry.Path, DisplayPath: displayConfigFilePath(entry), Scope: entry.Scope, Access: entry.Access, Create: entry.Create}
 	info, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -2989,6 +3627,14 @@ func configFileStatus(toolCfg *config.ToolConfig, entry config.ConfigFileRef, fi
 		status.Reason = "只读"
 	}
 	return status
+}
+
+func displayConfigFilePath(entry config.ConfigFileRef) string {
+	entry = normalizeServerConfigFileRef(entry)
+	if entry.ConfigDir == "" || entry.ConfigDir == "." {
+		return filepath.ToSlash(entry.Path)
+	}
+	return filepath.ToSlash(filepath.Join(entry.ConfigDir, entry.Path))
 }
 
 func parentWritable(parent string) bool {

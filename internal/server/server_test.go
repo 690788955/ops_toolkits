@@ -274,6 +274,89 @@ func TestWorkflowRunAPIAsyncReturnsRunningRecordAndPersistsLogs(t *testing.T) {
 	}
 }
 
+func TestRunNodeRerunAPIOverwritesSameRun(t *testing.T) {
+	reg := testRegistry(t)
+	configureHelperTool(t, reg, "demo.hello", "rerun-api")
+	body := `{"params":{},"workflow":{"id":"demo.rerun.api","name":"重跑流程","nodes":[{"id":"first","tool":"demo.hello"},{"id":"second","tool":"demo.hello","params":{"input":"{{ .steps.first.stdout }}"}}],"edges":[{"from":"first","to":"second"}]}}`
+	handler := NewHandler(reg)
+	runReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.rerun.api/run", strings.NewReader(body))
+	runRes := httptest.NewRecorder()
+	handler.ServeHTTP(runRes, runReq)
+	if runRes.Code != http.StatusOK {
+		t.Fatalf("run status = %d, body = %s", runRes.Code, runRes.Body.String())
+	}
+	var started response
+	if err := json.Unmarshal(runRes.Body.Bytes(), &started); err != nil {
+		t.Fatalf("解析运行响应失败: %v", err)
+	}
+	if started.ID == "" || started.Status != "succeeded" {
+		t.Fatalf("run response = %#v", started)
+	}
+
+	rerunReq := httptest.NewRequest(http.MethodPost, "/api/runs/"+started.ID+"/nodes/second/rerun", strings.NewReader(body))
+	rerunRes := httptest.NewRecorder()
+	handler.ServeHTTP(rerunRes, rerunReq)
+	if rerunRes.Code != http.StatusOK {
+		t.Fatalf("rerun status = %d, body = %s", rerunRes.Code, rerunRes.Body.String())
+	}
+	if !strings.Contains(rerunRes.Body.String(), `"id":"`+started.ID+`"`) || !strings.Contains(rerunRes.Body.String(), `"status":"succeeded"`) || !strings.Contains(rerunRes.Body.String(), "rerun-api") {
+		t.Fatalf("rerun response missing same run success detail: %s", rerunRes.Body.String())
+	}
+	detailRes := httptest.NewRecorder()
+	handler.ServeHTTP(detailRes, httptest.NewRequest(http.MethodGet, "/api/runs/"+started.ID, nil))
+	if detailRes.Code != http.StatusOK || !strings.Contains(detailRes.Body.String(), `"target":"demo.rerun.api"`) {
+		t.Fatalf("detail status = %d, body = %s", detailRes.Code, detailRes.Body.String())
+	}
+}
+
+func TestRunNodeRerunAPIRejectsNonPost(t *testing.T) {
+	reg := testRegistry(t)
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, httptest.NewRequest(http.MethodPut, "/api/runs/run-1/nodes/step-1/rerun", nil))
+
+	if res.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("rerun PUT status = %d, body = %s", res.Code, res.Body.String())
+	}
+}
+
+func TestRunNodeRerunAPIUsesOverrideParams(t *testing.T) {
+	reg := testRegistry(t)
+	toolDir := reg.Tools["demo.hello"].Dir
+	if err := os.MkdirAll(filepath.Join(toolDir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(toolDir, "bin", "run.sh"), []byte("#!/usr/bin/env bash\nset -euo pipefail\necho \"name=${OPS_PARAM_NAME}\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"params":{"name":"old"},"workflow":{"id":"demo.rerun.params","name":"重跑参数流程","parameters":[{"name":"name","type":"string","default":"old"}],"nodes":[{"id":"first","tool":"demo.hello","params":{"name":"{{ .name }}"}},{"id":"second","tool":"demo.hello","params":{"name":"{{ .name }}"}}],"edges":[{"from":"first","to":"second"}]}}`
+	handler := NewHandler(reg)
+	runReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.rerun.params/run", strings.NewReader(body))
+	runRes := httptest.NewRecorder()
+	handler.ServeHTTP(runRes, runReq)
+	if runRes.Code != http.StatusOK {
+		t.Fatalf("run status = %d, body = %s", runRes.Code, runRes.Body.String())
+	}
+	var started response
+	if err := json.Unmarshal(runRes.Body.Bytes(), &started); err != nil {
+		t.Fatalf("解析运行响应失败: %v", err)
+	}
+
+	rerunBody := strings.Replace(body, `"name":"old"`, `"name":"new"`, 1)
+	rerunReq := httptest.NewRequest(http.MethodPost, "/api/runs/"+started.ID+"/nodes/second/rerun", strings.NewReader(rerunBody))
+	rerunRes := httptest.NewRecorder()
+	handler.ServeHTTP(rerunRes, rerunReq)
+	if rerunRes.Code != http.StatusOK {
+		t.Fatalf("rerun status = %d, body = %s", rerunRes.Code, rerunRes.Body.String())
+	}
+	detailRes := httptest.NewRecorder()
+	handler.ServeHTTP(detailRes, httptest.NewRequest(http.MethodGet, "/api/runs/"+started.ID, nil))
+	bodyText := detailRes.Body.String()
+	if detailRes.Code != http.StatusOK || !strings.Contains(bodyText, `"name":"new"`) || !strings.Contains(bodyText, "name=new") {
+		t.Fatalf("detail status = %d, body = %s", detailRes.Code, bodyText)
+	}
+}
+
 func TestToolRunAPIAsyncReturnsRunningRecordAndPersistsLogs(t *testing.T) {
 	reg := testRegistry(t)
 	configureHelperTool(t, reg, "demo.hello", "async-tool")
@@ -334,7 +417,7 @@ func TestRunCancelAPIStopsAsyncWorkflow(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(toolDir, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(toolDir, "bin", "run.sh"), []byte("#!/usr/bin/env bash\nsleep 10\necho should-not-finish\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(toolDir, "bin", "run.sh"), []byte("#!/usr/bin/env bash\nsleep 10 &\nwait\necho should-not-finish\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	body := `{"params":{},"workflow":{"id":"demo.cancel","name":"取消草稿","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`
@@ -2474,6 +2557,127 @@ func TestWorkflowSaveAPIPreservesLoopRoundTrip(t *testing.T) {
 	text := string(content)
 	if !strings.Contains(text, "type: loop") || !strings.Contains(text, "tool: demo.hello") || !strings.Contains(text, "max_iterations: 3") {
 		t.Fatalf("saved workflow missing loop fields: %s", text)
+	}
+}
+
+func TestWorkflowConfigFilesAPIReadsAndWritesLegacyUserWorkflowFile(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	saveReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.config/save", strings.NewReader(`{"workflow":{"id":"demo.config","name":"配置流程","category":"demo","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`))
+	saveRes := httptest.NewRecorder()
+	handler.ServeHTTP(saveRes, saveReq)
+	if saveRes.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", saveRes.Code, saveRes.Body.String())
+	}
+	configPath := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "config", "workflows", "demo.config", "app.conf")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("initial=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	putRes := httptest.NewRecorder()
+	handler.ServeHTTP(putRes, httptest.NewRequest(http.MethodPut, "/api/workflows/demo.config/files/app.conf", strings.NewReader(`{"content":"enabled=true\n"}`)))
+	if putRes.Code != http.StatusOK {
+		t.Fatalf("put status = %d, body = %s", putRes.Code, putRes.Body.String())
+	}
+
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/workflows/demo.config/files", nil))
+	if listRes.Code != http.StatusOK || !strings.Contains(listRes.Body.String(), `"id":"app.conf"`) || !strings.Contains(listRes.Body.String(), `"config_dir":"config/workflows/demo.config"`) || !strings.Contains(listRes.Body.String(), `"display_path":"config/workflows/demo.config/app.conf"`) || !strings.Contains(listRes.Body.String(), `"readable":true`) {
+		t.Fatalf("list status = %d, body = %s", listRes.Code, listRes.Body.String())
+	}
+
+	getRes := httptest.NewRecorder()
+	handler.ServeHTTP(getRes, httptest.NewRequest(http.MethodGet, "/api/workflows/demo.config/files/app.conf", nil))
+	if getRes.Code != http.StatusOK || !strings.Contains(getRes.Body.String(), "enabled=true") {
+		t.Fatalf("get status = %d, body = %s", getRes.Code, getRes.Body.String())
+	}
+}
+
+func TestWorkflowConfigFilesUseRealMountedUploadPath(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	uploadPath := filepath.Join(reg.BaseDir, "runs", "uploads", "upload-1", "pkg.tar.gz")
+	if err := os.MkdirAll(filepath.Dir(uploadPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(uploadPath, []byte("initial=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	saveReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.uploadconfig/save", strings.NewReader(`{"workflow":{"id":"demo.uploadconfig","name":"上传配置","category":"demo","config_files":[{"id":"pkg","label":"部署包","config_dir":".","path":"runs/uploads/upload-1/pkg.tar.gz","access":"read_write","create":true}],"nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`))
+	saveRes := httptest.NewRecorder()
+	handler.ServeHTTP(saveRes, saveReq)
+	if saveRes.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", saveRes.Code, saveRes.Body.String())
+	}
+
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/workflows/demo.uploadconfig/files", nil))
+	if listRes.Code != http.StatusOK || !strings.Contains(listRes.Body.String(), `"id":"pkg"`) || !strings.Contains(listRes.Body.String(), `"path":"runs/uploads/upload-1/pkg.tar.gz"`) || !strings.Contains(listRes.Body.String(), `"display_path":"runs/uploads/upload-1/pkg.tar.gz"`) || strings.Contains(listRes.Body.String(), "plugins/user.workflows") {
+		t.Fatalf("list status = %d, body = %s", listRes.Code, listRes.Body.String())
+	}
+
+	putRes := httptest.NewRecorder()
+	handler.ServeHTTP(putRes, httptest.NewRequest(http.MethodPut, "/api/workflows/demo.uploadconfig/files/pkg", strings.NewReader(`{"content":"updated=true\n"}`)))
+	if putRes.Code != http.StatusOK {
+		t.Fatalf("put status = %d, body = %s", putRes.Code, putRes.Body.String())
+	}
+	data, err := os.ReadFile(uploadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "updated=true\n" {
+		t.Fatalf("upload config content = %q", got)
+	}
+}
+
+func TestWorkflowConfigFilesDeleteMissingDeclaredFile(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	saveReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.missingconfig/save", strings.NewReader(`{"workflow":{"id":"demo.missingconfig","name":"缺失配置","category":"demo","config_files":[{"id":"missing","label":"缺失文件","config_dir":".","path":"runs/uploads/missing/app.conf","access":"read_write","create":true}],"nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`))
+	saveRes := httptest.NewRecorder()
+	handler.ServeHTTP(saveRes, saveReq)
+	if saveRes.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", saveRes.Code, saveRes.Body.String())
+	}
+
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/workflows/demo.missingconfig/files", nil))
+	if listRes.Code != http.StatusOK || !strings.Contains(listRes.Body.String(), `"id":"missing"`) || !strings.Contains(listRes.Body.String(), `"exists":false`) {
+		t.Fatalf("list status = %d, body = %s", listRes.Code, listRes.Body.String())
+	}
+
+	deleteRes := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRes, httptest.NewRequest(http.MethodDelete, "/api/workflows/demo.missingconfig/files/missing", nil))
+	if deleteRes.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, body = %s", deleteRes.Code, deleteRes.Body.String())
+	}
+
+	listAfter := httptest.NewRecorder()
+	handler.ServeHTTP(listAfter, httptest.NewRequest(http.MethodGet, "/api/workflows/demo.missingconfig/files", nil))
+	if listAfter.Code != http.StatusOK || strings.Contains(listAfter.Body.String(), `"id":"missing"`) {
+		t.Fatalf("list after delete status = %d, body = %s", listAfter.Code, listAfter.Body.String())
+	}
+	workflowPath := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "workflows", "demo.missingconfig.yaml")
+	workflowData, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(workflowData), "runs/uploads/missing/app.conf") {
+		t.Fatalf("workflow declaration still contains deleted file:\n%s", string(workflowData))
+	}
+}
+
+func TestWorkflowConfigFilesRejectUnsafeRealPath(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	saveReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.unsafeconfig/save", strings.NewReader(`{"workflow":{"id":"demo.unsafeconfig","name":"不安全配置","category":"demo","config_files":[{"id":"secret","config_dir":"..","path":"secret.conf","access":"read_write","create":true}],"nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`))
+	saveRes := httptest.NewRecorder()
+	handler.ServeHTTP(saveRes, saveReq)
+	if saveRes.Code == http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", saveRes.Code, saveRes.Body.String())
 	}
 }
 func TestPluginConfigFilesEditDeclaredPluginFile(t *testing.T) {

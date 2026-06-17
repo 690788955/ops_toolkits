@@ -1,0 +1,119 @@
+id: everisk.pkg
+name: 部署包上传与校验
+description: 部署包上传
+version: 1.0.0
+category: docker
+tags: []
+parameters: []
+config_files:
+  - id: runs/uploads/upload-1781683014142624500/ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1.tar.gz.02
+    label: ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1.tar.gz.02
+    config_dir: config/workflows/everisk.pkg
+    path: runs/uploads/upload-1781683014142624500/ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1.tar.gz.02
+    scope: plugin
+    access: read_write
+    create: true
+nodes:
+  - id: upload_1
+    type: upload
+    name: upload_1
+    tool: ""
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    upload:
+      target_dir: ""
+      config_exports: []
+    extract_config:
+      file_name: ""
+      target_path: ""
+      label: ""
+      replace: false
+    depends_on: []
+    params: {}
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+  - id: docker_exec_verify_md5_merge_2
+    type: tool
+    name: 分片包 MD5 校验并合并
+    tool: docker.exec.verify_md5_merge
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    upload:
+      target_dir: ""
+      config_exports: []
+    extract_config:
+      file_name: ""
+      target_path: ""
+      label: ""
+      replace: false
+    depends_on: []
+    params:
+      extract: "yes"
+      output: ""
+      path: '{{ .steps.upload_1.file.dir }}'
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+  - id: extract_config_3
+    type: extract_config
+    name: extract_config_3
+    tool: ""
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    upload:
+      target_dir: ""
+      config_exports: []
+    extract_config:
+      source_type: directory
+      file_name: ""
+      target_path: ""
+      label: ""
+      replace: false
+      files:
+        - file_name: ""
+          source_path: everisk-deployment/hosts-everisk-deploy
+          target_path: everisk-deployment/hosts-everisk-deploy
+          label: 主机清单
+          replace: false
+      source_dir: '{{ .steps.docker_exec_verify_md5_merge_2.outputs.extract_dir }}'
+    depends_on: []
+    params: {}
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+edges:
+  - from: upload_1
+    to: docker_exec_verify_md5_merge_2
+    case: ""
+  - from: docker_exec_verify_md5_merge_2
+    to: extract_config_3
+    case: ""
+steps: []
+confirm:
+  required: false
+  message: ""

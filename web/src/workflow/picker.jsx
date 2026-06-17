@@ -6,7 +6,8 @@ const controlNodeCatalog = [
   {type: 'parallel', title: '并行分支', secondary: 'Parallel', description: '将后续任务拆分为多个分支路径', help: '用于明确 fan-out 分支结构；当前运行按 DAG 顺序调度', enabled: true},
   {type: 'join', title: '合流', secondary: 'Join', description: '等待多个上游分支完成后继续流程', help: '用于明确 fan-in 汇聚点；入边完成后节点记为成功', enabled: true},
   {type: 'loop', title: '循环', secondary: 'Loop', description: '按固定次数重复执行一个内嵌选择的插件工具', help: '执行到循环节点时，按最大次数重复运行已选择的插件工具', enabled: true},
-  {type: 'upload', title: '上传文件', secondary: 'Upload', description: '运行前上传本地文件、批量文件或目录到平台受控目录', help: '上传节点会在工作流启动前选择文件或目录，运行时输出上传结果 JSON', enabled: true}
+  {type: 'upload', title: '上传文件', secondary: 'Upload', description: '运行前上传本地文件、批量文件或目录到平台受控目录', help: '上传节点会在工作流启动前选择文件或目录，运行时输出上传结果 JSON', enabled: true},
+  {type: 'extract_config', title: '提取配置', secondary: 'Extract Config', description: '按文件名从上传结果提取到工作流配置目录', help: '执行到该节点时，把匹配的上传文件复制为稳定的工作流配置文件', enabled: true}
 ]
 
 function NodePickerPanel({searchText, setSearchText, tools, totalTools, panelPosition, canvasElement, mode = 'add', connection, insertEdge, onAddTool, onAddControl, onClose}) {
@@ -19,7 +20,7 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, panelPos
     ? `选择后插入到 ${insertEdge.source} → ${insertEdge.target}`
     : quickAdd
       ? `选择后会自动连接到 ${connection.source}`
-      : '搜索插件工具，或插入条件/并行/合流/循环节点'
+      : '搜索插件工具，或插入条件/并行/合流/循环/上传/提取配置节点'
   const matchingControls = controlNodeCatalog
     .filter(control => control.enabled)
     .filter(control => !keyword || [control.title, control.secondary, control.description, control.help]
@@ -48,7 +49,7 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, panelPos
                 </span>
               </button>
             ))}
-            {matchingControls.length === 0 && <div className="empty small">没有匹配的编排节点；可尝试搜索 Switch、Parallel、Join 或 Loop。</div>}
+            {matchingControls.length === 0 && <div className="empty small">没有匹配的编排节点；可尝试搜索 Switch、Parallel、Join、Loop、Upload 或 Extract。</div>}
           </div>
         </div>
         <div className="nodePickerSection">

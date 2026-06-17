@@ -129,6 +129,210 @@ echo "source=${OPS_PARAM_SOURCE}"
 	}
 }
 
+func TestRunWorkflowPassesDeclaredToolOutputs(t *testing.T) {
+	dir := t.TempDir()
+	producerDir := writeTool(t, dir, "output-producer", `#!/usr/bin/env bash
+set -euo pipefail
+echo "human log"
+echo '{"data":{"file":"release.tar.gz","version":12,"ready":true}}'
+`)
+	consumerDir := writeTool(t, dir, "output-consumer", `#!/usr/bin/env bash
+set -euo pipefail
+echo "file=${OPS_PARAM_FILE}"
+echo "version=${OPS_PARAM_VERSION}"
+echo "ready=${OPS_PARAM_READY}"
+echo "optional=${OPS_PARAM_OPTIONAL}"
+`)
+	producer := toolConfig("demo.output_producer")
+	producer.Outputs = []config.ToolOutput{
+		{Name: "file", Type: "string", Required: true, JSONPath: "data.file"},
+		{Name: "version", Type: "number", Required: true, JSONPath: "data.version"},
+		{Name: "ready", Type: "bool", Required: true, JSONPath: "data.ready"},
+		{Name: "optional", Type: "string", Required: false, JSONPath: "data.missing"},
+	}
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.output_producer": {Entry: config.ToolEntry{ID: "demo.output_producer", Category: "demo"}, Config: producer, Dir: producerDir},
+			"demo.output_consumer": {Entry: config.ToolEntry{ID: "demo.output_consumer", Category: "demo"}, Config: toolConfig("demo.output_consumer"), Dir: consumerDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID: "demo.outputs",
+		Nodes: []config.WorkflowNode{
+			{ID: "produce", Tool: "demo.output_producer"},
+			{ID: "consume", Tool: "demo.output_consumer", Params: map[string]interface{}{
+				"file":     "{{ .steps.produce.outputs.file }}",
+				"version":  "{{ .steps.produce.outputs.version }}",
+				"ready":    "{{ .steps.produce.outputs.ready }}",
+				"optional": "{{ .steps.produce.outputs.optional }}",
+			}},
+		},
+		Edges: []config.WorkflowEdge{{From: "produce", To: "consume"}},
+	}
+	reg.Workflows[wf.ID] = &registry.Workflow{Entry: config.WorkflowRef{ID: wf.ID, Category: "demo"}, Config: wf}
+
+	r := New(reg)
+	record, err := r.RunWorkflow(context.Background(), wf.ID, nil, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflow error: %v", err)
+	}
+	if record.Status != "succeeded" {
+		t.Fatalf("status = %s", record.Status)
+	}
+	consumerLog := readFile(t, filepath.Join(r.RunsDir, record.ID, "consume", "stdout.log"))
+	for _, want := range []string{"file=release.tar.gz", "version=12", "ready=true", "optional="} {
+		if !strings.Contains(consumerLog, want) {
+			t.Fatalf("consumer stdout = %q, missing %q", consumerLog, want)
+		}
+	}
+}
+
+func TestRunToolFailsWhenRequiredOutputMissing(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := writeTool(t, dir, "missing-output", `#!/usr/bin/env bash
+set -euo pipefail
+echo '{"data":{"other":"value"}}'
+`)
+	cfg := toolConfig("demo.missing_output")
+	cfg.Outputs = []config.ToolOutput{{Name: "result", Type: "string", Required: true, JSONPath: "data.result"}}
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.missing_output": {Entry: config.ToolEntry{ID: "demo.missing_output", Category: "demo"}, Config: cfg, Dir: toolDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+
+	_, err := New(reg).RunTool(context.Background(), "demo.missing_output", nil, nilWriter{}, nilWriter{})
+	if err == nil || !strings.Contains(err.Error(), "必需输出参数 result 提取失败") {
+		t.Fatalf("RunTool error = %v, want 必需输出参数 result 提取失败", err)
+	}
+}
+
+func TestRerunWorkflowNodeOverwritesSelectedAndDownstreamOnly(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := writeTool(t, dir, "rerun-tool", `#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "${OPS_PARAM_MARKER}"
+count_file="${OPS_PARAM_MARKER}/${OPS_PARAM_NODE}.txt"
+count=0
+if [[ -f "${count_file}" ]]; then
+  count="$(cat "${count_file}")"
+fi
+count=$((count + 1))
+echo "${count}" > "${count_file}"
+echo "${OPS_PARAM_NODE}-${count}"
+`)
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.rerun": {Entry: config.ToolEntry{ID: "demo.rerun", Category: "demo"}, Config: toolConfig("demo.rerun"), Dir: toolDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	markerDir := filepath.Join(dir, "markers")
+	wf := &config.WorkflowConfig{
+		ID: "demo.rerun-flow",
+		Nodes: []config.WorkflowNode{
+			{ID: "first", Tool: "demo.rerun", Params: map[string]interface{}{"node": "first", "marker": markerDir}},
+			{ID: "second", Tool: "demo.rerun", Params: map[string]interface{}{"node": "second", "marker": markerDir, "input": "{{ .steps.first.stdout }}"}},
+			{ID: "third", Tool: "demo.rerun", Params: map[string]interface{}{"node": "third", "marker": markerDir, "input": "{{ .steps.second.stdout }}"}},
+		},
+		Edges: []config.WorkflowEdge{{From: "first", To: "second"}, {From: "second", To: "third"}},
+	}
+	reg.Workflows[wf.ID] = &registry.Workflow{Entry: config.WorkflowRef{ID: wf.ID, Category: "demo"}, Config: wf}
+	r := New(reg)
+	record, err := r.RunWorkflow(context.Background(), wf.ID, nil, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflow error: %v", err)
+	}
+	runDir := filepath.Join(r.RunsDir, record.ID)
+	firstBefore := readFile(t, filepath.Join(runDir, "first", "stdout.log"))
+	secondBefore := readFile(t, filepath.Join(runDir, "second", "stdout.log"))
+	thirdBefore := readFile(t, filepath.Join(runDir, "third", "stdout.log"))
+
+	updated, err := r.RerunWorkflowNode(context.Background(), wf, record, runDir, "second", false, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RerunWorkflowNode error: %v", err)
+	}
+	if updated.ID != record.ID || updated.Status != "succeeded" {
+		t.Fatalf("updated record = %#v", updated)
+	}
+	firstAfter := readFile(t, filepath.Join(runDir, "first", "stdout.log"))
+	secondAfter := readFile(t, filepath.Join(runDir, "second", "stdout.log"))
+	thirdAfter := readFile(t, filepath.Join(runDir, "third", "stdout.log"))
+	if firstAfter != firstBefore {
+		t.Fatalf("first stdout changed after rerun: before=%q after=%q", firstBefore, firstAfter)
+	}
+	if secondAfter == secondBefore || !strings.Contains(secondAfter, "second-2") {
+		t.Fatalf("second stdout = %q, want overwritten second-2; before=%q", secondAfter, secondBefore)
+	}
+	if thirdAfter == thirdBefore || !strings.Contains(thirdAfter, "third-2") {
+		t.Fatalf("third stdout = %q, want overwritten third-2; before=%q", thirdAfter, thirdBefore)
+	}
+	steps := map[string]StepRecord{}
+	for _, step := range updated.Steps {
+		steps[step.ID] = step
+	}
+	if len(steps) != 3 || steps["first"].Status != "succeeded" || steps["second"].Status != "succeeded" || steps["third"].Status != "succeeded" {
+		t.Fatalf("steps = %#v", updated.Steps)
+	}
+}
+
+func TestRerunWorkflowNodeWithParamsOverridesRunParameters(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := writeTool(t, dir, "rerun-param-tool", `#!/usr/bin/env bash
+set -euo pipefail
+echo "${OPS_PARAM_NAME}"
+`)
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.rerun.param": {Entry: config.ToolEntry{ID: "demo.rerun.param", Category: "demo"}, Config: toolConfig("demo.rerun.param"), Dir: toolDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID:         "demo.rerun-param-flow",
+		Parameters: []config.Parameter{{Name: "name", Type: "string", Default: "old"}},
+		Nodes: []config.WorkflowNode{
+			{ID: "first", Tool: "demo.rerun.param", Params: map[string]interface{}{"name": "{{ .name }}"}},
+			{ID: "second", Tool: "demo.rerun.param", Params: map[string]interface{}{"name": "{{ .name }}"}},
+		},
+		Edges: []config.WorkflowEdge{{From: "first", To: "second"}},
+	}
+	reg.Workflows[wf.ID] = &registry.Workflow{Entry: config.WorkflowRef{ID: wf.ID, Category: "demo"}, Config: wf}
+	r := New(reg)
+	record, err := r.RunWorkflow(context.Background(), wf.ID, map[string]string{"name": "old"}, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflow error: %v", err)
+	}
+	runDir := filepath.Join(r.RunsDir, record.ID)
+	firstBefore := readFile(t, filepath.Join(runDir, "first", "stdout.log"))
+
+	updated, err := r.RerunWorkflowNodeWithParams(context.Background(), wf, record, runDir, "second", map[string]string{"name": "new"}, false, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RerunWorkflowNodeWithParams error: %v", err)
+	}
+	firstAfter := readFile(t, filepath.Join(runDir, "first", "stdout.log"))
+	secondAfter := readFile(t, filepath.Join(runDir, "second", "stdout.log"))
+	if firstAfter != firstBefore || !strings.Contains(firstAfter, "old") {
+		t.Fatalf("first stdout changed after rerun: before=%q after=%q", firstBefore, firstAfter)
+	}
+	if !strings.Contains(secondAfter, "new") {
+		t.Fatalf("second stdout = %q, want new parameter", secondAfter)
+	}
+	if updated.Params["name"] != "new" || updated.Config["name"] != "new" {
+		t.Fatalf("updated params/config = %#v / %#v, want new", updated.Params, updated.Config)
+	}
+}
+
 func TestRunWorkflowRoutesConditionBranchAndSkipsInactive(t *testing.T) {
 	dir := t.TempDir()
 	inspectDir := writeTool(t, dir, "inspect", `#!/usr/bin/env bash
@@ -469,6 +673,135 @@ echo "paths=${OPS_PARAM_PATHS}"
 	}
 }
 
+func TestRunWorkflowExtractConfigNodeCopiesUploadedFile(t *testing.T) {
+	dir := t.TempDir()
+	reg := &registry.Registry{
+		BaseDir:   dir,
+		Root:      &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools:     map[string]*registry.Tool{},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	sourcePath := filepath.Join(dir, "runs", "uploads", "upload-1", "conf", "app.yaml")
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("enabled: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wf := &config.WorkflowConfig{
+		ID: "demo.extract",
+		Nodes: []config.WorkflowNode{
+			{ID: "upload", Type: config.WorkflowNodeTypeUpload},
+			{
+				ID:   "extract",
+				Type: config.WorkflowNodeTypeExtractConfig,
+				Extract: config.WorkflowExtractConfig{
+					FileName:   "{{ .steps.upload.file.filename }}",
+					TargetPath: "conf/app.yaml",
+					Label:      "应用配置",
+				},
+			},
+		},
+		Edges: []config.WorkflowEdge{{From: "upload", To: "extract"}},
+	}
+	upload := config.WorkflowUploadResult{
+		ID:           "upload-1",
+		FileName:     "app.yaml",
+		Path:         sourcePath,
+		RelativePath: "runs/uploads/upload-1/conf/app.yaml",
+		Size:         int64(len("enabled: true\n")),
+		Count:        1,
+		TotalSize:    int64(len("enabled: true\n")),
+	}
+
+	r := New(reg)
+	record, err := r.RunWorkflowConfigWithUploads(context.Background(), wf, nil, false, map[string]config.WorkflowUploadResult{"upload": upload}, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflowConfigWithUploads error: %v", err)
+	}
+	if record.Status != "succeeded" {
+		t.Fatalf("status = %s", record.Status)
+	}
+	targetPath := filepath.Join(dir, "conf", "app.yaml")
+	content := readFile(t, targetPath)
+	if content != "enabled: true\n" {
+		t.Fatalf("target config content = %q", content)
+	}
+	extractStdout := readFile(t, filepath.Join(r.RunsDir, record.ID, "extract", "stdout.log"))
+	if !strings.Contains(extractStdout, "SUCCESS 提取配置节点 extract") || !strings.Contains(extractStdout, "CONFIG ") {
+		t.Fatalf("extract stdout = %s", extractStdout)
+	}
+}
+
+func TestRunWorkflowExtractConfigNodeCopiesDirectoryFiles(t *testing.T) {
+	dir := t.TempDir()
+	reg := &registry.Registry{
+		BaseDir:   dir,
+		Root:      &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools:     map[string]*registry.Tool{},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	sourceDir := filepath.Join(dir, "runs", "uploads", "upload-1", "conf")
+	appPath := filepath.Join(sourceDir, "app.yaml")
+	dbPath := filepath.Join(sourceDir, "db.yaml")
+	if err := os.MkdirAll(filepath.Dir(appPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(appPath, []byte("app: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dbPath, []byte("db: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wf := &config.WorkflowConfig{
+		ID: "demo.extract.dir",
+		Nodes: []config.WorkflowNode{
+			{ID: "upload", Type: config.WorkflowNodeTypeUpload},
+			{
+				ID:   "extract",
+				Type: config.WorkflowNodeTypeExtractConfig,
+				Extract: config.WorkflowExtractConfig{
+					SourceType: "directory",
+					SourceDir:  "{{ .steps.upload.file.relative_dir }}/conf",
+					Files: []config.WorkflowExtractConfigFile{
+						{SourcePath: "app.yaml", Label: "应用配置", Replace: true},
+						{SourcePath: "db.yaml", Label: "数据库配置", Replace: true},
+					},
+				},
+			},
+		},
+		Edges: []config.WorkflowEdge{{From: "upload", To: "extract"}},
+	}
+	upload := config.WorkflowUploadResult{
+		ID:           "upload-1",
+		FileName:     "app.yaml",
+		Path:         appPath,
+		RelativePath: "runs/uploads/upload-1/app.yaml",
+		Size:         10,
+		Files: []config.WorkflowUploadFile{
+			{FileName: "app.yaml", Path: appPath, RelativePath: "runs/uploads/upload-1/conf/app.yaml", Size: int64(len("app: true\n"))},
+			{FileName: "db.yaml", Path: dbPath, RelativePath: "runs/uploads/upload-1/conf/db.yaml", Size: int64(len("db: true\n"))},
+		},
+		Count:     1,
+		TotalSize: 10,
+	}
+
+	r := New(reg)
+	record, err := r.RunWorkflowConfigWithUploads(context.Background(), wf, nil, false, map[string]config.WorkflowUploadResult{"upload": upload}, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflowConfigWithUploads error: %v", err)
+	}
+	if record.Status != "succeeded" {
+		t.Fatalf("status = %s", record.Status)
+	}
+	if content := readFile(t, filepath.Join(dir, "app.yaml")); !strings.Contains(content, "app: true") {
+		t.Fatalf("app target content = %q", content)
+	}
+	if content := readFile(t, filepath.Join(dir, "db.yaml")); !strings.Contains(content, "db: true") {
+		t.Fatalf("db target content = %q", content)
+	}
+}
+
 func TestRunWorkflowUploadNodeFailsWithoutUploadResult(t *testing.T) {
 	dir := t.TempDir()
 	reg := &registry.Registry{
@@ -489,7 +822,7 @@ func TestRunWorkflowUploadNodeFailsWithoutUploadResult(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("RunWorkflowConfigWithUploads error = %v, want context canceled", err)
 	}
-	if record.Status != "cancelled" || len(record.Steps) != 1 || record.Steps[0].Status != "cancelled" {
+	if record.Status != "cancelled" || len(record.Steps) != 0 {
 		t.Fatalf("record = %#v", record)
 	}
 }
@@ -614,6 +947,13 @@ func toolConfig(id string) *config.ToolConfig {
 		},
 		PassMode: config.PassMode{Env: true},
 	}
+}
+
+func generatedConfigToolConfig() *config.ToolConfig {
+	cfg := toolConfig("demo.generate")
+	cfg.Execution.Args = []string{"{{ .dir }}"}
+	cfg.Parameters = []config.Parameter{{Name: "dir", Required: true}}
+	return cfg
 }
 
 func readFile(t *testing.T, path string) string {

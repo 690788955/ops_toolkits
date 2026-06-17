@@ -184,6 +184,98 @@ func (r *Runner) runWorkflowPrepared(ctx context.Context, wf *config.WorkflowCon
 		_ = r.saveRecord(runDir, record)
 		return record, err
 	}
+	workflowContext, active, nodeByID, legacyLoopTargets, edgesByFrom, err := prepareWorkflowExecutionState(wf, finalParams)
+	if err != nil {
+		finishRecord(record, err)
+		_ = r.saveRecord(runDir, record)
+		return record, err
+	}
+	err = r.executeWorkflowNodes(ctx, wf, ordered, finalParams, uploads, out, errOut, record, runDir, workflowContext, active, nodeByID, legacyLoopTargets, edgesByFrom, nil)
+	finishRecord(record, err)
+	if saveErr := r.saveRecord(runDir, record); saveErr != nil && err == nil {
+		err = saveErr
+	}
+	return record, err
+}
+
+func (r *Runner) RerunWorkflowNode(ctx context.Context, wf *config.WorkflowConfig, record *RunRecord, runDir, nodeID string, confirmed bool, out, errOut io.Writer) (*RunRecord, error) {
+	return r.RerunWorkflowNodeWithParams(ctx, wf, record, runDir, nodeID, nil, confirmed, out, errOut)
+}
+
+func (r *Runner) RerunWorkflowNodeWithParams(ctx context.Context, wf *config.WorkflowConfig, record *RunRecord, runDir, nodeID string, params map[string]string, confirmed bool, out, errOut io.Writer) (*RunRecord, error) {
+	if wf == nil {
+		return record, fmt.Errorf("工作流不能为空")
+	}
+	if record == nil {
+		return nil, fmt.Errorf("运行记录不能为空")
+	}
+	config.NormalizeWorkflow(wf)
+	if record.Kind != "workflow" {
+		return record, fmt.Errorf("运行记录不是工作流")
+	}
+	if record.Status == "running" {
+		return record, fmt.Errorf("运行中的工作流不能重跑节点")
+	}
+	if strings.TrimSpace(nodeID) == "" {
+		return record, fmt.Errorf("节点 ID 必填")
+	}
+	finalParams := rerunWorkflowParams(wf, record, params)
+	if err := config.ValidateRequired(wf.Parameters, finalParams); err != nil {
+		return record, err
+	}
+	ordered, err := registry.OrderWorkflow(wf)
+	if err != nil {
+		return record, err
+	}
+	if err := r.validateWorkflowConfirmations(ordered, confirmed); err != nil {
+		return record, err
+	}
+	nodeByID := workflowNodeMap(wf.Nodes)
+	if _, ok := nodeByID[nodeID]; !ok {
+		return record, fmt.Errorf("工作流中找不到节点 %s", nodeID)
+	}
+	affected := downstreamNodeSet(nodeID, wf.Edges)
+	rerunUploads := reusableUploadsForNodes(runDir, wf.Nodes, affected)
+	record.Steps = filterStepsOutside(record.Steps, affected)
+	for affectedNodeID := range affected {
+		if err := os.RemoveAll(filepath.Join(runDir, affectedNodeID)); err != nil {
+			return record, fmt.Errorf("清理节点 %s 旧日志失败: %w", affectedNodeID, err)
+		}
+	}
+	workflowContext, active, nodeByID, legacyLoopTargets, edgesByFrom, err := prepareWorkflowExecutionState(wf, finalParams)
+	if err != nil {
+		return record, err
+	}
+	if err := r.rebuildWorkflowContextFromSteps(workflowContext, record.Steps, nodeByID, runDir, edgesByFrom, active); err != nil {
+		return record, err
+	}
+	activateRerunEntry(nodeID, wf.Edges, active)
+	record.Params = copyParams(finalParams)
+	record.Config = config.StringMapToValues(finalParams)
+	record.Status = "running"
+	record.Error = ""
+	record.EndedAt = time.Time{}
+	_ = r.saveRecord(runDir, record)
+	err = r.executeWorkflowNodes(ctx, wf, ordered, finalParams, rerunUploads, out, errOut, record, runDir, workflowContext, active, nodeByID, legacyLoopTargets, edgesByFrom, affected)
+	finishRecord(record, err)
+	if saveErr := r.saveRecord(runDir, record); saveErr != nil && err == nil {
+		err = saveErr
+	}
+	return record, err
+}
+
+func rerunWorkflowParams(wf *config.WorkflowConfig, record *RunRecord, overrides map[string]string) map[string]string {
+	base := recordConfigParams(record)
+	if len(base) == 0 {
+		base = copyParams(record.Params)
+	}
+	if overrides == nil {
+		return base
+	}
+	return config.MergeParams(wf.Parameters, base, overrides)
+}
+
+func prepareWorkflowExecutionState(wf *config.WorkflowConfig, finalParams map[string]string) (map[string]string, map[string]bool, map[string]config.WorkflowNode, map[string]bool, workflowEdgeBuckets, error) {
 	workflowContext := copyParams(finalParams)
 	nodeByID := map[string]config.WorkflowNode{}
 	legacyLoopTargets := map[string]bool{}
@@ -194,23 +286,22 @@ func (r *Runner) runWorkflowPrepared(ctx context.Context, wf *config.WorkflowCon
 		}
 	}
 	edgesByFrom, incomingByTo := workflowEdges(wf.Edges)
-	incomingCaseByTo := map[string]map[string]bool{}
-	for _, edges := range edgesByFrom {
-		for _, edge := range edges {
-			if edge.Case == "" {
-				continue
-			}
-			if incomingCaseByTo[edge.To] == nil {
-				incomingCaseByTo[edge.To] = map[string]bool{}
-			}
-			incomingCaseByTo[edge.To][edge.Case] = true
-		}
-	}
 	active := map[string]bool{}
 	for _, node := range wf.Nodes {
 		active[node.ID] = len(incomingByTo[node.ID]) == 0
 	}
+	return workflowContext, active, nodeByID, legacyLoopTargets, edgesByFrom, nil
+}
+
+func (r *Runner) executeWorkflowNodes(ctx context.Context, wf *config.WorkflowConfig, ordered []config.WorkflowNode, finalParams map[string]string, uploads map[string]config.WorkflowUploadResult, out, errOut io.Writer, record *RunRecord, runDir string, workflowContext map[string]string, active map[string]bool, nodeByID map[string]config.WorkflowNode, legacyLoopTargets map[string]bool, edgesByFrom workflowEdgeBuckets, executeOnly map[string]bool) error {
+	var err error
 	for _, node := range ordered {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if executeOnly != nil && !executeOnly[node.ID] {
+			continue
+		}
 		nodeType := workflowNodeType(node)
 		if legacyLoopTargets[node.ID] {
 			reason := "循环目标工具由循环节点内嵌执行"
@@ -249,6 +340,12 @@ func (r *Runner) runWorkflowPrepared(ctx context.Context, wf *config.WorkflowCon
 			continue
 		}
 		if nodeType == config.WorkflowNodeTypeUpload {
+			if executeOnly != nil && !hasUploadResult(uploads, node.ID) {
+				stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "failed", StartedAt: time.Now(), EndedAt: time.Now(), Error: fmt.Sprintf("上传节点 %s 缺少可复用的上传结果", node.ID)}
+				record.Steps = append(record.Steps, stepRecord)
+				_ = r.saveRecord(runDir, record)
+				return fmt.Errorf("上传节点 %s 缺少可复用的上传结果", node.ID)
+			}
 			status := "waiting"
 			if hasUploadResult(uploads, node.ID) {
 				status = "running"
@@ -261,6 +358,11 @@ func (r *Runner) runWorkflowPrepared(ctx context.Context, wf *config.WorkflowCon
 			stepRecord.Status = "running"
 			record.Steps[stepIndex] = stepRecord
 			_ = r.saveRecord(runDir, record)
+			if uploadErr == nil {
+				if hasUploadResult(uploads, node.ID) {
+					uploadErr = WriteWorkflowUploadResult(runDir, node.ID, upload)
+				}
+			}
 			if uploadErr == nil {
 				uploadErr = executeUploadNode(node, upload, stepRunDir)
 			}
@@ -279,6 +381,33 @@ func (r *Runner) runWorkflowPrepared(ctx context.Context, wf *config.WorkflowCon
 				break
 			}
 			addUploadContext(workflowContext, node.ID, upload, stepRunDir)
+			stepRecord.Status = "succeeded"
+			record.Steps[stepIndex] = stepRecord
+			_ = r.saveRecord(runDir, record)
+			activatePlainBranches(node.ID, edgesByFrom, active)
+			continue
+		}
+		if nodeType == config.WorkflowNodeTypeExtractConfig {
+			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "running", StartedAt: time.Now()}
+			stepRunDir := filepath.Join(runDir, node.ID)
+			stepIndex := appendStepRecord(record, stepRecord)
+			_ = r.saveRecord(runDir, record)
+			extractErr := r.executeExtractConfigNode(wf.ID, node, workflowContext, stepRunDir)
+			stepRecord.EndedAt = time.Now()
+			if extractErr != nil {
+				if errors.Is(extractErr, context.Canceled) {
+					stepRecord.Status = "cancelled"
+					stepRecord.Error = "运行已取消"
+				} else {
+					stepRecord.Status = "failed"
+					stepRecord.Error = extractErr.Error()
+				}
+				record.Steps[stepIndex] = stepRecord
+				_ = r.saveRecord(runDir, record)
+				err = extractErr
+				break
+			}
+			addStepContext(workflowContext, node.ID, nil, stepRunDir, nil)
 			stepRecord.Status = "succeeded"
 			record.Steps[stepIndex] = stepRecord
 			_ = r.saveRecord(runDir, record)
@@ -340,22 +469,130 @@ func (r *Runner) runWorkflowPrepared(ctx context.Context, wf *config.WorkflowCon
 			err = toolErr
 			break
 		}
-		addStepContext(workflowContext, node.ID, stepParams, stepRunDir)
+		addStepContext(workflowContext, node.ID, stepParams, stepRunDir, tool.Config.Outputs)
 		stepRecord.Status = "succeeded"
 		record.Steps[stepIndex] = stepRecord
 		_ = r.saveRecord(runDir, record)
 		activatePlainBranches(node.ID, edgesByFrom, active)
 	}
-	finishRecord(record, err)
-	if saveErr := r.saveRecord(runDir, record); saveErr != nil && err == nil {
-		err = saveErr
-	}
-	return record, err
+	return err
 }
 
 func appendStepRecord(record *RunRecord, step StepRecord) int {
 	record.Steps = append(record.Steps, step)
 	return len(record.Steps) - 1
+}
+
+func recordConfigParams(record *RunRecord) map[string]string {
+	if record == nil || len(record.Config) == 0 {
+		return nil
+	}
+	return config.ValuesToStringMap(config.InterfaceMapToValues(record.Config))
+}
+
+func workflowNodeMap(nodes []config.WorkflowNode) map[string]config.WorkflowNode {
+	out := map[string]config.WorkflowNode{}
+	for _, node := range nodes {
+		out[node.ID] = node
+	}
+	return out
+}
+
+func downstreamNodeSet(nodeID string, edges []config.WorkflowEdge) map[string]bool {
+	out := map[string]bool{nodeID: true}
+	queue := []string{nodeID}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, edge := range edges {
+			if edge.From != current || out[edge.To] {
+				continue
+			}
+			out[edge.To] = true
+			queue = append(queue, edge.To)
+		}
+	}
+	return out
+}
+
+func filterStepsOutside(steps []StepRecord, excluded map[string]bool) []StepRecord {
+	out := make([]StepRecord, 0, len(steps))
+	for _, step := range steps {
+		if excluded[step.ID] {
+			continue
+		}
+		out = append(out, step)
+	}
+	return out
+}
+
+func activateRerunEntry(nodeID string, edges []config.WorkflowEdge, active map[string]bool) {
+	active[nodeID] = true
+	for _, edge := range edges {
+		if edge.To != nodeID {
+			continue
+		}
+		active[edge.To] = true
+	}
+}
+
+func (r *Runner) rebuildWorkflowContextFromSteps(context map[string]string, steps []StepRecord, nodes map[string]config.WorkflowNode, runDir string, edgesByFrom workflowEdgeBuckets, active map[string]bool) error {
+	for _, step := range steps {
+		if step.Status != "succeeded" {
+			continue
+		}
+		node, ok := nodes[step.ID]
+		if !ok {
+			continue
+		}
+		switch step.Type {
+		case config.WorkflowNodeTypeCondition:
+			context["steps."+step.ID+".condition.input"] = step.ConditionInput
+			context["steps."+step.ID+".condition.case"] = step.MatchedCase
+			activateConditionBranches(step.ID, step.MatchedCase, edgesByFrom, active)
+		case config.WorkflowNodeTypeUpload:
+			upload, err := readWorkflowUploadResult(filepath.Join(runDir, step.ID, workflowUploadResultFile))
+			if err != nil {
+				return fmt.Errorf("重建上传节点 %s 上下文失败: %w", step.ID, err)
+			}
+			addUploadContext(context, step.ID, upload, filepath.Join(runDir, step.ID))
+			activatePlainBranches(step.ID, edgesByFrom, active)
+		case config.WorkflowNodeTypeLoop:
+			addLoopContext(context, step.ID, node.Loop.MaxIterations, runDir)
+			activatePlainBranches(step.ID, edgesByFrom, active)
+		default:
+			outputs := r.outputsForWorkflowStep(node)
+			addStepContext(context, step.ID, nil, filepath.Join(runDir, step.ID), outputs)
+			activatePlainBranches(step.ID, edgesByFrom, active)
+		}
+	}
+	return nil
+}
+
+func (r *Runner) outputsForWorkflowStep(node config.WorkflowNode) []config.ToolOutput {
+	if workflowNodeType(node) != config.WorkflowNodeTypeTool || node.Tool == "" || r == nil || r.Registry == nil {
+		return nil
+	}
+	tool, err := r.Registry.Tool(node.Tool)
+	if err != nil {
+		return nil
+	}
+	return tool.Config.Outputs
+}
+
+func reusableUploadsForNodes(runDir string, nodes []config.WorkflowNode, affected map[string]bool) map[string]config.WorkflowUploadResult {
+	uploads := map[string]config.WorkflowUploadResult{}
+	for _, node := range nodes {
+		if !affected[node.ID] || workflowNodeType(node) != config.WorkflowNodeTypeUpload {
+			continue
+		}
+		upload, err := readWorkflowUploadResult(filepath.Join(runDir, node.ID, workflowUploadResultFile))
+		if err != nil {
+			continue
+		}
+		uploads[node.ID] = upload
+	}
+	return uploads
 }
 
 func (r *Runner) validateWorkflowConfirmations(nodes []config.WorkflowNode, confirmed bool) error {
@@ -409,6 +646,9 @@ func workflowNodeType(node config.WorkflowNode) string {
 	}
 	if node.Upload.TargetDir != "" {
 		return config.WorkflowNodeTypeUpload
+	}
+	if node.Extract.SourceType != "" || node.Extract.FileName != "" || node.Extract.SourceNode != "" || node.Extract.SourceDir != "" || node.Extract.SourcePath != "" || node.Extract.TargetPath != "" || node.Extract.Label != "" || node.Extract.Replace || len(node.Extract.Files) > 0 {
+		return config.WorkflowNodeTypeExtractConfig
 	}
 	return ""
 }
@@ -488,6 +728,9 @@ func (r *Runner) executeLoop(ctx context.Context, node config.WorkflowNode, node
 		}
 	}
 	for iteration := 1; iteration <= node.Loop.MaxIterations; iteration++ {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		stepParams := resolveStepParams(finalParams, workflowContext, loopParams)
 		stepRunDir := filepath.Join(runDir, node.ID, fmt.Sprintf("%d", iteration))
 		stepValues, stepFlat, _, resolveErr := r.resolveToolValues(tool, config.StringMapToValues(stepParams))
@@ -498,8 +741,8 @@ func (r *Runner) executeLoop(ctx context.Context, node config.WorkflowNode, node
 		if err := r.executeTool(ctx, tool, stepValues, stepFlat, stepRunDir, out, errOut); err != nil {
 			return fmt.Errorf("循环节点 %s 第 %d 次执行工具 %s 失败: %w", node.ID, iteration, toolID, err)
 		}
-		addStepContext(workflowContext, fmt.Sprintf("%s.%d", node.ID, iteration), stepParams, stepRunDir)
-		addStepContext(workflowContext, node.ID, stepParams, stepRunDir)
+		addStepContext(workflowContext, fmt.Sprintf("%s.%d", node.ID, iteration), stepParams, stepRunDir, tool.Config.Outputs)
+		addStepContext(workflowContext, node.ID, stepParams, stepRunDir, tool.Config.Outputs)
 		writeLoopAggregateLogs(runDir, node.ID, node.Loop.MaxIterations)
 	}
 	return nil
@@ -682,10 +925,224 @@ func writeUploadStderr(runDir string, runErr error) error {
 	return os.WriteFile(filepath.Join(runDir, "stderr.log"), stderr, 0o644)
 }
 
+func (r *Runner) executeExtractConfigNode(workflowID string, node config.WorkflowNode, workflowContext map[string]string, runDir string) error {
+	uploads, err := workflowUploadResults(workflowContext)
+	if err != nil {
+		runErr := fmt.Errorf("提取配置节点 %s 读取上传结果失败: %w", node.ID, err)
+		_ = writeUploadStderr(runDir, runErr)
+		return runErr
+	}
+	if len(uploads) == 0 {
+		err := fmt.Errorf("提取配置节点 %s 找不到可用的上传结果", node.ID)
+		_ = writeUploadStderr(runDir, err)
+		return err
+	}
+	items, err := extractConfigItems(node.Extract)
+	if err != nil {
+		runErr := fmt.Errorf("提取配置节点 %s %w", node.ID, err)
+		_ = writeUploadStderr(runDir, runErr)
+		return runErr
+	}
+	if len(items) == 0 {
+		err := fmt.Errorf("提取配置节点 %s 缺少可提取的配置项", node.ID)
+		_ = writeUploadStderr(runDir, err)
+		return err
+	}
+	for _, item := range items {
+		sourceName := renderTemplate(item.FileName, workflowContext)
+		if sourceName == "" && item.SourcePath != "" {
+			sourceName = renderTemplate(item.SourcePath, workflowContext)
+		}
+		if sourceName == "" {
+			runErr := fmt.Errorf("提取配置节点 %s 缺少 source_path 或 file_name", node.ID)
+			_ = writeUploadStderr(runDir, runErr)
+			return runErr
+		}
+		source, data, err := extractConfigSourceFile(uploads, sourceName)
+		if err != nil {
+			runErr := fmt.Errorf("提取配置节点 %s %w", node.ID, err)
+			_ = writeUploadStderr(runDir, runErr)
+			return runErr
+		}
+		target := item.TargetPath
+		if target == "" {
+			target = source
+		}
+		targetPath, err := workflowConfigTargetPath(r.Registry, target)
+		if err != nil {
+			runErr := fmt.Errorf("提取配置节点 %s 目标路径无效: %w", node.ID, err)
+			_ = writeUploadStderr(runDir, runErr)
+			return runErr
+		}
+		if err := writeExtractedConfigFile(targetPath, data, item.Replace); err != nil {
+			runErr := fmt.Errorf("提取配置节点 %s 写入配置失败: %w", node.ID, err)
+			_ = writeUploadStderr(runDir, runErr)
+			return runErr
+		}
+		if err := appendUploadStdout(runDir, fmt.Sprintf("SUCCESS 提取配置节点 %s 已复制 %s 到 %s", node.ID, source, targetPath)); err != nil {
+			return err
+		}
+		if err := appendUploadStdout(runDir, fmt.Sprintf("CONFIG %s", targetPath)); err != nil {
+			return err
+		}
+	}
+	return writeUploadStderr(runDir, nil)
+}
+
+func extractConfigItems(item config.WorkflowExtractConfig) ([]config.WorkflowExtractConfigFile, error) {
+	if strings.EqualFold(strings.TrimSpace(item.SourceType), "directory") || strings.TrimSpace(item.SourceDir) != "" || len(item.Files) > 0 {
+		out := make([]config.WorkflowExtractConfigFile, 0, len(item.Files))
+		for _, file := range item.Files {
+			sourcePath := strings.TrimSpace(file.SourcePath)
+			if sourcePath == "" {
+				sourcePath = strings.TrimSpace(file.FileName)
+			}
+			out = append(out, config.WorkflowExtractConfigFile{
+				FileName:   joinWorkflowRelativePath(item.SourceDir, sourcePath),
+				SourcePath: sourcePath,
+				TargetPath: sourcePath,
+				Label:      file.Label,
+				Replace:    file.Replace,
+			})
+		}
+		return out, nil
+	}
+	if item.FileName != "" || item.TargetPath != "" || item.Label != "" || item.Replace {
+		return []config.WorkflowExtractConfigFile{{FileName: item.FileName, SourcePath: item.SourcePath, TargetPath: item.TargetPath, Label: item.Label, Replace: item.Replace}}, nil
+	}
+	if item.SourcePath != "" {
+		return []config.WorkflowExtractConfigFile{{FileName: item.SourcePath, SourcePath: item.SourcePath, TargetPath: item.TargetPath, Label: item.Label, Replace: item.Replace}}, nil
+	}
+	return nil, nil
+}
+
+func joinWorkflowRelativePath(base, rel string) string {
+	base = strings.TrimSpace(base)
+	rel = strings.TrimSpace(rel)
+	if base == "" {
+		return rel
+	}
+	if rel == "" {
+		return base
+	}
+	return filepath.ToSlash(filepath.Join(filepath.FromSlash(base), filepath.FromSlash(rel)))
+}
+
+func workflowUploadResults(workflowContext map[string]string) ([]config.WorkflowUploadResult, error) {
+	keys := make([]string, 0)
+	for key := range workflowContext {
+		if strings.HasPrefix(key, "steps.") && strings.HasSuffix(key, ".upload_result_path") {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	uploads := make([]config.WorkflowUploadResult, 0, len(keys))
+	for _, key := range keys {
+		upload, err := readWorkflowUploadResult(workflowContext[key])
+		if err != nil {
+			return nil, err
+		}
+		uploads = append(uploads, upload)
+	}
+	return uploads, nil
+}
+
+func extractConfigSourceFile(uploads []config.WorkflowUploadResult, fileName string) (string, []byte, error) {
+	files := make([]config.WorkflowUploadFile, 0)
+	for _, upload := range uploads {
+		files = append(files, normalizedUploadFiles(upload)...)
+	}
+	if len(files) == 0 {
+		return "", nil, fmt.Errorf("上传结果中没有文件")
+	}
+	fileName = strings.TrimSpace(fileName)
+	if fileName == "" {
+		return "", nil, fmt.Errorf("源文件名不能为空")
+	}
+	normalizedSource := filepath.ToSlash(filepath.Clean(filepath.FromSlash(fileName)))
+	if normalizedSource == "." || normalizedSource == ".." || strings.HasPrefix(normalizedSource, "../") || strings.Contains(normalizedSource, "/../") || filepath.IsAbs(normalizedSource) || strings.Contains(normalizedSource, "://") {
+		return "", nil, fmt.Errorf("源文件路径不安全")
+	}
+	var selected config.WorkflowUploadFile
+	for _, file := range files {
+		rel := filepath.ToSlash(file.RelativePath)
+		name := filepath.ToSlash(file.FileName)
+		if name == normalizedSource || rel == normalizedSource || filepath.Base(rel) == normalizedSource || filepath.Base(name) == normalizedSource {
+			selected = file
+			break
+		}
+	}
+	if selected.Path == "" {
+		return "", nil, fmt.Errorf("上传结果中找不到文件: %s", fileName)
+	}
+	info, err := os.Stat(selected.Path)
+	if err != nil {
+		return "", nil, fmt.Errorf("源文件不可读: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", nil, fmt.Errorf("源文件不是普通文件")
+	}
+	if info.Size() > maxWorkflowConfigFileBytes {
+		return "", nil, fmt.Errorf("源文件超过配置文件大小限制")
+	}
+	data, err := os.ReadFile(selected.Path)
+	if err != nil {
+		return "", nil, fmt.Errorf("读取源文件失败: %w", err)
+	}
+	return selected.RelativePath, data, nil
+}
+
+const maxWorkflowConfigFileBytes int64 = 1024 * 1024
+
+func workflowConfigTargetPath(reg *registry.Registry, targetPath string) (string, error) {
+	targetPath = strings.TrimSpace(targetPath)
+	if targetPath == "" {
+		return "", fmt.Errorf("目标配置路径不能为空")
+	}
+	if strings.Contains(targetPath, "://") || filepath.IsAbs(targetPath) || strings.HasPrefix(targetPath, "/") || strings.HasPrefix(targetPath, "\\") || len(targetPath) >= 2 && targetPath[1] == ':' {
+		return "", fmt.Errorf("目标配置路径不能是绝对路径")
+	}
+	for _, part := range strings.FieldsFunc(targetPath, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("目标配置路径包含不安全路径片段")
+		}
+	}
+	cleanItem := filepath.Clean(filepath.FromSlash(targetPath))
+	baseAbs, err := filepath.Abs(reg.BaseDir)
+	if err != nil {
+		return "", err
+	}
+	pathAbs, err := filepath.Abs(filepath.Join(baseAbs, cleanItem))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(baseAbs, pathAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("目标配置路径逃逸工作流配置目录")
+	}
+	return pathAbs, nil
+}
+
+func writeExtractedConfigFile(path string, data []byte, replace bool) error {
+	if int64(len(data)) > maxWorkflowConfigFileBytes {
+		return fmt.Errorf("配置文件内容超过大小限制")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil && !replace {
+		return fmt.Errorf("目标配置文件已存在")
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("检查目标配置文件失败: %w", err)
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
 func addUploadContext(context map[string]string, nodeID string, upload config.WorkflowUploadResult, runDir string) {
 	prefix := "steps." + nodeID + "."
 	context[prefix+"stdout"] = strings.TrimSpace(readTextFile(filepath.Join(runDir, "stdout.log")))
 	context[prefix+"stderr"] = strings.TrimSpace(readTextFile(filepath.Join(runDir, "stderr.log")))
+	context[prefix+"upload_result_path"] = filepath.Join(runDir, workflowUploadResultFile)
 	context[prefix+"file.id"] = upload.ID
 	context[prefix+"file.filename"] = upload.FileName
 	context[prefix+"file.path"] = upload.Path
@@ -703,6 +1160,10 @@ func addUploadContext(context map[string]string, nodeID string, upload config.Wo
 	context[prefix+"files.paths"] = strings.Join(uploadFileValues(files, func(item config.WorkflowUploadFile) string { return item.Path }), ", ")
 	context[prefix+"files.relative_paths"] = strings.Join(uploadFileValues(files, func(item config.WorkflowUploadFile) string { return item.RelativePath }), ", ")
 	context[prefix+"files.filenames"] = strings.Join(uploadFileValues(files, func(item config.WorkflowUploadFile) string { return item.FileName }), ", ")
+	if len(files) > 0 {
+		context[prefix+"file.output"] = deriveUploadOutputName(files[0].FileName)
+		context[prefix+"files.output"] = strings.Join(uploadFileValues(files, func(item config.WorkflowUploadFile) string { return deriveUploadOutputName(item.FileName) }), ", ")
+	}
 	for index, item := range files {
 		itemPrefix := fmt.Sprintf("%sfiles.%d.", prefix, index)
 		context[itemPrefix+"filename"] = item.FileName
@@ -710,6 +1171,19 @@ func addUploadContext(context map[string]string, nodeID string, upload config.Wo
 		context[itemPrefix+"relative_path"] = item.RelativePath
 		context[itemPrefix+"size"] = fmt.Sprint(item.Size)
 	}
+}
+
+func deriveUploadOutputName(fileName string) string {
+	fileName = strings.TrimSpace(fileName)
+	if fileName == "" {
+		return ""
+	}
+	base := filepath.Base(fileName)
+	trimmed := strings.TrimSuffix(base, filepath.Ext(base))
+	if trimmed == "" {
+		return base
+	}
+	return trimmed
 }
 
 func normalizedUploadFiles(upload config.WorkflowUploadResult) []config.WorkflowUploadFile {
@@ -780,6 +1254,7 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 		extraEnv = append(extraEnv, fmt.Sprintf("%s=%s", k, v))
 	}
 	cmd := buildCommand(execCtx, entry, *tool.Config, params, paramFile, workdir, extraEnv)
+	configureCommandCancellation(cmd)
 	if !usesWSLBash(entry) {
 		cmd.Dir = workdir
 		cmd.Env = append(os.Environ(), extraEnv...)
@@ -803,6 +1278,9 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 		}
 		return fmt.Errorf("执行工具 %s 失败: %w", tool.Config.ID, err)
 	}
+	if err := validateToolOutputsFromStdout(tool.Config.ID, readTextFile(filepath.Join(runDir, "stdout.log")), tool.Config.Outputs); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -822,6 +1300,14 @@ func buildCommand(ctx context.Context, entry string, tool config.ToolConfig, par
 		return exec.CommandContext(ctx, "bash", append([]string{windowsBashPath(entry)}, args...)...)
 	}
 	return exec.CommandContext(ctx, entry, args...)
+}
+
+func configureCommandCancellation(cmd *exec.Cmd) {
+	prepareCommandProcessGroup(cmd)
+	cmd.Cancel = func() error {
+		return killCommandTree(cmd)
+	}
+	cmd.WaitDelay = 2 * time.Second
 }
 
 func commandArgs(tool config.ToolConfig, params map[string]string, paramFile string) []string {
@@ -1026,13 +1512,129 @@ func mergeStepParam(out map[string]interface{}, prefix string, value interface{}
 	}
 }
 
-func addStepContext(context map[string]string, nodeID string, params map[string]string, runDir string) {
+func addStepContext(context map[string]string, nodeID string, params map[string]string, runDir string, outputs []config.ToolOutput) {
 	prefix := "steps." + nodeID + "."
 	for k, v := range params {
 		context[prefix+"params."+k] = v
 	}
-	context[prefix+"stdout"] = strings.TrimSpace(readTextFile(filepath.Join(runDir, "stdout.log")))
+	stdout := strings.TrimSpace(readTextFile(filepath.Join(runDir, "stdout.log")))
+	context[prefix+"stdout"] = stdout
 	context[prefix+"stderr"] = strings.TrimSpace(readTextFile(filepath.Join(runDir, "stderr.log")))
+	for name, value := range extractToolOutputs(stdout, outputs) {
+		context[prefix+"outputs."+name] = value
+	}
+	if outputPath := outputPathFromStdout(stdout); outputPath != "" {
+		context[prefix+"file.path"] = outputPath
+		context[prefix+"file.filename"] = filepath.Base(outputPath)
+		context[prefix+"file.output"] = filepath.Base(outputPath)
+		context[prefix+"file.dir"] = filepath.Dir(outputPath)
+	}
+}
+
+func outputPathFromStdout(stdout string) string {
+	var output string
+	for _, line := range strings.Split(stdout, "\n") {
+		text := strings.TrimSpace(line)
+		for _, marker := range []string{"输出文件:", "合并文件:"} {
+			if _, after, ok := strings.Cut(text, marker); ok {
+				candidate := strings.TrimSpace(after)
+				if candidate != "" {
+					output = candidate
+				}
+			}
+		}
+	}
+	return output
+}
+
+func validateToolOutputsFromStdout(toolID, stdout string, outputs []config.ToolOutput) error {
+	values := extractToolOutputs(stdout, outputs)
+	for _, output := range outputs {
+		if !output.Required {
+			continue
+		}
+		if strings.TrimSpace(values[output.Name]) == "" {
+			return fmt.Errorf("工具 %s 必需输出参数 %s 提取失败", toolID, output.Name)
+		}
+	}
+	return nil
+}
+
+func extractToolOutputs(stdout string, outputs []config.ToolOutput) map[string]string {
+	values := make(map[string]string, len(outputs))
+	if len(outputs) == 0 {
+		return values
+	}
+	for _, output := range outputs {
+		values[output.Name] = ""
+	}
+	payload, ok := lastStdoutJSON(stdout)
+	if !ok {
+		return values
+	}
+	for _, output := range outputs {
+		value, ok := valueAtDotPath(payload, output.JSONPath)
+		if !ok || value == nil {
+			continue
+		}
+		values[output.Name] = stringifyOutputValue(value)
+	}
+	return values
+}
+
+func lastStdoutJSON(stdout string) (map[string]interface{}, bool) {
+	lines := strings.Split(stdout, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &payload); err == nil {
+			return payload, true
+		}
+	}
+	return nil, false
+}
+
+func valueAtDotPath(payload map[string]interface{}, path string) (interface{}, bool) {
+	current := interface{}(payload)
+	for _, part := range strings.Split(path, ".") {
+		key := strings.TrimSpace(part)
+		if key == "" {
+			return nil, false
+		}
+		object, ok := current.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		current, ok = object[key]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func stringifyOutputValue(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case []interface{}:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			parts = append(parts, stringifyOutputValue(item))
+		}
+		return strings.Join(parts, ",")
+	case bool:
+		return fmt.Sprint(typed)
+	case float64:
+		return fmt.Sprint(typed)
+	case json.Number:
+		return typed.String()
+	default:
+		return fmt.Sprint(typed)
+	}
 }
 
 func readTextFile(path string) string {

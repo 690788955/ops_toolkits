@@ -2,17 +2,54 @@
 set -euo pipefail
 
 # 校验 md5.txt 中列出的分片文件，并按清单顺序合并为完整包，可选解压。
+# 合并/解压成功后会清理原始分片文件与 md5.txt，避免占用额外空间。
 # 用法: verify-md5-and-merge.sh <上传文件路径或上传目录路径> [输出文件名] [yes|no]
 
 INPUT_PATH="${1:-}"
 OUTPUT_NAME="${2:-}"
 EXTRACT="${3:-}"
 
+normalize_input_path() {
+  local raw="$1"
+  local drive=""
+  local rest=""
+
+  raw="${raw//\\:/:}"
+  raw="${raw//\\//}"
+  if [[ "$raw" =~ ^([A-Za-z]):(/.*)?$ ]]; then
+    if command -v cygpath >/dev/null 2>&1; then
+      cygpath -u "$raw"
+      return
+    fi
+    if command -v wslpath >/dev/null 2>&1; then
+      wslpath -u "$raw"
+      return
+    fi
+    drive="${BASH_REMATCH[1],,}"
+    rest="${BASH_REMATCH[2]:-}"
+    printf '/mnt/%s%s\n' "$drive" "$rest"
+    return
+  fi
+
+  printf '%s\n' "$raw"
+}
+
+json_escape() {
+  local raw="$1"
+  raw="${raw//\\/\\\\}"
+  raw="${raw//\"/\\\"}"
+  raw="${raw//$'\n'/\\n}"
+  raw="${raw//$'\r'/\\r}"
+  printf '%s' "$raw"
+}
+
 if [[ -z "$INPUT_PATH" ]]; then
   echo "错误: 未指定上传文件路径或目录路径" >&2
   echo "用法: $0 <上传文件路径或上传目录路径> [输出文件名]" >&2
   exit 1
 fi
+
+INPUT_PATH="$(normalize_input_path "$INPUT_PATH")"
 
 if ! command -v md5sum >/dev/null 2>&1; then
   echo "错误: md5sum 命令未找到，请确认运行环境已安装 coreutils" >&2
@@ -42,6 +79,7 @@ mapfile -t PART_FILES < <(
       $1=""
       sub(/^[[:space:]]+/, "", $0)
       sub(/^\*/, "", $0)
+      sub(/\r$/, "", $0)
       if (checksum ~ /^[0-9a-fA-F]{32}$/ && $0 != "") {
         print $0
       }
@@ -72,6 +110,25 @@ for part in "${PART_FILES[@]}"; do
 done
 
 OUTPUT_PATH="$PACKAGE_DIR/$OUTPUT_NAME"
+EXTRACT_DIR=""
+
+cleanup_original_package() {
+  local cleanup_failed=0
+  for part in "${PART_FILES[@]}"; do
+    local part_path="$PACKAGE_DIR/$part"
+    if [[ -f "$part_path" ]] && ! rm -f -- "$part_path"; then
+      cleanup_failed=1
+    fi
+  done
+  if [[ -f "$MD5_FILE" ]] && ! rm -f -- "$MD5_FILE"; then
+    cleanup_failed=1
+  fi
+  if [[ "$cleanup_failed" -eq 0 ]]; then
+    echo "原始分片文件已删除，已释放空间。"
+  else
+    echo "警告: 原始分片文件清理不完整，请检查目录权限。" >&2
+  fi
+}
 
 echo "========================================="
 echo "分片包 MD5 校验与合并"
@@ -120,7 +177,7 @@ if [[ "${EXTRACT,,}" == "yes" ]]; then
   echo ""
   echo "开始解压 $OUTPUT_PATH ..."
   EXTRACT_DIR="$PACKAGE_DIR"
-  tar xzf "$OUTPUT_PATH" -C "$EXTRACT_DIR"
+  tar --force-local -xzf "$OUTPUT_PATH" -C "$EXTRACT_DIR"
   echo "解压完成，目录: $EXTRACT_DIR"
   echo "========================================="
   echo "全部完成"
@@ -128,3 +185,7 @@ if [[ "${EXTRACT,,}" == "yes" ]]; then
   echo "解压目录: $EXTRACT_DIR"
   echo "========================================="
 fi
+
+cleanup_original_package
+
+printf '{"output_file":"%s","output_path":"%s","extract_dir":"%s"}\n' "$(json_escape "$OUTPUT_NAME")" "$(json_escape "$OUTPUT_PATH")" "$(json_escape "$EXTRACT_DIR")"
