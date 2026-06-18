@@ -4,18 +4,20 @@ import '@xyflow/react/dist/style.css'
 import './styles.css'
 import * as yaml from 'js-yaml'
 import {deleteJSON, fetchJSON, fetchRunDetail, postJSON, postPluginZip, putJSON} from './api.js'
-import {buildTextDiff} from './configDiff.js'
+import {buildTextDiff, countTextMatches, replaceTextDraft} from './configDiff.js'
 import {filterEntries, readableAPIError, summarizeAPIResponse, tagsForEntries} from './utils.js'
 import FileUploadInput from './FileUploadInput.jsx'
 import {normalizeLogFontSize} from './logUtils.js'
 
 const WorkflowEditor = React.lazy(() => import('./workflow/WorkflowEditor.jsx'))
 const LiveRunTerminal = React.lazy(() => import('./LiveRunTerminal.jsx'))
+const RunRecordCanvas = React.lazy(() => import('./workflow/RunRecordCanvas.jsx'))
 
 function App() {
   const [catalog, setCatalog] = useState(null)
   const [activeCategory, setActiveCategory] = useState('')
   const [activeTab, setActiveTab] = useState('tools')
+  const [workflowEditorMounted, setWorkflowEditorMounted] = useState(false)
   const [selected, setSelected] = useState(null)
   const [params, setParams] = useState({})
   const [searchText, setSearchText] = useState('')
@@ -56,6 +58,10 @@ function App() {
       })
     return () => { ignore = true }
   }, [])
+
+  useEffect(() => {
+    if (activeTab === 'workflows') setWorkflowEditorMounted(true)
+  }, [activeTab])
 
   const category = useMemo(() => {
     return catalog?.categories?.find(item => item.id === activeCategory)
@@ -217,23 +223,27 @@ function App() {
           <button className={activeTab === 'runs' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('runs'); setSelected(null); setActiveTag(''); resetResult() }}>运行记录</button>
         </div>
 
-        {activeTab === 'workflows' ? (
-          <React.Suspense fallback={<section className="card canvasCard"><div className="empty">正在加载工作流画布...</div></section>}>
-            <WorkflowEditor
-              catalog={catalog}
-              activeCategory={activeCategory}
-              setResult={setResult}
-              refreshCatalog={refreshCatalog}
-              resultPanel={(
-                <section className="card resultCard workflowResultCard">
-                  {resultPanelHeader}
-                  <ResultView result={result} />
-                </section>
-              )}
-            />
-          </React.Suspense>
-        ) : activeTab === 'runs' ? (
-          <RunHistoryPanel />
+        {workflowEditorMounted && (
+          <div className={activeTab === 'workflows' ? 'tabPanel active' : 'tabPanel inactive'} aria-hidden={activeTab !== 'workflows'}>
+            <React.Suspense fallback={<section className="card canvasCard"><div className="empty">正在加载工作流画布...</div></section>}>
+              <WorkflowEditor
+                catalog={catalog}
+                activeCategory={activeCategory}
+                setResult={setResult}
+                refreshCatalog={refreshCatalog}
+                resultPanel={(
+                  <section className="card resultCard workflowResultCard">
+                    {resultPanelHeader}
+                    <ResultView result={result} />
+                  </section>
+                )}
+              />
+            </React.Suspense>
+          </div>
+        )}
+
+        {activeTab === 'runs' ? (
+          <RunHistoryPanel catalog={catalog} />
         ) : (activeTab === 'config' && hasConfigTab) ? (
           <ConfigPanel
             catalog={catalog}
@@ -244,9 +254,9 @@ function App() {
             setConfigSelectedWorkflow={setConfigSelectedWorkflow}
             refreshCatalog={refreshCatalog}
           />
-        ) : (
+        ) : activeTab !== 'workflows' ? (
           <RunPanel entries={entries} totalEntries={toolEntries.length} selected={selected} params={params} setParams={setParams} selectEntry={selectEntry} runSelected={runSelected} searchText={searchText} setSearchText={setSearchText} activeTag={activeTag} setActiveTag={setActiveTag} availableTags={availableTags} />
-        )}
+        ) : null}
 
         {activeTab === 'tools' && (
           <section className="card resultCard">
@@ -309,27 +319,38 @@ function App() {
   )
 }
 
-function RunHistoryPanel() {
+export function RunHistoryPanel({catalog}) {
   const [runs, setRuns] = useState([])
   const [selectedRunID, setSelectedRunID] = useState('')
   const [selectedDetail, setSelectedDetail] = useState(null)
   const [statusFilter, setStatusFilter] = useState('')
+  const [detailView, setDetailView] = useState('logs')
+  const [selectedWorkflow, setSelectedWorkflow] = useState(null)
+  const [workflowMessage, setWorkflowMessage] = useState('')
   const [message, setMessage] = useState('正在加载运行记录...')
   const [loading, setLoading] = useState(false)
   const [cancellingRunID, setCancellingRunID] = useState('')
 
-  async function loadRuns() {
-    setLoading(true)
-    setMessage('正在加载运行记录...')
+  async function loadRuns({silent = false} = {}) {
+    if (!silent) {
+      setLoading(true)
+      setMessage('正在加载运行记录...')
+    }
     try {
       const body = await fetchJSON('/api/runs/')
       const items = body.data?.runs || []
       setRuns(items)
-      setMessage(items.length ? `已加载 ${items.length} 条运行记录。` : '暂无运行记录。')
+      if (!silent) {
+        setMessage(items.length ? `已加载 ${items.length} 条运行记录。` : '暂无运行记录。')
+      }
     } catch (err) {
-      setMessage(readableAPIError(err, '加载运行记录失败。'))
+      if (!silent) {
+        setMessage(readableAPIError(err, '加载运行记录失败。'))
+      }
     } finally {
-      setLoading(false)
+      if (!silent) {
+        setLoading(false)
+      }
     }
   }
 
@@ -342,18 +363,67 @@ function RunHistoryPanel() {
     return runs.filter(item => item.status === statusFilter)
   }, [runs, statusFilter])
 
-  async function selectRun(runID) {
-    setSelectedRunID(runID)
-    setSelectedDetail(null)
-    setMessage(`正在读取运行记录 ${runID}...`)
+  async function refreshSelectedRun(runID, {silent = false} = {}) {
+    if (!silent) {
+      setSelectedRunID(runID)
+      setSelectedDetail(null)
+      setMessage(`正在读取运行记录 ${runID}...`)
+    }
     try {
       const body = await fetchRunDetail(runID)
       setSelectedDetail(body.data)
-      setMessage(`已加载运行记录 ${runID}。`)
+      if (!silent) {
+        setMessage(`已加载运行记录 ${runID}。`)
+      }
     } catch (err) {
-      setMessage(readableAPIError(err, '读取运行详情失败。'))
+      if (!silent) {
+        setMessage(readableAPIError(err, '读取运行详情失败。'))
+      }
     }
   }
+
+  async function selectRun(runID, nextDetailView = '') {
+    setSelectedRunID(runID)
+    if (nextDetailView) {
+      setDetailView(nextDetailView)
+    }
+    await refreshSelectedRun(runID)
+  }
+
+  useEffect(() => {
+    let ignore = false
+    async function loadWorkflowForDetail() {
+      const record = selectedDetail?.record
+      const target = record?.kind === 'workflow' ? record.target : ''
+      setSelectedWorkflow(null)
+      setWorkflowMessage('')
+      if (!target) return
+      try {
+        setWorkflowMessage('正在加载运行画布...')
+        const body = await fetchJSON(`/api/workflows/${encodeURIComponent(target)}`)
+        if (ignore) return
+        const config = body.data?.Config || body.data?.config
+        setSelectedWorkflow(config || null)
+        setWorkflowMessage(config ? '' : '未读取到工作流配置，无法展示画布。')
+      } catch (err) {
+        if (!ignore) setWorkflowMessage(readableAPIError(err, '加载运行画布失败。'))
+      }
+    }
+    loadWorkflowForDetail()
+    return () => { ignore = true }
+  }, [selectedDetail?.record?.kind, selectedDetail?.record?.target])
+
+  useEffect(() => {
+    const hasRunningRun = runs.some(item => item.status === 'running') || selectedDetail?.record?.status === 'running'
+    if (!hasRunningRun) return undefined
+    const timer = window.setInterval(() => {
+      loadRuns({silent: true})
+      if (selectedRunID) {
+        refreshSelectedRun(selectedRunID, {silent: true})
+      }
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [runs, selectedDetail?.record?.status, selectedRunID])
 
   async function cancelRun(runID) {
     if (!runID) return
@@ -419,6 +489,12 @@ function RunHistoryPanel() {
         <div className="cardHeader">
           <h3>记录详情</h3>
           <div className="runDetailActions">
+            {selectedDetail?.record?.kind === 'workflow' && (
+              <div className="segmentedControl" role="group" aria-label="运行详情视图">
+                <button type="button" className={detailView === 'logs' ? 'active' : ''} onClick={() => setDetailView('logs')}>日志</button>
+                <button type="button" className={detailView === 'canvas' ? 'active' : ''} onClick={() => setDetailView('canvas')}>画布</button>
+              </div>
+            )}
             {selectedDetail?.record?.status === 'running' && (
               <button type="button" className="secondary danger" disabled={cancellingRunID === selectedRunID} onClick={() => cancelRun(selectedRunID)}>
                 {cancellingRunID === selectedRunID ? '取消中' : '取消运行'}
@@ -428,7 +504,17 @@ function RunHistoryPanel() {
           </div>
         </div>
         {selectedDetail ? (
-          <RunDetail detail={selectedDetail} run={{id: selectedRunID, status: selectedDetail.record?.status}} />
+          detailView === 'canvas' && selectedDetail.record?.kind === 'workflow' ? (
+            <React.Suspense fallback={<div className="empty small">正在加载运行画布...</div>}>
+              {selectedWorkflow ? (
+                <RunRecordCanvas catalog={catalog} workflow={selectedWorkflow} detail={selectedDetail} />
+              ) : (
+                <div className="empty">{workflowMessage || '正在加载运行画布...'}</div>
+              )}
+            </React.Suspense>
+          ) : (
+            <RunDetail detail={selectedDetail} run={{id: selectedRunID, status: selectedDetail.record?.status}} />
+          )
         ) : (
           <div className="empty">选择一条运行记录查看日志和支持包。</div>
         )}
@@ -1543,6 +1629,49 @@ function canDeleteConfigFile(file) {
   return Boolean(file?.id)
 }
 
+function ConfigReplaceToolbar({content, setContent, disabled, onMessage}) {
+  const [findText, setFindText] = useState('')
+  const [replacement, setReplacement] = useState('')
+  const matchCount = useMemo(() => countTextMatches(content, findText), [content, findText])
+
+  function applyReplace(mode) {
+    if (!findText) {
+      onMessage?.('请输入要查找的文本。')
+      return
+    }
+    const result = replaceTextDraft(content, findText, replacement, mode)
+    if (result.replacements === 0) {
+      onMessage?.('未找到匹配文本。')
+      return
+    }
+    setContent(result.content)
+    onMessage?.(`已替换 ${result.replacements} 处文本，保存后才会写入文件。`)
+  }
+
+  return (
+    <section className="configReplaceToolbar" aria-label="配置文本替换">
+      <div className="configReplaceHeader">
+        <strong>文本替换</strong>
+        <span>{findText ? `匹配 ${matchCount} 处` : '输入查找文本后可替换当前草稿'}</span>
+      </div>
+      <div className="configReplaceFields">
+        <label>
+          <span>查找文本</span>
+          <input value={findText} disabled={disabled} placeholder="例如 127.0.0.1" onChange={event => setFindText(event.target.value)} />
+        </label>
+        <label>
+          <span>替换为</span>
+          <input value={replacement} disabled={disabled} placeholder="例如 172.16.51.200" onChange={event => setReplacement(event.target.value)} />
+        </label>
+      </div>
+      <div className="configReplaceActions">
+        <button className="secondary" type="button" disabled={disabled || !findText || matchCount === 0} onClick={() => applyReplace('first')}>替换第一个</button>
+        <button className="secondary" type="button" disabled={disabled || !findText || matchCount === 0} onClick={() => applyReplace('all')}>全部替换</button>
+      </div>
+    </section>
+  )
+}
+
 function PluginConfigFileEditor({pluginID, file, onBack}) {
   const [content, setContent] = useState('')
   const [originalContent, setOriginalContent] = useState('')
@@ -1608,6 +1737,12 @@ function PluginConfigFileEditor({pluginID, file, onBack}) {
         {file?.reason && <small className="configFileReason">{file.reason}</small>}
         {saveBlockReason && <small className="configFileSaveHint">{saveBlockReason}</small>}
       </div>
+      <ConfigReplaceToolbar
+        content={content}
+        setContent={setContent}
+        disabled={loading || saving || !canSave}
+        onMessage={setMessage}
+      />
       <label>
         <span>文件内容</span>
         <textarea
@@ -1718,6 +1853,12 @@ function WorkflowConfigFileEditor({workflowID, file, onBack}) {
         {file?.reason && <small className="configFileReason">{file.reason}</small>}
         {saveBlockReason && <small className="configFileSaveHint">{saveBlockReason}</small>}
       </div>
+      <ConfigReplaceToolbar
+        content={content}
+        setContent={setContent}
+        disabled={loading || saving || deleting || !canSave}
+        onMessage={setMessage}
+      />
       <label>
         <span>文件内容</span>
         <textarea
@@ -2127,7 +2268,10 @@ function RunPanel({entries, totalEntries, selected, params, setParams, selectEnt
   )
 }
 
-createRoot(document.getElementById('root')).render(<App />)
+const rootElement = document.getElementById('root')
+if (rootElement) {
+  createRoot(rootElement).render(<App />)
+}
 
 function parseBoolParamValue(value) {
   return value === true || value === 'true' || value === '1' || value === 'yes' || value === 'on'

@@ -1,13 +1,6 @@
-export const conditionOperators = [
-  { value: "eq", label: "等于" },
-  { value: "neq", label: "不等于" },
-  { value: "contains", label: "包含" },
-  { value: "not_contains", label: "不包含" },
-  { value: "in", label: "在列表中" },
-  { value: "not_in", label: "不在列表中" },
-  { value: "exists", label: "存在" },
-  { value: "empty", label: "为空" },
-];
+import {conditionOperators} from "./catalog.js";
+
+export {conditionOperators};
 
 export function defaultCondition() {
   return {

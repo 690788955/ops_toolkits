@@ -299,3 +299,90 @@ Why correct:
 
 - Rerun remains an explicit mutating POST action.
 - GET requests keep their existing run-detail behavior.
+
+## Scenario: Extract Workflow Config Files
+
+### 1. Scope / Trigger
+
+- Trigger: changing `type: extract_config`, workflow upload results, workflow configuration file APIs, or Web config-center display for user workflows.
+- Applies when changing `runner.executeExtractConfigNode`, workflow config file path resolution, `GET /api/workflows/{id}/files`, or workflow editor extract-config node serialization.
+
+### 2. Signatures
+
+- Workflow node type: `type: extract_config`
+- Runtime config:
+
+```yaml
+extract_config:
+  source_type: directory
+  source_dir: "{{ .steps.merge.outputs.extract_dir }}"
+  files:
+    - source_path: everisk-deployment/hosts-everisk-deploy
+      target_path: everisk-deployment/hosts-everisk-deploy
+      label: 主机清单
+      replace: true
+```
+
+- Config-center API:
+  - `GET /api/workflows/{workflowID}/files`
+  - `GET|PUT|DELETE /api/workflows/{workflowID}/files/{fileID}`
+
+### 3. Contracts
+
+- `target_path` is a stable config-center ID/display path, not a copy destination.
+- Extracted files must stay at their real source path under `runs/uploads/...`; the runner registers that source file in `workflow.config_files` with `config_dir: "."` and `path: runs/uploads/...`.
+- The runner must reject absolute or unsafe `target_path` IDs, and must reject source files that escape `registry.BaseDir`, are not regular files, or exceed the config file size limit.
+- `replace` controls whether an existing config ID may be remapped to a newly extracted source path. It must not overwrite source file content.
+- When `workflow.config_files` is explicit, the config-center list must show those declarations only. Scanning `plugins/user.workflows/config/workflows/<workflow-id>/` is a legacy fallback for workflows without declarations.
+- `CONFIG <absolute-path>` log lines should point at the real mounted source file so operators can verify which upload extraction file the config center edits.
+
+### 4. Validation & Error Matrix
+
+| Condition | Expected behavior |
+|---|---|
+| `target_path` is `everisk-deployment/hosts-everisk-deploy` | register config ID `everisk-deployment/hosts-everisk-deploy` mapped to the real extracted `runs/uploads/.../everisk-deployment/hosts-everisk-deploy` file |
+| `target_path` is absolute or contains `..` | fail the extract node before updating `workflow.config_files` |
+| same config ID already maps to another source path and `replace` is false | fail the extract node with a clear remapping error |
+| same config ID already maps to another source path and `replace` is true | update the declaration to the new source path without copying file content |
+| workflow has explicit `config_files` plus legacy scanned files on disk | config-center list returns explicit declarations only |
+
+### 5. Good/Base/Bad Cases
+
+- Good: a package upload is merged, `extract_config` registers `runs/uploads/.../hosts-everisk-deploy` as workflow config ID `everisk-deployment/hosts-everisk-deploy`, and the config tab saves back to that real source file.
+- Base: a workflow has no explicit `config_files`; the config center discovers legacy regular files below its workflow config directory.
+- Bad: `extract_config` copies `hosts-everisk-deploy` into `plugins/user.workflows/config/workflows/<workflow-id>/`, so editing the config center changes a stale duplicate instead of the parsed upload file.
+
+### 6. Tests Required
+
+- Runner test must assert extracted config files are registered in `workflow.config_files` with `config_dir: "."` and `path: runs/uploads/...`, and no duplicate file is copied to `plugins/user.workflows/config/workflows/<workflow-id>/`.
+- Server API test must assert `GET /api/workflows/{id}/files` exposes the declared real upload path, and `PUT` saves back to the same source file.
+- Frontend build must pass after changing extract-config editor text or serialization.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+filepath.Join(reg.BaseDir, targetPath)
+```
+
+Why wrong:
+
+- It treats the logical config ID as a write destination and may create a duplicate unrelated to the parsed upload source file.
+
+#### Correct
+
+```go
+wf.ConfigFiles = upsert(wf.ConfigFiles, config.ConfigFileRef{
+    ID: targetPath,
+    ConfigDir: ".",
+    Path: extractedSourceRelativePath,
+    Scope: config.ConfigFileScopePlugin,
+    Access: config.ConfigFileAccessReadWrite,
+    Create: true,
+})
+```
+
+Why correct:
+
+- The config center keeps a stable ID while saving to the real parsed upload file that the operator intended to maintain.

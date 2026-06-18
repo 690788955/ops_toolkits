@@ -52,6 +52,42 @@ export function buildTextDiff(before, after) {
   }
 }
 
+export function countTextMatches(content, findText) {
+  const source = String(content || '')
+  const needle = String(findText || '')
+  if (!needle) return 0
+  let count = 0
+  let index = 0
+  while (index <= source.length) {
+    const nextIndex = source.indexOf(needle, index)
+    if (nextIndex === -1) break
+    count += 1
+    index = nextIndex + needle.length
+  }
+  return count
+}
+
+export function replaceTextDraft(content, findText, replacement, mode = 'all') {
+  const source = String(content || '')
+  const needle = String(findText || '')
+  const nextValue = String(replacement || '')
+  if (!needle) return {content: source, replacements: 0}
+  if (mode === 'first') {
+    const index = source.indexOf(needle)
+    if (index === -1) return {content: source, replacements: 0}
+    return {
+      content: source.slice(0, index) + nextValue + source.slice(index + needle.length),
+      replacements: 1
+    }
+  }
+  const replacements = countTextMatches(source, needle)
+  if (replacements === 0) return {content: source, replacements: 0}
+  return {
+    content: source.split(needle).join(nextValue),
+    replacements
+  }
+}
+
 function splitDiffLines(value) {
   const lines = String(value || '').replace(/\r\n/g, '\n').split('\n')
   if (lines.length === 1 && lines[0] === '') return []

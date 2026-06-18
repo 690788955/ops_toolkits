@@ -6,10 +6,10 @@ category: docker
 tags: []
 parameters: []
 config_files:
-  - id: runs/uploads/upload-1781683014142624500/ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1.tar.gz.02
-    label: ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1.tar.gz.02
-    config_dir: config/workflows/everisk.pkg
-    path: runs/uploads/upload-1781683014142624500/ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1.tar.gz.02
+  - id: everisk-deployment/hosts-everisk-deploy
+    label: 主机清单
+    config_dir: .
+    path: runs/uploads/upload-1781793953895273600/ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1_arm64/everisk-deployment/hosts-everisk-deploy
     scope: plugin
     access: read_write
     create: true
@@ -98,7 +98,7 @@ nodes:
           source_path: everisk-deployment/hosts-everisk-deploy
           target_path: everisk-deployment/hosts-everisk-deploy
           label: 主机清单
-          replace: false
+          replace: true
       source_dir: '{{ .steps.docker_exec_verify_md5_merge_2.outputs.extract_dir }}'
     depends_on: []
     params: {}

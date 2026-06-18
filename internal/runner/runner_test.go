@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -673,7 +674,7 @@ echo "paths=${OPS_PARAM_PATHS}"
 	}
 }
 
-func TestRunWorkflowExtractConfigNodeCopiesUploadedFile(t *testing.T) {
+func TestRunWorkflowExtractConfigNodeMountsUploadedFile(t *testing.T) {
 	dir := t.TempDir()
 	reg := &registry.Registry{
 		BaseDir:   dir,
@@ -722,10 +723,20 @@ func TestRunWorkflowExtractConfigNodeCopiesUploadedFile(t *testing.T) {
 	if record.Status != "succeeded" {
 		t.Fatalf("status = %s", record.Status)
 	}
-	targetPath := filepath.Join(dir, "conf", "app.yaml")
-	content := readFile(t, targetPath)
-	if content != "enabled: true\n" {
-		t.Fatalf("target config content = %q", content)
+	entry := requireWorkflowConfigFile(t, wf, "conf/app.yaml")
+	if entry.ConfigDir != "." || entry.Path != "runs/uploads/upload-1/conf/app.yaml" || entry.Label != "应用配置" || entry.Access != config.ConfigFileAccessReadWrite || !entry.Create {
+		t.Fatalf("config entry = %#v", entry)
+	}
+	if _, err := os.Stat(testWorkflowConfigPath(dir, "demo.extract", "conf", "app.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("copied config file should not exist, err = %v", err)
+	}
+	saved, err := config.LoadWorkflow(filepath.Join(dir, "plugins", "user.workflows", "workflows", "demo.extract.yaml"))
+	if err != nil {
+		t.Fatalf("load saved workflow: %v", err)
+	}
+	savedEntry := requireWorkflowConfigFile(t, saved, "conf/app.yaml")
+	if savedEntry.Path != "runs/uploads/upload-1/conf/app.yaml" {
+		t.Fatalf("saved config entry = %#v", savedEntry)
 	}
 	extractStdout := readFile(t, filepath.Join(r.RunsDir, record.ID, "extract", "stdout.log"))
 	if !strings.Contains(extractStdout, "SUCCESS 提取配置节点 extract") || !strings.Contains(extractStdout, "CONFIG ") {
@@ -733,7 +744,7 @@ func TestRunWorkflowExtractConfigNodeCopiesUploadedFile(t *testing.T) {
 	}
 }
 
-func TestRunWorkflowExtractConfigNodeCopiesDirectoryFiles(t *testing.T) {
+func TestRunWorkflowExtractConfigNodeMountsDirectoryFiles(t *testing.T) {
 	dir := t.TempDir()
 	reg := &registry.Registry{
 		BaseDir:   dir,
@@ -794,11 +805,169 @@ func TestRunWorkflowExtractConfigNodeCopiesDirectoryFiles(t *testing.T) {
 	if record.Status != "succeeded" {
 		t.Fatalf("status = %s", record.Status)
 	}
-	if content := readFile(t, filepath.Join(dir, "app.yaml")); !strings.Contains(content, "app: true") {
-		t.Fatalf("app target content = %q", content)
+	appEntry := requireWorkflowConfigFile(t, wf, "app.yaml")
+	if appEntry.Path != "runs/uploads/upload-1/conf/app.yaml" || appEntry.Label != "应用配置" {
+		t.Fatalf("app entry = %#v", appEntry)
 	}
-	if content := readFile(t, filepath.Join(dir, "db.yaml")); !strings.Contains(content, "db: true") {
-		t.Fatalf("db target content = %q", content)
+	dbEntry := requireWorkflowConfigFile(t, wf, "db.yaml")
+	if dbEntry.Path != "runs/uploads/upload-1/conf/db.yaml" || dbEntry.Label != "数据库配置" {
+		t.Fatalf("db entry = %#v", dbEntry)
+	}
+	if _, err := os.Stat(testWorkflowConfigPath(dir, "demo.extract.dir", "app.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("copied app config should not exist, err = %v", err)
+	}
+}
+
+func TestRunWorkflowExtractConfigNodeMountsDirectoryFileFromLocalSourceDir(t *testing.T) {
+	dir := filepath.Join("F:/ccb/ops_toolkits", fmt.Sprintf(".test-extract-dir-%d", time.Now().UnixNano()))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	reg := &registry.Registry{
+		BaseDir:   dir,
+		Root:      &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools:     map[string]*registry.Tool{},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	sourceDir := filepath.Join(dir, "runs", "uploads", "upload-1", "ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1_arm64")
+	sourcePath := filepath.Join(sourceDir, "everisk-deployment", "hosts-everisk-deploy")
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("hosts-data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sourceDirAlias := filepath.ToSlash(sourceDir)
+	sourceDirAlias = strings.Replace(sourceDirAlias, "F:/", "/mnt/f/", 1)
+	wf := &config.WorkflowConfig{
+		ID: "demo.extract.dir.local",
+		Nodes: []config.WorkflowNode{
+			{ID: "upload", Type: config.WorkflowNodeTypeUpload},
+			{
+				ID:   "extract",
+				Type: config.WorkflowNodeTypeExtractConfig,
+				Extract: config.WorkflowExtractConfig{
+					SourceType: "directory",
+					SourceDir:  "{{ .steps.merge.outputs.extract_dir }}",
+					Files: []config.WorkflowExtractConfigFile{
+						{
+							SourcePath: "everisk-deployment/hosts-everisk-deploy",
+							TargetPath: "inventory/hosts",
+							Label:      "主机清单",
+							Replace:    true,
+						},
+					},
+				},
+			},
+		},
+		Edges: []config.WorkflowEdge{{From: "upload", To: "extract"}},
+	}
+	upload := config.WorkflowUploadResult{
+		ID:           "upload-1",
+		FileName:     "package.tar.gz",
+		Path:         filepath.Join(dir, "runs", "uploads", "upload-1", "package.tar.gz"),
+		RelativePath: "runs/uploads/upload-1/package.tar.gz",
+		Count:        1,
+	}
+
+	r := New(reg)
+	record, err := r.RunWorkflowConfigWithUploads(
+		context.Background(),
+		wf,
+		map[string]string{"steps.merge.outputs.extract_dir": sourceDirAlias},
+		false,
+		map[string]config.WorkflowUploadResult{"upload": upload},
+		nilWriter{},
+		nilWriter{},
+	)
+	if err != nil {
+		t.Fatalf("RunWorkflowConfigWithUploads error: %v", err)
+	}
+	if record.Status != "succeeded" {
+		t.Fatalf("status = %s", record.Status)
+	}
+	entry := requireWorkflowConfigFile(t, wf, "inventory/hosts")
+	if entry.Path != "runs/uploads/upload-1/ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1_arm64/everisk-deployment/hosts-everisk-deploy" {
+		t.Fatalf("config entry = %#v", entry)
+	}
+	if _, err := os.Stat(testWorkflowConfigPath(dir, "demo.extract.dir.local", "inventory", "hosts")); !os.IsNotExist(err) {
+		t.Fatalf("copied config should not exist, err = %v", err)
+	}
+}
+
+func TestRunWorkflowExtractConfigNodeAcceptsAbsoluteStyleSourcePath(t *testing.T) {
+	dir := filepath.Join("F:/ccb/ops_toolkits", fmt.Sprintf(".test-extract-%d", time.Now().UnixNano()))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	reg := &registry.Registry{
+		BaseDir:   dir,
+		Root:      &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools:     map[string]*registry.Tool{},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	sourcePath := filepath.Join(dir, "runs", "uploads", "upload-1", "ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1_arm64", "everisk-deployment", "hosts-everisk-deploy")
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sourcePath, []byte("hosts-data\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sourceAlias := filepath.ToSlash(sourcePath)
+	sourceAlias = strings.Replace(sourceAlias, "F:/", "/f/", 1)
+	wf := &config.WorkflowConfig{
+		ID: "demo.extract.abs",
+		Nodes: []config.WorkflowNode{
+			{ID: "upload", Type: config.WorkflowNodeTypeUpload},
+			{
+				ID:   "extract",
+				Type: config.WorkflowNodeTypeExtractConfig,
+				Extract: config.WorkflowExtractConfig{
+					FileName:   sourceAlias,
+					TargetPath: "everisk-deployment/hosts-everisk-deploy",
+					Label:      "主机清单",
+				},
+			},
+		},
+		Edges: []config.WorkflowEdge{{From: "upload", To: "extract"}},
+	}
+	upload := config.WorkflowUploadResult{
+		ID:           "upload-1",
+		FileName:     "hosts-everisk-deploy",
+		Path:         sourcePath,
+		RelativePath: "runs/uploads/upload-1/ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1_arm64/everisk-deployment/hosts-everisk-deploy",
+		Size:         int64(len("hosts-data\n")),
+		Files: []config.WorkflowUploadFile{
+			{
+				FileName:     "hosts-everisk-deploy",
+				Path:         sourcePath,
+				RelativePath: "runs/uploads/upload-1/ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1_arm64/everisk-deployment/hosts-everisk-deploy",
+				Size:         int64(len("hosts-data\n")),
+			},
+		},
+		Count:     1,
+		TotalSize: int64(len("hosts-data\n")),
+	}
+
+	r := New(reg)
+	record, err := r.RunWorkflowConfigWithUploads(context.Background(), wf, nil, false, map[string]config.WorkflowUploadResult{"upload": upload}, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflowConfigWithUploads error: %v", err)
+	}
+	if record.Status != "succeeded" {
+		t.Fatalf("status = %s", record.Status)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "everisk-deployment", "hosts-everisk-deploy")); !os.IsNotExist(err) {
+		t.Fatalf("root target should not be created, err = %v", err)
+	}
+	if _, err := os.Stat(testWorkflowConfigPath(dir, "demo.extract.abs", "everisk-deployment", "hosts-everisk-deploy")); !os.IsNotExist(err) {
+		t.Fatalf("copied config should not exist, err = %v", err)
+	}
+	entry := requireWorkflowConfigFile(t, wf, "everisk-deployment/hosts-everisk-deploy")
+	if entry.Path != "runs/uploads/upload-1/ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1_arm64/everisk-deployment/hosts-everisk-deploy" {
+		t.Fatalf("config entry = %#v", entry)
 	}
 }
 
@@ -963,6 +1132,23 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func testWorkflowConfigPath(baseDir, workflowID string, parts ...string) string {
+	items := append([]string{baseDir, "plugins", "user.workflows", "config", "workflows", workflowID}, parts...)
+	return filepath.Join(items...)
+}
+
+func requireWorkflowConfigFile(t *testing.T, wf *config.WorkflowConfig, id string) config.ConfigFileRef {
+	t.Helper()
+	for _, entry := range wf.ConfigFiles {
+		config.NormalizeConfigFileRef(&entry)
+		if entry.ID == id {
+			return entry
+		}
+	}
+	t.Fatalf("workflow config file %s not found in %#v", id, wf.ConfigFiles)
+	return config.ConfigFileRef{}
 }
 
 func waitForRunnerStepStatus(t *testing.T, runDir, stepID, status string) RunRecord {

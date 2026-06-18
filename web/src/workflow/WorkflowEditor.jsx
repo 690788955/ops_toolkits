@@ -2,81 +2,15 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {Background, Controls, MiniMap, ReactFlow, reconnectEdge, useEdgesState, useNodesState} from '@xyflow/react'
 import {deleteJSON, fetchJSON, fetchRunDetail, postJSON, postRunUploadNodeChunked} from '../api.js'
 import {filterEntries, readableAPIError, summarizeAPIResponse} from '../utils.js'
+import {controlNodeCatalog, controlNodeHelp, controlNodeTitle} from './catalog.js'
 import * as workflowModel from './model.js'
 import {controlShapeMarker, nodeTypes, normalizeRunStatus, runStatusLabel} from './nodes.jsx'
 import {EdgeConfigModal, NodeConfigEditor, NodeConfigModal, ValidationSummary} from './inspectors.jsx'
 import {CanvasDock, NodePickerPanel} from './picker.jsx'
 import FileUploadInput from '../FileUploadInput.jsx'
 
-const conditionOperators = [
-  {value: 'eq', label: '等于'},
-  {value: 'neq', label: '不等于'},
-  {value: 'contains', label: '包含'},
-  {value: 'not_contains', label: '不包含'},
-  {value: 'in', label: '在列表中'},
-  {value: 'not_in', label: '不在列表中'},
-  {value: 'exists', label: '存在'},
-  {value: 'empty', label: '为空'}
-]
-
 const MAX_PLATFORM_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
-
-const controlNodeCatalog = [
-  {
-    type: 'condition',
-    title: '条件分支',
-    secondary: 'Switch / Case',
-    description: '根据上游输出或工作流参数选择后续分支',
-    capabilities: ['多分支', '默认分支', '读取 stdout/stderr/参数'],
-    help: '适合根据巡检结果、返回文本、参数值做分流',
-    enabled: true
-  },
-  {
-    type: 'parallel',
-    title: '并行分支',
-    secondary: 'Parallel',
-    description: '将后续任务拆分为多个分支路径',
-    capabilities: ['多路径', '分支结构'],
-    help: '用于明确 fan-out 分支结构；当前运行按 DAG 顺序调度',
-    enabled: true
-  },
-  {
-    type: 'join',
-    title: '合流',
-    secondary: 'Join',
-    description: '等待多个上游分支完成后继续流程',
-    capabilities: ['分支汇聚', '等待上游'],
-    help: '用于明确 fan-in 汇聚点；入边完成后节点记为成功',
-    enabled: true
-  },
-  {
-    type: 'loop',
-    title: '循环',
-    secondary: 'Loop',
-    description: '按固定次数重复执行一个内嵌选择的插件工具',
-    capabilities: ['固定次数', '内嵌工具', '安全上限'],
-    help: '执行到循环节点时，按最大次数重复运行已选择的插件工具',
-    enabled: true
-  },
-  {
-    type: 'upload',
-    title: '上传文件',
-    secondary: 'Upload',
-    description: '运行前上传本地文件、批量文件或目录到平台受控目录',
-    capabilities: ['批量文件', '目录结构', '输出文件路径'],
-    help: '上传节点会在工作流启动前选择文件或目录，运行时输出上传结果 JSON',
-    enabled: true
-  },
-  {
-    type: 'extract_config',
-    title: '提取配置',
-    secondary: 'Extract Config',
-    description: '从上传结果提取文件到工作流配置目录',
-    capabilities: ['文件/目录来源', '多文件映射', '可覆盖'],
-    help: '执行到该节点时，把匹配的上传文件复制为稳定的工作流配置文件',
-    enabled: true
-  }
-]
+const REMEMBERED_WORKFLOW_PREFIX = 'ops.workflowEditor.selectedWorkflow'
 
 export default function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog, resultPanel = null}) {
   const [workflow, setWorkflow] = useState(emptyWorkflow(activeCategory))
@@ -91,6 +25,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }, [catalog, sidebarScopedCategory])
   const [selectedWorkflowID, setSelectedWorkflowID] = useState('')
   const [canvasMode, setCanvasMode] = useState('execute')
+  const [executeDetailView, setExecuteDetailView] = useState('canvas')
   const [selectedNodeID, setSelectedNodeID] = useState('')
   const [selectedEdgeID, setSelectedEdgeID] = useState('')
   const [nodeConfigModalOpen, setNodeConfigModalOpen] = useState(false)
@@ -98,6 +33,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   const [workflowParamsText, setWorkflowParamsText] = useState('[]')
   const [runParamsText, setRunParamsText] = useState('{}')
   const [executeStep, setExecuteStep] = useState('params')
+  const [runParamsModalOpen, setRunParamsModalOpen] = useState(false)
   const [nodeParamsText, setNodeParamsText] = useState('{}')
   const [editorValidation, setEditorValidation] = useState(null)
   const [flowInstance, setFlowInstance] = useState(null)
@@ -156,6 +92,14 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     clearCanvasRunOverlay()
   }, [activeCategory, clearCanvasRunOverlay])
 
+  useEffect(() => {
+    if (!selectedWorkflowID) return
+    if (workflowOptions.some(item => item.id === selectedWorkflowID)) return
+    setSelectedWorkflowID('')
+    setNodes([])
+    setEdges([])
+  }, [selectedWorkflowID, workflowOptions, setNodes, setEdges])
+
   const selectedNode = useMemo(() => nodes.find(node => node.id === selectedNodeID), [nodes, selectedNodeID])
   const selectedEdge = useMemo(() => edges.find(edge => edge.id === selectedEdgeID), [edges, selectedEdgeID])
   const toolMap = useMemo(() => new Map((catalog.tools || []).map(tool => [tool.id, tool])), [catalog.tools])
@@ -187,6 +131,17 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     activeRunID
   ), [nodes, canvasRunState, catalog.tools, isEditingCanvas, isActiveRunRunning, activeRunID, rerunWorkflowNode])
   const displayEdges = useMemo(() => buildDisplayEdges(edges, displayNodes, canvasRunState), [edges, displayNodes, canvasRunState])
+
+  useEffect(() => {
+    if (selectedWorkflowID || nodes.length > 0 || isActiveRunRunning) return
+    const rememberedID = readRememberedWorkflowID(sidebarScopedCategory)
+    if (!rememberedID) return
+    if (!workflowOptions.some(item => item.id === rememberedID)) {
+      forgetRememberedWorkflowID(sidebarScopedCategory, rememberedID)
+      return
+    }
+    loadWorkflow(rememberedID, {silent: true})
+  }, [selectedWorkflowID, nodes.length, isActiveRunRunning, sidebarScopedCategory, workflowOptions])
 
   useEffect(() => {
     if (!selectedEdge) {
@@ -320,10 +275,10 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     [clearCanvasRunOverlay, isEditingCanvas, nodes, setEdges]
   )
 
-  async function loadWorkflow(id) {
+  async function loadWorkflow(id, options = {}) {
     if (!id) return
     clearCanvasRunOverlay()
-    setResult({message: '加载工作流...'})
+    if (!options.silent) setResult({message: '加载工作流...'})
     try {
       const body = await fetchJSON(`/api/workflows/${id}`)
       const config = body.data.Config || body.data.config
@@ -340,7 +295,6 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       setNodes(workflowModel.autoLayoutNodes(flowNodes, flowEdges))
       setEdges(flowEdges)
       setSelectedWorkflowID(id)
-      setCanvasMode('execute')
       setSelectedNodeID('')
       setSelectedEdgeID('')
       setNodeConfigModalOpen(false)
@@ -348,9 +302,10 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       setUploadNodeFiles({})
       closeNodePicker()
       fitCanvasViewAfterLayout()
-      setResult({message: `已加载工作流 ${id}`})
+      rememberWorkflowID(sidebarScopedCategory, id)
+      if (!options.silent) setResult({message: `已加载工作流 ${id}`})
     } catch (err) {
-      setResult({message: String(err)})
+      if (!options.silent) setResult({message: String(err)})
     }
   }
 
@@ -931,6 +886,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       setWorkflow(check.draft)
       const body = await postJSON(`/api/workflows/${check.draft.id}/save`, {workflow: check.draft})
       setSelectedWorkflowID(check.draft.id)
+      rememberWorkflowID(sidebarScopedCategory, check.draft.id)
       await refreshCatalog({keepCategory: true})
       setResult({message: summarizeAPIResponse(body, '工作流保存成功。'), response: body})
     } catch (err) {
@@ -954,6 +910,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       setNodes([])
       setEdges([])
       setSelectedWorkflowID('')
+      forgetRememberedWorkflowID(sidebarScopedCategory, id)
       setSelectedNodeID('')
       setSelectedEdgeID('')
       setNodeConfigModalOpen(false)
@@ -1007,7 +964,9 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       }
       const uploadNodeFilesSnapshot = uploadNodeFiles
       setResult({message: '执行工作流...', uploadProgress: null})
+      setExecuteDetailView('logs')
       const body = await postJSON(`/api/workflows/${check.draft.id}/run?async=true`, {params: runParams, workflow: check.draft, confirm: confirmRequired})
+      setRunParamsModalOpen(false)
       if (body.id) {
         setActiveRun({id: body.id, status: body.status || 'running', target: body.target || check.draft.id})
         await pollRunDetail(body.id, body, runVersion, runNodesSnapshot, applyRunOverlay, uploadNodeFilesSnapshot)
@@ -1056,17 +1015,18 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     setResult({message: '参数已确认，可开始运行。'})
   }
 
+  function openRunParamsModal() {
+    if (isActiveRunRunning) {
+      setResult({message: `当前工作流正在运行：${activeRunID || '等待运行记录 ID'}，请先等待完成或取消运行。`, run: activeRun || undefined})
+      return
+    }
+    enterExecuteMode()
+    setExecuteStep('params')
+    setRunParamsModalOpen(true)
+  }
+
   function runWorkflowDockAction() {
-    if (isEditingCanvas) {
-      enterExecuteMode()
-      setExecuteStep('params')
-      return
-    }
-    if (executeStep !== 'run') {
-      prepareRunStep()
-      return
-    }
-    runDraft()
+    openRunParamsModal()
   }
 
   async function cancelActiveRun() {
@@ -1254,274 +1214,299 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
         <div className={isActiveRunRunning ? 'workflowSidebarStatus running' : 'workflowSidebarStatus'} title={activeRunID ? `运行 ID：${activeRunID}` : '执行后可在这里取消当前画布发起的运行任务。'}>
           <strong>{isActiveRunRunning ? '运行中' : activeRunID ? runStatusLabel(activeRunStatus) : '未运行'}</strong>
         </div>
+        {isActiveRunRunning ? (
+          <button className="secondary danger" type="button" onClick={cancelActiveRun} disabled={cancellingRunID === activeRunID} aria-label="取消当前工作流运行">
+            {cancellingRunID === activeRunID ? '取消中' : '取消运行'}
+          </button>
+        ) : (
+          <button className="primary" type="button" onClick={runWorkflowDockAction} aria-label="从执行面板运行工作流">
+            运行工作流
+          </button>
+        )}
       </div>
     </section>
   )
-  const executeModeParamsPanel = !isEditingCanvas ? (
-    <aside className="card workflowRunParamsPanel">
-      <div className="cardHeader">
-        <h3>{executeStep === 'params' ? '填写参数' : '启动运行'}</h3>
-        <span title={`当前共 ${workflowParameters.length + executableParamCount} 项可填写参数`}>步骤 {executeStep === 'params' ? '1' : '2'} / 2 · {workflowParameters.length + executableParamCount} 项</span>
-      </div>
-      <div className="form compact">
-        {executeStep === 'params' ? (
-          <>
-            {workflowParameters.length + executableParamCount === 0 && (
-              <div className="empty small">当前工作流无需参数。</div>
-            )}
-            {workflowParameters.length > 0 && (
-              <div className="workflowRunParamSection">
-                <strong title="工作流级运行参数">工作流参数</strong>
-                {workflowParameters.map((param, index) => (
-                  <label key={param.name || index} className={param.required ? 'requiredField' : ''}>
-                    <span title={param.description || param.name || `参数 ${index + 1}`}>{param.description || param.name || `参数 ${index + 1}`}{param.required ? ' *' : ''}</span>
-                    {param.type === 'bool' ? (
-                      <input
-                        type="checkbox"
-                        checked={parseBoolParamValue(runParams[param.name])}
-                        onChange={event => updateRunParam(param.name, event.target.checked)}
-                        disabled={!param.name || isActiveRunRunning}
-                      />
-                    ) : param.type === 'file' ? (
-                      <FileUploadInput
-                        value={formatRunParamInputValue(runParams[param.name])}
-                        onChange={value => updateRunParam(param.name, value)}
-                        disabled={!param.name || isActiveRunRunning}
-                      />
-                    ) : Array.isArray(param.options) && param.options.length > 0 ? (
-                      <select
-                        value={formatRunParamInputValue(runParams[param.name])}
-                        onChange={event => updateRunParam(param.name, event.target.value)}
-                        disabled={!param.name || isActiveRunRunning}
-                      >
-                        {param.options.map(opt => (
-                          <option key={opt} value={opt}>{opt || '（默认）'}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input
-                        value={formatRunParamInputValue(runParams[param.name])}
-                        placeholder={param.name || '参数名'}
-                        onChange={event => updateRunParam(param.name, event.target.value)}
-                        disabled={!param.name || isActiveRunRunning}
-                      />
-                    )}
-                  </label>
-                ))}
-              </div>
-            )}
-            {executableParamGroups.map(group => (
-              <div className="workflowRunParamGroup" key={group.key}>
-                <div className="workflowRunParamGroupHeader">
-                  <strong>{group.title}</strong>
-                  <span>{group.subtitle}</span>
-                </div>
-                {group.parameters.map(param => (
-                  <label key={`${group.key}:${param.name}`} className={param.required ? 'requiredField' : ''}>
-                    <span title={param.description || param.name}>{param.description || param.name}{param.required ? ' *' : ''}</span>
-                    {param.type === 'bool' ? (
-                      <input
-                        type="checkbox"
-                        checked={parseBoolParamValue(group.params[param.name])}
-                        onChange={event => updateExecutableNodeParam(group.nodeID, param.name, event.target.checked)}
-                        disabled={isActiveRunRunning}
-                      />
-                    ) : param.type === 'file' ? (
-                      <FileUploadInput
-                        value={formatRunParamInputValue(group.params[param.name])}
-                        onChange={value => updateExecutableNodeParam(group.nodeID, param.name, value)}
-                        disabled={isActiveRunRunning}
-                      />
-                    ) : Array.isArray(param.options) && param.options.length > 0 ? (
-                      <select
-                        value={formatRunParamInputValue(group.params[param.name])}
-                        onChange={event => updateExecutableNodeParam(group.nodeID, param.name, event.target.value)}
-                        disabled={isActiveRunRunning}
-                      >
-                        <option value="">手动输入 / 不设置</option>
-                        {param.options.map(opt => (
-                          <option key={opt} value={opt}>{opt || '（默认）'}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input
-                        value={formatRunParamInputValue(group.params[param.name])}
-                        placeholder={param.default || param.name}
-                        onChange={event => updateExecutableNodeParam(group.nodeID, param.name, event.target.value)}
-                        disabled={isActiveRunRunning}
-                      />
-                    )}
-                  </label>
-                ))}
-              </div>
-            ))}
-            {parsedRunParams.invalid && (
-              <div className="empty small" title="高级 JSON 当前无效，逐项输入会以空对象重新生成参数。">高级 JSON 当前无效。</div>
-            )}
-            <div className="buttonRow">
-              <button className="secondary" type="button" onClick={resetRunParamsToDefaults}>填入默认参数</button>
-            </div>
-            <details className="advancedParams workflowRunParamsAdvanced">
-              <summary>高级 JSON</summary>
-              <textarea
-                className="workflowRunParamsInput"
-                value={runParamsText}
-                onChange={event => setRunParamsText(event.target.value)}
-                placeholder='{"host":"127.0.0.1"}'
-              />
-            </details>
-            <div className="buttonRow workflowRunActionRow">
-              <button className="secondary" type="button" onClick={validateDraft}>校验</button>
-              <button className="primary" type="button" onClick={prepareRunStep} disabled={isActiveRunRunning}>下一步</button>
-              <button className="secondary" type="button" onClick={fitCanvasView}>适配视图</button>
-            </div>
-          </>
-        ) : (
-          <>
+  const workflowRunParamsContent = (
+    <div className="form compact">
+      {executeStep === 'params' ? (
+        <>
+          {workflowParameters.length + executableParamCount === 0 && (
+            <div className="empty small">当前工作流无需参数。</div>
+          )}
+          {workflowParameters.length > 0 && (
             <div className="workflowRunParamSection">
-              <strong>运行确认</strong>
-              <div className="workflowSidebarHint">
-                <strong>{workflow.name || workflow.id || '未选择工作流'}</strong>
-                <span>{workflowParameters.length + executableParamCount} 项参数 · {nodes.length} 个节点 · {edges.length} 条依赖</span>
-              </div>
+              <strong title="工作流级运行参数">工作流参数</strong>
+              {workflowParameters.map((param, index) => (
+                <label key={param.name || index} className={param.required ? 'requiredField' : ''}>
+                  <span title={param.description || param.name || `参数 ${index + 1}`}>{param.description || param.name || `参数 ${index + 1}`}{param.required ? ' *' : ''}</span>
+                  {param.type === 'bool' ? (
+                    <input
+                      type="checkbox"
+                      checked={parseBoolParamValue(runParams[param.name])}
+                      onChange={event => updateRunParam(param.name, event.target.checked)}
+                      disabled={!param.name || isActiveRunRunning}
+                    />
+                  ) : param.type === 'file' ? (
+                    <FileUploadInput
+                      value={formatRunParamInputValue(runParams[param.name])}
+                      onChange={value => updateRunParam(param.name, value)}
+                      disabled={!param.name || isActiveRunRunning}
+                    />
+                  ) : Array.isArray(param.options) && param.options.length > 0 ? (
+                    <select
+                      value={formatRunParamInputValue(runParams[param.name])}
+                      onChange={event => updateRunParam(param.name, event.target.value)}
+                      disabled={!param.name || isActiveRunRunning}
+                    >
+                      {param.options.map(opt => (
+                        <option key={opt} value={opt}>{opt || '（默认）'}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      value={formatRunParamInputValue(runParams[param.name])}
+                      placeholder={param.name || '参数名'}
+                      onChange={event => updateRunParam(param.name, event.target.value)}
+                      disabled={!param.name || isActiveRunRunning}
+                    />
+                  )}
+                </label>
+              ))}
             </div>
-            {uploadFlowNodes(nodes).length > 0 && (
-              <div className="workflowRunParamSection">
-                <strong>上传文件</strong>
-                {uploadFlowNodes(nodes).map(node => (
-                  <UploadNodeFilePicker
-                    key={node.id}
-                    node={node}
-                    state={uploadStateForNode(uploadNodeFiles, node.id)}
-                    summary={uploadFileSummary(uploadNodeFiles, node.id)}
-                    disabled={isActiveRunRunning}
-                    onFilesChange={(mode, files) => updateUploadNodeFiles(node.id, mode, files)}
-                    onClear={() => clearUploadNodeFiles(node.id)}
-                  />
-                ))}
+          )}
+          {executableParamGroups.map(group => (
+            <div className="workflowRunParamGroup" key={group.key}>
+              <div className="workflowRunParamGroupHeader">
+                <strong>{group.title}</strong>
+                <span>{group.subtitle}</span>
               </div>
-            )}
-            <details className="advancedParams workflowRunParamsAdvanced">
-              <summary>查看运行参数 JSON</summary>
-              <textarea className="workflowRunParamsInput" value={runParamsText} readOnly />
-            </details>
-            <div className="buttonRow workflowRunActionRow">
-              <button className="secondary" type="button" onClick={() => setExecuteStep('params')} disabled={isActiveRunRunning}>上一步</button>
-              <button className="primary" type="button" onClick={runDraft} disabled={isActiveRunRunning}>开始运行</button>
-              <button className="secondary" type="button" onClick={fitCanvasView}>适配视图</button>
-              {isActiveRunRunning && (
-                <button className="secondary danger" type="button" onClick={cancelActiveRun} disabled={cancellingRunID === activeRunID}>
-                  {cancellingRunID === activeRunID ? '取消中' : '取消运行'}
-                </button>
-              )}
+              {group.parameters.map(param => (
+                <label key={`${group.key}:${param.name}`} className={param.required ? 'requiredField' : ''}>
+                  <span title={param.description || param.name}>{param.description || param.name}{param.required ? ' *' : ''}</span>
+                  {param.type === 'bool' ? (
+                    <input
+                      type="checkbox"
+                      checked={parseBoolParamValue(group.params[param.name])}
+                      onChange={event => updateExecutableNodeParam(group.nodeID, param.name, event.target.checked)}
+                      disabled={isActiveRunRunning}
+                    />
+                  ) : param.type === 'file' ? (
+                    <FileUploadInput
+                      value={formatRunParamInputValue(group.params[param.name])}
+                      onChange={value => updateExecutableNodeParam(group.nodeID, param.name, value)}
+                      disabled={isActiveRunRunning}
+                    />
+                  ) : Array.isArray(param.options) && param.options.length > 0 ? (
+                    <select
+                      value={formatRunParamInputValue(group.params[param.name])}
+                      onChange={event => updateExecutableNodeParam(group.nodeID, param.name, event.target.value)}
+                      disabled={isActiveRunRunning}
+                    >
+                      <option value="">手动输入 / 不设置</option>
+                      {param.options.map(opt => (
+                        <option key={opt} value={opt}>{opt || '（默认）'}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      value={formatRunParamInputValue(group.params[param.name])}
+                      placeholder={param.default || param.name}
+                      onChange={event => updateExecutableNodeParam(group.nodeID, param.name, event.target.value)}
+                      disabled={isActiveRunRunning}
+                    />
+                  )}
+                </label>
+              ))}
             </div>
-          </>
-        )}
-      </div>
-    </aside>
-  ) : null
-  const executeModeSidebarFooter = !isEditingCanvas ? (
-    <div className="workflowSidebarFooter">
-      <div className="workflowSidebarHint" title="执行模式下点击节点不会进入配置，节点和连线只用于查看当前运行状态。">
-        <strong>画布只读</strong>
-        <span>节点 / 连线 / 配置均不可编辑</span>
-      </div>
-      <div className="workflowSidebarHint" title={`当前画布共有 ${nodes.length} 个节点，${edges.length} 条依赖。`}>
-        <strong>结构概览</strong>
-        <span>{nodes.length} 节点 · {edges.length} 依赖</span>
-      </div>
-      <div className="workflowSidebarHint" title="运行结果会继续显示在页面下方。">
-        <strong>运行结果</strong>
-        <span>在下方面板查看总日志</span>
+          ))}
+          {parsedRunParams.invalid && (
+            <div className="empty small" title="高级 JSON 当前无效，逐项输入会以空对象重新生成参数。">高级 JSON 当前无效。</div>
+          )}
+          <div className="buttonRow">
+            <button className="secondary" type="button" onClick={resetRunParamsToDefaults}>填入默认参数</button>
+          </div>
+          <details className="advancedParams workflowRunParamsAdvanced">
+            <summary>高级 JSON</summary>
+            <textarea
+              className="workflowRunParamsInput"
+              value={runParamsText}
+              onChange={event => setRunParamsText(event.target.value)}
+              placeholder='{"host":"127.0.0.1"}'
+            />
+          </details>
+        </>
+      ) : (
+        <>
+          <div className="workflowRunParamSection">
+            <strong>运行确认</strong>
+            <div className="workflowSidebarHint">
+              <strong>{workflow.name || workflow.id || '未选择工作流'}</strong>
+              <span>{workflowParameters.length + executableParamCount} 项参数 · {nodes.length} 个节点 · {edges.length} 条依赖</span>
+            </div>
+          </div>
+          {uploadFlowNodes(nodes).length > 0 && (
+            <div className="workflowRunParamSection">
+              <strong>上传文件</strong>
+              {uploadFlowNodes(nodes).map(node => (
+                <UploadNodeFilePicker
+                  key={node.id}
+                  node={node}
+                  state={uploadStateForNode(uploadNodeFiles, node.id)}
+                  summary={uploadFileSummary(uploadNodeFiles, node.id)}
+                  disabled={isActiveRunRunning}
+                  onFilesChange={(mode, files) => updateUploadNodeFiles(node.id, mode, files)}
+                  onClear={() => clearUploadNodeFiles(node.id)}
+                />
+              ))}
+            </div>
+          )}
+          <details className="advancedParams workflowRunParamsAdvanced">
+            <summary>查看运行参数 JSON</summary>
+            <textarea className="workflowRunParamsInput" value={runParamsText} readOnly />
+          </details>
+        </>
+      )}
+    </div>
+  )
+  const executeViewSwitch = !isEditingCanvas ? (
+    <div className="workflowExecuteViewActions">
+      <div className="segmentedControl" role="group" aria-label="工作流执行详情视图">
+        <button type="button" className={executeDetailView === 'logs' ? 'active' : ''} onClick={() => setExecuteDetailView('logs')}>日志</button>
+        <button type="button" className={executeDetailView === 'canvas' ? 'active' : ''} onClick={() => setExecuteDetailView('canvas')}>画布</button>
       </div>
     </div>
   ) : null
-
+  const workflowCanvas = (
+    <section className="card canvasCard" ref={canvasCardRef} onDragOver={handleCanvasDragOver} onDrop={handleCanvasDrop} onDoubleClick={handlePaneDoubleClick}>
+      {executeViewSwitch}
+      <ReactFlow
+        nodes={displayNodes}
+        edges={displayEdges}
+        nodeTypes={nodeTypes}
+        onNodesChange={handleNodesChange}
+        onEdgesChange={handleEdgesChange}
+        onConnect={onConnect}
+        onConnectStart={handleConnectStart}
+        onConnectEnd={handleConnectEnd}
+        onReconnect={onReconnect}
+        onNodeClick={(_, node) => handleCanvasNodeClick(node.id)}
+        onEdgeClick={(_, edge) => openEdgeConfigModal(edge.id)}
+        onEdgeDoubleClick={handleEdgeDoubleClick}
+        onPaneClick={() => { clearSelection(); closeNodePicker() }}
+        onInit={setFlowInstance}
+        nodesDraggable={isEditingCanvas}
+        nodesConnectable={isEditingCanvas}
+        edgesReconnectable={isEditingCanvas}
+        elementsSelectable={isEditingCanvas}
+        deleteKeyCode={isEditingCanvas ? 'Backspace' : null}
+        zoomOnDoubleClick={false}
+        fitView
+      >
+        <MiniMap />
+        <Controls />
+        <Background />
+        {isEditingCanvas && nodes.length === 0 && !nodePicker.open && (
+          <div className="canvasEmptyCallout nodrag nopan" onMouseDown={event => event.stopPropagation()}>
+            <strong>从添加节点开始编排</strong>
+            <span>悬停画布底部工具栏，或拖出连线后选择下游节点。</span>
+            <button type="button" className="secondary" onClick={openNodePickerFromEvent}>添加节点</button>
+          </div>
+        )}
+        {nodePicker.open && (
+          <NodePickerPanel
+            searchText={nodePickerSearchText}
+            setSearchText={setNodePickerSearchText}
+            tools={nodePickerToolOptions}
+            totalTools={toolOptions.length}
+            position={nodePicker.position}
+            panelPosition={nodePicker.panelPosition}
+            canvasElement={canvasCardRef.current}
+            mode={nodePicker.mode}
+            connection={nodePicker.connection}
+            insertEdge={nodePicker.insertEdge || pendingInsertEdge}
+            onAddTool={tool => addToolNode(tool, nodePicker.position, {connection: nodePicker.connection, insertEdge: nodePicker.insertEdge || pendingInsertEdge})}
+            onAddControl={controlType => addControlNode(controlType, nodePicker.position, {connection: nodePicker.connection, insertEdge: nodePicker.insertEdge || pendingInsertEdge})}
+            onClose={closeNodePicker}
+          />
+        )}
+        {canvasHoverToolbar}
+        {!isEditingCanvas && canvasLogNodeID && (
+          <CanvasNodeLogPanel
+            nodeID={canvasLogNodeID}
+            item={canvasLogItem}
+            run={canvasRunState.nodes?.[canvasLogNodeID]}
+            minimized={canvasLogMinimized}
+            onMinimize={() => setCanvasLogMinimized(true)}
+            onRestore={() => setCanvasLogMinimized(false)}
+            onClose={() => {
+              setCanvasLogNodeID('')
+              setCanvasLogMinimized(false)
+            }}
+          />
+        )}
+        <CanvasDock
+          onZoomIn={() => zoomCanvas('in')}
+          onZoomOut={() => zoomCanvas('out')}
+          onFitView={fitCanvasView}
+          onAutoLayout={optimizeCanvasLayout}
+          onRunWorkflow={runWorkflowDockAction}
+          runDisabled={isActiveRunRunning}
+        />
+      </ReactFlow>
+    </section>
+  )
+  const executeResultPanel = !isEditingCanvas && resultPanel ? (
+    <div className="workflowExecuteResultPane">
+      {executeViewSwitch}
+      {resultPanel}
+    </div>
+  ) : null
   return (
     <div className={isEditingCanvas ? 'editorLayout editModeLayout' : 'editorLayout executeModeLayout'}>
       {isEditingCanvas ? editModeSidebar : executeModeSidebar}
 
-      {!isEditingCanvas && resultPanel}
+      {isEditingCanvas || executeDetailView === 'canvas' ? workflowCanvas : null}
+      {!isEditingCanvas && executeDetailView === 'logs' ? executeResultPanel : null}
 
-      <section className="card canvasCard" ref={canvasCardRef} onDragOver={handleCanvasDragOver} onDrop={handleCanvasDrop} onDoubleClick={handlePaneDoubleClick}>
-        <ReactFlow
-          nodes={displayNodes}
-          edges={displayEdges}
-          nodeTypes={nodeTypes}
-          onNodesChange={handleNodesChange}
-          onEdgesChange={handleEdgesChange}
-          onConnect={onConnect}
-          onConnectStart={handleConnectStart}
-          onConnectEnd={handleConnectEnd}
-          onReconnect={onReconnect}
-          onNodeClick={(_, node) => handleCanvasNodeClick(node.id)}
-          onEdgeClick={(_, edge) => openEdgeConfigModal(edge.id)}
-          onEdgeDoubleClick={handleEdgeDoubleClick}
-          onPaneClick={() => { clearSelection(); closeNodePicker() }}
-          onInit={setFlowInstance}
-          nodesDraggable={isEditingCanvas}
-          nodesConnectable={isEditingCanvas}
-          edgesReconnectable={isEditingCanvas}
-          elementsSelectable={isEditingCanvas}
-          deleteKeyCode={isEditingCanvas ? 'Backspace' : null}
-          zoomOnDoubleClick={false}
-          fitView
-        >
-          <MiniMap />
-          <Controls />
-          <Background />
-          {isEditingCanvas && nodes.length === 0 && !nodePicker.open && (
-            <div className="canvasEmptyCallout nodrag nopan" onMouseDown={event => event.stopPropagation()}>
-              <strong>从添加节点开始编排</strong>
-              <span>悬停画布底部工具栏，或拖出连线后选择下游节点。</span>
-              <button type="button" className="secondary" onClick={openNodePickerFromEvent}>添加节点</button>
+      {runParamsModalOpen && (
+        <div className="modalBackdrop" onClick={() => setRunParamsModalOpen(false)}>
+          <section className="modal workflowRunParamsPanel workflowRunParamsModal" role="dialog" aria-modal="true" aria-label="填写运行参数" onClick={event => event.stopPropagation()}>
+            <div className="modalHeader">
+              <div>
+                <h3>{executeStep === 'params' ? '填写运行参数' : '确认运行'}</h3>
+                <p>步骤 {executeStep === 'params' ? '1' : '2'} / 2 · {workflowParameters.length + executableParamCount} 项参数 · {nodes.length} 个节点</p>
+              </div>
+              <button type="button" className="modalClose" onClick={() => setRunParamsModalOpen(false)}>×</button>
             </div>
-          )}
-          {nodePicker.open && (
-            <NodePickerPanel
-              searchText={nodePickerSearchText}
-              setSearchText={setNodePickerSearchText}
-              tools={nodePickerToolOptions}
-              totalTools={toolOptions.length}
-              position={nodePicker.position}
-              panelPosition={nodePicker.panelPosition}
-              canvasElement={canvasCardRef.current}
-              mode={nodePicker.mode}
-              connection={nodePicker.connection}
-              insertEdge={nodePicker.insertEdge || pendingInsertEdge}
-              onAddTool={tool => addToolNode(tool, nodePicker.position, {connection: nodePicker.connection, insertEdge: nodePicker.insertEdge || pendingInsertEdge})}
-              onAddControl={controlType => addControlNode(controlType, nodePicker.position, {connection: nodePicker.connection, insertEdge: nodePicker.insertEdge || pendingInsertEdge})}
-              onClose={closeNodePicker}
-            />
-          )}
-          {canvasHoverToolbar}
-          {!isEditingCanvas && canvasLogNodeID && (
-            <CanvasNodeLogPanel
-              nodeID={canvasLogNodeID}
-              item={canvasLogItem}
-              run={canvasRunState.nodes?.[canvasLogNodeID]}
-              minimized={canvasLogMinimized}
-              onMinimize={() => setCanvasLogMinimized(true)}
-              onRestore={() => setCanvasLogMinimized(false)}
-              onClose={() => {
-                setCanvasLogNodeID('')
-                setCanvasLogMinimized(false)
-              }}
-            />
-          )}
-          <CanvasDock
-            onZoomIn={() => zoomCanvas('in')}
-            onZoomOut={() => zoomCanvas('out')}
-            onFitView={fitCanvasView}
-            onAutoLayout={optimizeCanvasLayout}
-            onRunWorkflow={runWorkflowDockAction}
-            runDisabled={isActiveRunRunning}
-          />
-        </ReactFlow>
-      </section>
-
-      {executeModeParamsPanel}
-      {executeModeSidebarFooter}
+            {workflowRunParamsContent}
+            <div className="modalFooter workflowRunActionRow">
+              {executeStep === 'params' ? (
+                <>
+                  <button className="secondary" type="button" onClick={validateDraft}>校验</button>
+                  <button className="primary" type="button" onClick={prepareRunStep} disabled={isActiveRunRunning}>下一步</button>
+                </>
+              ) : (
+                <>
+                  <button className="secondary" type="button" onClick={() => setExecuteStep('params')} disabled={isActiveRunRunning}>上一步</button>
+                  <button
+                    className="primary"
+                    type="button"
+                    onClick={runDraft}
+                    disabled={isActiveRunRunning}
+                  >
+                    开始运行
+                  </button>
+                  {isActiveRunRunning && (
+                    <button className="secondary danger" type="button" onClick={cancelActiveRun} disabled={cancellingRunID === activeRunID}>
+                      {cancellingRunID === activeRunID ? '取消中' : '取消运行'}
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
 
       {isEditingCanvas && nodeConfigModalOpen && selectedNode && (
         <NodeConfigModal
@@ -1576,7 +1561,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   )
 }
 
-function emptyCanvasRunState() {
+export function emptyCanvasRunState() {
   return {
     status: 'idle',
     nodes: {},
@@ -1645,6 +1630,37 @@ export function shouldClearCanvasRunOverlayForNodeChanges(changes) {
 
 function sleep(ms) {
   return new Promise(resolve => window.setTimeout(resolve, ms))
+}
+
+function rememberedWorkflowKey(category) {
+  return `${REMEMBERED_WORKFLOW_PREFIX}:${category || 'global'}`
+}
+
+function readRememberedWorkflowID(category) {
+  try {
+    return window.localStorage?.getItem(rememberedWorkflowKey(category)) || ''
+  } catch {
+    return ''
+  }
+}
+
+function rememberWorkflowID(category, id) {
+  if (!id) return
+  try {
+    window.localStorage?.setItem(rememberedWorkflowKey(category), id)
+  } catch {
+    // Ignore storage failures; workflow selection still works for this session.
+  }
+}
+
+function forgetRememberedWorkflowID(category, id = '') {
+  try {
+    const key = rememberedWorkflowKey(category)
+    if (id && window.localStorage?.getItem(key) !== id) return
+    window.localStorage?.removeItem(key)
+  } catch {
+    // Ignore storage failures; stale selections are non-critical.
+  }
 }
 
 function parseJSONObject(value) {
@@ -1772,13 +1788,21 @@ function UploadNodeFilePicker({node, state, summary, disabled, onFilesChange, on
   const fileInputRef = useRef(null)
   const directoryInputRef = useRef(null)
   const upload = workflowModel.normalizeUploadConfig(node.data?.upload || {})
+  const modeLabel = state.mode === 'directory' ? '目录上传' : '文件上传'
+  const targetLabel = upload.target_dir ? `uploads/${upload.target_dir}` : '默认 uploads 目录'
   return (
     <div className="workflowUploadPicker">
       <div className="workflowSidebarHint">
         <strong>{node.data?.name || node.id}</strong>
-        <span>{summary}</span>
-        {upload.target_dir && <span>目标子目录：{upload.target_dir}</span>}
+        <span>{modeLabel} · {summary}</span>
+        <span>目标：{targetLabel}</span>
       </div>
+      {state.files.length > 0 && (
+        <div className="uploadSelectionMeta" title={uploadSelectionTitle(state.files)}>
+          <span>{state.files.length} 个条目</span>
+          <span>{formatBytes(uploadFilesTotalSize(state.files))}</span>
+        </div>
+      )}
       <div className="buttonRow">
         <button type="button" className="secondary" disabled={disabled} onClick={() => fileInputRef.current?.click()}>选择文件</button>
         <button type="button" className="secondary" disabled={disabled} onClick={() => directoryInputRef.current?.click()}>选择目录</button>
@@ -1805,7 +1829,11 @@ function UploadNodeFilePicker({node, state, summary, disabled, onFilesChange, on
   )
 }
 
-function CanvasNodeLogPanel({nodeID, item, run, minimized, onMinimize, onRestore, onClose}) {
+function uploadSelectionTitle(files) {
+  return files.slice(0, 12).map(file => file.webkitRelativePath || file.name).join('\n')
+}
+
+export function CanvasNodeLogPanel({nodeID, item, run, minimized, onMinimize, onRestore, onClose}) {
   const stdout = item?.stdout || ''
   const stderr = item?.stderr || run?.error || run?.skippedReason || ''
   const title = item?.title || nodeID
@@ -1867,7 +1895,7 @@ function InlineLogBlock({title, value}) {
   )
 }
 
-function findRunLogItem(items, nodeID) {
+export function findRunLogItem(items, nodeID) {
   for (const item of items || []) {
     if (item?.id === nodeID) return item
     const child = findRunLogItem(item?.children || [], nodeID)
@@ -2026,7 +2054,7 @@ function reachableNodeIDs(startID, edges) {
   return out
 }
 
-function buildCanvasRunStateFromDetail(detail, nodes, fallbackError = '') {
+export function buildCanvasRunStateFromDetail(detail, nodes, fallbackError = '') {
   const record = detail?.record || detail?.data?.record || {}
   const nodeIDs = new Set((nodes || []).map(node => node.id))
   const nodeByID = new Map((nodes || []).map(node => [node.id, node]))
@@ -2340,7 +2368,7 @@ function hasConfiguredParamValue(value) {
   return String(value).trim() !== ''
 }
 
-function buildDisplayNodes(nodes, runState, tools = [], onAddDownstream = null, canRemove = true, onRerun = null, activeRunID = '') {
+export function buildDisplayNodes(nodes, runState, tools = [], onAddDownstream = null, canRemove = true, onRerun = null, activeRunID = '') {
   const overlayNodes = runState?.nodes || {}
   const toolMap = new Map((tools || []).map(tool => [tool.id, tool]))
   return (nodes || []).map(node => {
@@ -2366,7 +2394,7 @@ function buildDisplayNodes(nodes, runState, tools = [], onAddDownstream = null, 
   })
 }
 
-function buildDisplayEdges(edges, displayNodes, runState) {
+export function buildDisplayEdges(edges, displayNodes, runState) {
   const nodeRun = new Map((displayNodes || []).map(node => [node.id, node.data?.run]))
   const nodeByID = new Map((displayNodes || []).map(node => [node.id, node]))
   const conditionMatches = runState?.conditionMatches || {}
@@ -2434,7 +2462,7 @@ function newToolFlowNode(tool, id, position, onRemove) {
     data: {
       tool: tool.id,
       name: tool.name || tool.id,
-      params: defaultParams(tool.parameters || []),
+      params: workflowModel.defaultParams(tool.parameters || []),
       onRemove
     },
     position
@@ -2518,16 +2546,6 @@ function loopNodeStatus(loop) {
     : {ready: false, label: '配置不完整'}
 }
 
-function controlNodeTitle(type) {
-  const control = controlNodeCatalog.find(item => item.type === type)
-  return control?.title || type || '编排节点'
-}
-
-function controlNodeHelp(type) {
-  const control = controlNodeCatalog.find(item => item.type === type)
-  return control?.help || '编排控制节点'
-}
-
 function conditionBranchRows(condition) {
   const cases = condition?.cases || []
   const rows = cases.map((item, index) => {
@@ -2568,7 +2586,7 @@ function edgeCaseFromHandle(sourceNode, sourceHandle) {
   return sourceHandle || ''
 }
 
-function legacyLoopTargetMap(workflowNodes) {
+export function legacyLoopTargetMap(workflowNodes) {
   const nodeIDs = new Set((workflowNodes || []).map(node => node.id))
   const targetMap = new Map()
   ;(workflowNodes || []).forEach(node => {
@@ -2579,7 +2597,7 @@ function legacyLoopTargetMap(workflowNodes) {
   return targetMap
 }
 
-function remapLegacyLoopEdges(edges, targetMap) {
+export function remapLegacyLoopEdges(edges, targetMap) {
   if (!targetMap || targetMap.size === 0) return edges || []
   const seen = new Set()
   return (edges || [])
@@ -2660,7 +2678,7 @@ function defaultCondition() {
   }
 }
 
-function flowEdgeFromWorkflowEdge(edge, index, nodes = []) {
+export function flowEdgeFromWorkflowEdge(edge, index, nodes = []) {
   const sourceNode = nodes.find(node => node.id === edge.from)
   const edgeCase = edge.case || ''
   const isConditionEdge = sourceNode?.type === 'conditionNode' || Boolean(edgeCase)
@@ -2772,97 +2790,6 @@ function conditionCaseLabel(condition, caseID) {
   return item ? (item.name || item.id) : caseID
 }
 
-function conditionSummary(condition) {
-  if (!condition?.input) return '未选择判断输入'
-  const input = compactTemplatePath(condition.input)
-  const first = (condition.cases || [])[0]
-  if (!first) return input
-  const values = (first.values || []).filter(Boolean).join('/')
-  return [input, first.operator, values].filter(Boolean).join(' ')
-}
-
-function conditionCaseSummary(condition) {
-  const cases = condition?.cases || []
-  const suffix = condition?.default_case === 'default' ? ' + default' : ''
-  if (cases.length === 0) return `未配置分支${suffix}`
-  return `${cases.length} 个分支${suffix}：${cases.map(item => item.name || item.id).join(' / ')}`
-}
-
-function conditionNodeStatus(condition) {
-  const hasInput = Boolean(String(condition?.input || '').trim())
-  const cases = condition?.cases || []
-  const seen = new Set()
-  const casesValid = cases.length > 0 && cases.every(item => {
-    const id = String(item.id || '').trim()
-    const valid = Boolean(id) && id !== 'default' && !seen.has(id) && conditionOperators.some(operator => operator.value === item.operator)
-    seen.add(id)
-    return valid
-  })
-  return hasInput && casesValid
-    ? {ready: true, label: '可运行'}
-    : {ready: false, label: '配置不完整'}
-}
-
-function compactTemplatePath(value) {
-  return String(value || '')
-    .replace(/^\s*{{\s*\./, '')
-    .replace(/\s*}}\s*$/, '')
-}
-
-function validateConditionDraft(nodes, edges) {
-  const errors = []
-  const nodeMap = new Map(nodes.map(node => [node.id, node]))
-  nodes.filter(node => node.type === 'conditionNode').forEach(node => {
-    const condition = node.data.condition || {}
-    if (!String(condition.input || '').trim()) errors.push(`条件节点 ${node.id} 缺少输入来源。`)
-    if (!condition.cases || condition.cases.length === 0) errors.push(`条件节点 ${node.id} 至少需要一个 case。`)
-    const seen = new Set()
-    ;(condition.cases || []).forEach(item => {
-      if (!String(item.id || '').trim()) errors.push(`条件节点 ${node.id} 存在空 case ID。`)
-      if (item.id === 'default') errors.push(`条件节点 ${node.id} 的 case ID 不能使用保留值 default。`)
-      if (seen.has(item.id)) errors.push(`条件节点 ${node.id} 的 case ID 重复：${item.id}`)
-      seen.add(item.id)
-      if (!conditionOperators.some(operator => operator.value === item.operator)) errors.push(`条件节点 ${node.id} 的 case ${item.id || '-'} 操作符非法。`)
-    })
-    edges.filter(edge => edge.source === node.id).forEach(edge => {
-      const edgeCase = edge.data?.case || edge.sourceHandle || ''
-      if (!edgeCase) errors.push(`条件节点 ${node.id} 到 ${edge.target} 的连线缺少 case。`)
-      if (edgeCase === 'default' && condition.default_case !== 'default') errors.push(`条件节点 ${node.id} 未启用 default 分支，但到 ${edge.target} 的连线选择了 default。`)
-      if (edgeCase && edgeCase !== 'default' && !(condition.cases || []).some(item => item.id === edgeCase)) errors.push(`条件节点 ${node.id} 到 ${edge.target} 的连线引用不存在的 case：${edgeCase}`)
-    })
-  })
-  edges.forEach(edge => {
-    const source = nodeMap.get(edge.source)
-    if (source?.type !== 'conditionNode' && edge.data?.case) errors.push(`非条件节点 ${edge.source} 的连线不能配置 case。`)
-  })
-  return errors
-}
-
-function validateControlDraft(nodes, edges, tools = []) {
-  return workflowModel.validateControlDraft(nodes, edges, tools)
-}
-
-function findOutOfScopeToolNodes(nodes, tools, scopedCategory) {
-  if (!scopedCategory) return []
-  const toolMap = new Map((tools || []).map(tool => [tool.id, tool]))
-  return nodes
-    .filter(node => node.type === 'toolNode' || (node.type === 'controlNode' && node.data.controlType === 'loop'))
-    .map(node => {
-      const toolID = node.type === 'controlNode' ? node.data.loop?.tool : node.data.tool
-      return {node, toolID, tool: toolMap.get(toolID)}
-    })
-    .filter(item => item.tool && item.tool.category !== scopedCategory)
-    .map(item => ({nodeID: item.node.id, toolID: item.toolID, scopeName: scopedCategory}))
-}
-
-function defaultParams(parameters) {
-  const out = {}
-  ;(parameters || []).forEach(param => {
-    out[param.name] = param.default === undefined || param.default === null ? '' : param.default
-  })
-  return out
-}
-
 function parseJSONList(value) {
   try {
     const parsed = JSON.parse(value || '[]')
@@ -2870,36 +2797,6 @@ function parseJSONList(value) {
   } catch {
     return []
   }
-}
-
-function findMissingRequiredNodeParams(nodes, tools) {
-  const toolMap = new Map((tools || []).map(tool => [tool.id, tool]))
-  const missing = []
-  nodes.forEach(node => {
-    if (node.type === 'toolNode') {
-      const tool = toolMap.get(node.data.tool)
-      ;(tool?.parameters || []).forEach(param => {
-        if (!param.required) return
-        const value = node.data.params?.[param.name]
-        if (value === undefined || value === null || String(value).trim() === '') {
-          missing.push({nodeID: node.id, toolName: tool.name || tool.id, paramName: param.name})
-        }
-      })
-      return
-    }
-    if (node.type === 'controlNode' && node.data.controlType === 'loop') {
-      const loop = normalizeLoopConfig(node.data.loop || defaultLoop())
-      const tool = toolMap.get(loop.tool)
-      ;(tool?.parameters || []).forEach(param => {
-        if (!param.required) return
-        const value = loop.params?.[param.name]
-        if (value === undefined || value === null || String(value).trim() === '') {
-          missing.push({nodeID: node.id, toolName: tool.name || tool.id, paramName: param.name})
-        }
-      })
-    }
-  })
-  return missing
 }
 
 function formatPreflightMessage(status) {

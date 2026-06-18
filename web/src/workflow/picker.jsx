@@ -1,14 +1,6 @@
 import React from 'react'
+import {controlNodeCatalog} from './catalog.js'
 import {controlShapeMarker} from './nodes.jsx'
-
-const controlNodeCatalog = [
-  {type: 'condition', title: '条件分支', secondary: 'Switch / Case', description: '根据上游输出或工作流参数选择后续分支', help: '适合根据巡检结果、返回文本、参数值做分流', enabled: true},
-  {type: 'parallel', title: '并行分支', secondary: 'Parallel', description: '将后续任务拆分为多个分支路径', help: '用于明确 fan-out 分支结构；当前运行按 DAG 顺序调度', enabled: true},
-  {type: 'join', title: '合流', secondary: 'Join', description: '等待多个上游分支完成后继续流程', help: '用于明确 fan-in 汇聚点；入边完成后节点记为成功', enabled: true},
-  {type: 'loop', title: '循环', secondary: 'Loop', description: '按固定次数重复执行一个内嵌选择的插件工具', help: '执行到循环节点时，按最大次数重复运行已选择的插件工具', enabled: true},
-  {type: 'upload', title: '上传文件', secondary: 'Upload', description: '运行前上传本地文件、批量文件或目录到平台受控目录', help: '上传节点会在工作流启动前选择文件或目录，运行时输出上传结果 JSON', enabled: true},
-  {type: 'extract_config', title: '提取配置', secondary: 'Extract Config', description: '按文件名从上传结果提取到工作流配置目录', help: '执行到该节点时，把匹配的上传文件复制为稳定的工作流配置文件', enabled: true}
-]
 
 function NodePickerPanel({searchText, setSearchText, tools, totalTools, panelPosition, canvasElement, mode = 'add', connection, insertEdge, onAddTool, onAddControl, onClose}) {
   const keyword = searchText.trim().toLowerCase()
@@ -77,9 +69,9 @@ function CanvasDock({onZoomIn, onZoomOut, onFitView, onAutoLayout, onRunWorkflow
     <div className="canvasDock nodrag nopan" onMouseDown={event => event.stopPropagation()} aria-label="画布操作">
       <button type="button" onClick={onZoomOut} title="缩小画布" aria-label="缩小画布">−</button>
       <button type="button" onClick={onZoomIn} title="放大画布" aria-label="放大画布">+</button>
-      <button type="button" onClick={onFitView} title="将全部节点适配到当前视图">适配</button>
-      <button type="button" onClick={onAutoLayout} title="按依赖关系重新排列当前画布节点">自动排版</button>
-      <button type="button" className="canvasDockPrimary" onClick={onRunWorkflow} disabled={runDisabled} title={runDisabled ? '当前工作流正在运行' : '执行当前工作流草稿'}>运行工作流</button>
+      <button type="button" onClick={onFitView} title="将全部节点适配到当前视图" aria-label="适配视图">⤢</button>
+      <button type="button" onClick={onAutoLayout} title="按依赖关系重新排列当前画布节点" aria-label="自动排版">⇄</button>
+      <button type="button" className="canvasDockPrimary" onClick={onRunWorkflow} disabled={runDisabled} title={runDisabled ? '当前工作流正在运行' : '执行当前工作流草稿'} aria-label="运行工作流">▶</button>
     </div>
   )
 }

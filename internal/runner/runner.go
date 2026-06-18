@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -392,7 +393,7 @@ func (r *Runner) executeWorkflowNodes(ctx context.Context, wf *config.WorkflowCo
 			stepRunDir := filepath.Join(runDir, node.ID)
 			stepIndex := appendStepRecord(record, stepRecord)
 			_ = r.saveRecord(runDir, record)
-			extractErr := r.executeExtractConfigNode(wf.ID, node, workflowContext, stepRunDir)
+			extractErr := r.executeExtractConfigNode(wf, node, workflowContext, stepRunDir)
 			stepRecord.EndedAt = time.Now()
 			if extractErr != nil {
 				if errors.Is(extractErr, context.Canceled) {
@@ -925,7 +926,7 @@ func writeUploadStderr(runDir string, runErr error) error {
 	return os.WriteFile(filepath.Join(runDir, "stderr.log"), stderr, 0o644)
 }
 
-func (r *Runner) executeExtractConfigNode(workflowID string, node config.WorkflowNode, workflowContext map[string]string, runDir string) error {
+func (r *Runner) executeExtractConfigNode(wf *config.WorkflowConfig, node config.WorkflowNode, workflowContext map[string]string, runDir string) error {
 	uploads, err := workflowUploadResults(workflowContext)
 	if err != nil {
 		runErr := fmt.Errorf("提取配置节点 %s 读取上传结果失败: %w", node.ID, err)
@@ -958,31 +959,40 @@ func (r *Runner) executeExtractConfigNode(workflowID string, node config.Workflo
 			_ = writeUploadStderr(runDir, runErr)
 			return runErr
 		}
-		source, data, err := extractConfigSourceFile(uploads, sourceName)
+		source, err := extractConfigSourceFile(r.Registry, uploads, sourceName)
 		if err != nil {
 			runErr := fmt.Errorf("提取配置节点 %s %w", node.ID, err)
 			_ = writeUploadStderr(runDir, runErr)
 			return runErr
 		}
-		target := item.TargetPath
+		target := renderTemplate(item.TargetPath, workflowContext)
 		if target == "" {
-			target = source
+			target = source.DisplayPath
 		}
-		targetPath, err := workflowConfigTargetPath(r.Registry, target)
+		configID, err := workflowConfigFileID(target)
 		if err != nil {
-			runErr := fmt.Errorf("提取配置节点 %s 目标路径无效: %w", node.ID, err)
+			runErr := fmt.Errorf("提取配置节点 %s 配置 ID 无效: %w", node.ID, err)
 			_ = writeUploadStderr(runDir, runErr)
 			return runErr
 		}
-		if err := writeExtractedConfigFile(targetPath, data, item.Replace); err != nil {
-			runErr := fmt.Errorf("提取配置节点 %s 写入配置失败: %w", node.ID, err)
+		entry := config.ConfigFileRef{
+			ID:        configID,
+			Label:     strings.TrimSpace(item.Label),
+			ConfigDir: ".",
+			Path:      source.DisplayPath,
+			Scope:     config.ConfigFileScopePlugin,
+			Access:    config.ConfigFileAccessReadWrite,
+			Create:    true,
+		}
+		if err := r.registerExtractedWorkflowConfigFile(wf, entry, item.Replace); err != nil {
+			runErr := fmt.Errorf("提取配置节点 %s 登记配置失败: %w", node.ID, err)
 			_ = writeUploadStderr(runDir, runErr)
 			return runErr
 		}
-		if err := appendUploadStdout(runDir, fmt.Sprintf("SUCCESS 提取配置节点 %s 已复制 %s 到 %s", node.ID, source, targetPath)); err != nil {
+		if err := appendUploadStdout(runDir, fmt.Sprintf("SUCCESS 提取配置节点 %s 已挂载 %s 为配置 %s", node.ID, source.DisplayPath, configID)); err != nil {
 			return err
 		}
-		if err := appendUploadStdout(runDir, fmt.Sprintf("CONFIG %s", targetPath)); err != nil {
+		if err := appendUploadStdout(runDir, fmt.Sprintf("CONFIG %s", source.Path)); err != nil {
 			return err
 		}
 	}
@@ -997,10 +1007,14 @@ func extractConfigItems(item config.WorkflowExtractConfig) ([]config.WorkflowExt
 			if sourcePath == "" {
 				sourcePath = strings.TrimSpace(file.FileName)
 			}
+			targetPath := strings.TrimSpace(file.TargetPath)
+			if targetPath == "" {
+				targetPath = sourcePath
+			}
 			out = append(out, config.WorkflowExtractConfigFile{
 				FileName:   joinWorkflowRelativePath(item.SourceDir, sourcePath),
 				SourcePath: sourcePath,
-				TargetPath: sourcePath,
+				TargetPath: targetPath,
 				Label:      file.Label,
 				Replace:    file.Replace,
 			})
@@ -1047,95 +1061,280 @@ func workflowUploadResults(workflowContext map[string]string) ([]config.Workflow
 	return uploads, nil
 }
 
-func extractConfigSourceFile(uploads []config.WorkflowUploadResult, fileName string) (string, []byte, error) {
+type extractConfigSource struct {
+	DisplayPath string
+	Path        string
+}
+
+func extractConfigSourceFile(reg *registry.Registry, uploads []config.WorkflowUploadResult, fileName string) (extractConfigSource, error) {
 	files := make([]config.WorkflowUploadFile, 0)
 	for _, upload := range uploads {
 		files = append(files, normalizedUploadFiles(upload)...)
 	}
 	if len(files) == 0 {
-		return "", nil, fmt.Errorf("上传结果中没有文件")
+		return extractConfigSource{}, fmt.Errorf("上传结果中没有文件")
 	}
 	fileName = strings.TrimSpace(fileName)
 	if fileName == "" {
-		return "", nil, fmt.Errorf("源文件名不能为空")
+		return extractConfigSource{}, fmt.Errorf("源文件名不能为空")
 	}
-	normalizedSource := filepath.ToSlash(filepath.Clean(filepath.FromSlash(fileName)))
-	if normalizedSource == "." || normalizedSource == ".." || strings.HasPrefix(normalizedSource, "../") || strings.Contains(normalizedSource, "/../") || filepath.IsAbs(normalizedSource) || strings.Contains(normalizedSource, "://") {
-		return "", nil, fmt.Errorf("源文件路径不安全")
+	normalizedSource := normalizeUploadPathAlias(fileName)
+	if normalizedSource == "" || normalizedSource == "." || normalizedSource == ".." || strings.HasPrefix(normalizedSource, "../") || strings.Contains(normalizedSource, "/../") || strings.Contains(normalizedSource, "://") {
+		return extractConfigSource{}, fmt.Errorf("源文件路径不安全")
+	}
+	if source, ok, err := extractConfigLocalSourceFile(reg, normalizedSource); ok || err != nil {
+		return source, err
 	}
 	var selected config.WorkflowUploadFile
 	for _, file := range files {
-		rel := filepath.ToSlash(file.RelativePath)
-		name := filepath.ToSlash(file.FileName)
-		if name == normalizedSource || rel == normalizedSource || filepath.Base(rel) == normalizedSource || filepath.Base(name) == normalizedSource {
+		if uploadPathMatches(file, normalizedSource) {
 			selected = file
 			break
 		}
 	}
 	if selected.Path == "" {
-		return "", nil, fmt.Errorf("上传结果中找不到文件: %s", fileName)
+		return extractConfigSource{}, fmt.Errorf("上传结果中找不到文件: %s", fileName)
 	}
-	info, err := os.Stat(selected.Path)
+	pathAbs, err := filepath.Abs(selected.Path)
 	if err != nil {
-		return "", nil, fmt.Errorf("源文件不可读: %w", err)
+		return extractConfigSource{}, fmt.Errorf("源文件路径不可解析: %w", err)
+	}
+	displayPath, err := workflowConfigSourceDisplayPath(reg, pathAbs)
+	if err != nil {
+		return extractConfigSource{}, err
+	}
+	info, err := os.Stat(pathAbs)
+	if err != nil {
+		return extractConfigSource{}, fmt.Errorf("源文件不可读: %w", err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", nil, fmt.Errorf("源文件不是普通文件")
+		return extractConfigSource{}, fmt.Errorf("源文件不是普通文件")
 	}
 	if info.Size() > maxWorkflowConfigFileBytes {
-		return "", nil, fmt.Errorf("源文件超过配置文件大小限制")
+		return extractConfigSource{}, fmt.Errorf("源文件超过配置文件大小限制")
 	}
-	data, err := os.ReadFile(selected.Path)
+	return extractConfigSource{DisplayPath: displayPath, Path: pathAbs}, nil
+}
+
+func extractConfigLocalSourceFile(reg *registry.Registry, fileName string) (extractConfigSource, bool, error) {
+	if reg == nil || strings.TrimSpace(reg.BaseDir) == "" {
+		return extractConfigSource{}, false, nil
+	}
+	candidate := filepath.Clean(filepath.FromSlash(normalizeUploadPathAlias(fileName)))
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(reg.BaseDir, candidate)
+	}
+	baseAbs, err := filepath.Abs(reg.BaseDir)
 	if err != nil {
-		return "", nil, fmt.Errorf("读取源文件失败: %w", err)
+		return extractConfigSource{}, true, err
 	}
-	return selected.RelativePath, data, nil
+	pathAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return extractConfigSource{}, true, err
+	}
+	rel, err := filepath.Rel(baseAbs, pathAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return extractConfigSource{}, false, nil
+	}
+	info, err := os.Stat(pathAbs)
+	if os.IsNotExist(err) {
+		return extractConfigSource{}, false, nil
+	}
+	if err != nil {
+		return extractConfigSource{}, true, fmt.Errorf("源文件不可读: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return extractConfigSource{}, true, fmt.Errorf("源文件不是普通文件")
+	}
+	if info.Size() > maxWorkflowConfigFileBytes {
+		return extractConfigSource{}, true, fmt.Errorf("源文件超过配置文件大小限制")
+	}
+	return extractConfigSource{DisplayPath: filepath.ToSlash(rel), Path: pathAbs}, true, nil
+}
+
+func uploadPathMatches(file config.WorkflowUploadFile, source string) bool {
+	source = normalizeUploadPathAlias(source)
+	if source == "" {
+		return false
+	}
+	candidates := []string{
+		normalizeUploadPathAlias(file.RelativePath),
+		normalizeUploadPathAlias(file.FileName),
+		normalizeUploadPathAlias(file.Path),
+		normalizeUploadPathAlias(filepath.Base(file.RelativePath)),
+		normalizeUploadPathAlias(filepath.Base(file.FileName)),
+		normalizeUploadPathAlias(filepath.Base(file.Path)),
+	}
+	for _, candidate := range candidates {
+		if candidate != "" && strings.EqualFold(candidate, source) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeUploadPathAlias(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.ReplaceAll(value, `\`, `/`)
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "/mnt/") && len(value) >= len("/mnt/x") && value[5] != '/' && (len(value) == len("/mnt/x") || value[6] == '/') {
+		drive := value[5]
+		if drive >= 'a' && drive <= 'z' || drive >= 'A' && drive <= 'Z' {
+			rest := ""
+			if len(value) > len("/mnt/x") {
+				rest = value[6:]
+			}
+			value = string(drive) + ":/" + strings.TrimLeft(rest, "/")
+		}
+	}
+	if len(value) >= 3 && value[0] == '/' && value[2] == '/' && ((value[1] >= 'a' && value[1] <= 'z') || (value[1] >= 'A' && value[1] <= 'Z')) {
+		value = string(value[1]) + ":/" + value[3:]
+	}
+	cleaned := filepath.Clean(filepath.FromSlash(value))
+	return filepath.ToSlash(cleaned)
 }
 
 const maxWorkflowConfigFileBytes int64 = 1024 * 1024
 
-func workflowConfigTargetPath(reg *registry.Registry, targetPath string) (string, error) {
-	targetPath = strings.TrimSpace(targetPath)
-	if targetPath == "" {
-		return "", fmt.Errorf("目标配置路径不能为空")
+func workflowConfigSourceDisplayPath(reg *registry.Registry, path string) (string, error) {
+	if reg == nil || strings.TrimSpace(reg.BaseDir) == "" {
+		return "", fmt.Errorf("运行根目录不可用")
 	}
-	if strings.Contains(targetPath, "://") || filepath.IsAbs(targetPath) || strings.HasPrefix(targetPath, "/") || strings.HasPrefix(targetPath, "\\") || len(targetPath) >= 2 && targetPath[1] == ':' {
-		return "", fmt.Errorf("目标配置路径不能是绝对路径")
-	}
-	for _, part := range strings.FieldsFunc(targetPath, func(r rune) bool { return r == '/' || r == '\\' }) {
-		if part == "" || part == "." || part == ".." {
-			return "", fmt.Errorf("目标配置路径包含不安全路径片段")
-		}
-	}
-	cleanItem := filepath.Clean(filepath.FromSlash(targetPath))
 	baseAbs, err := filepath.Abs(reg.BaseDir)
 	if err != nil {
 		return "", err
 	}
-	pathAbs, err := filepath.Abs(filepath.Join(baseAbs, cleanItem))
+	pathAbs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
 	rel, err := filepath.Rel(baseAbs, pathAbs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("目标配置路径逃逸工作流配置目录")
+		return "", fmt.Errorf("源文件逃逸运行根目录")
 	}
-	return pathAbs, nil
+	return filepath.ToSlash(rel), nil
 }
 
-func writeExtractedConfigFile(path string, data []byte, replace bool) error {
-	if int64(len(data)) > maxWorkflowConfigFileBytes {
-		return fmt.Errorf("配置文件内容超过大小限制")
+func workflowConfigFileID(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("配置 ID 不能为空")
+	}
+	if strings.Contains(value, "://") || filepath.IsAbs(value) || strings.HasPrefix(value, "/") || strings.HasPrefix(value, "\\") || len(value) >= 2 && value[1] == ':' {
+		return "", fmt.Errorf("配置 ID 不能是绝对路径")
+	}
+	for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("配置 ID 包含不安全路径片段")
+		}
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(value)))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+		return "", fmt.Errorf("配置 ID 包含不安全路径片段")
+	}
+	return clean, nil
+}
+
+func firstPluginRoot(reg *registry.Registry) string {
+	if reg != nil && reg.Root != nil && len(reg.Root.Plugins.Paths) > 0 && strings.TrimSpace(reg.Root.Plugins.Paths[0]) != "" {
+		return strings.TrimSpace(reg.Root.Plugins.Paths[0])
+	}
+	return "plugins"
+}
+
+func (r *Runner) registerExtractedWorkflowConfigFile(wf *config.WorkflowConfig, entry config.ConfigFileRef, replace bool) error {
+	if wf == nil || strings.TrimSpace(wf.ID) == "" {
+		return fmt.Errorf("工作流配置不可用")
+	}
+	config.NormalizeConfigFileRef(&entry)
+	if err := entry.ValidateBasic(); err != nil {
+		return err
+	}
+	entry.ConfigDir = "."
+	entry.Scope = config.ConfigFileScopePlugin
+	entry.Access = config.ConfigFileAccessReadWrite
+	entry.Create = true
+	for i, existing := range wf.ConfigFiles {
+		config.NormalizeConfigFileRef(&existing)
+		if existing.ID != entry.ID {
+			continue
+		}
+		if existing.Path == entry.Path && strings.TrimSpace(existing.ConfigDir) == "." {
+			wf.ConfigFiles[i] = mergeWorkflowConfigFileRef(existing, entry)
+			return r.saveWorkflowConfig(wf)
+		}
+		if !replace {
+			return fmt.Errorf("配置 %s 已映射到 %s，设置 replace: true 才能改绑到 %s", entry.ID, existing.Path, entry.Path)
+		}
+		wf.ConfigFiles[i] = entry
+		return r.saveWorkflowConfig(wf)
+	}
+	wf.ConfigFiles = append(wf.ConfigFiles, entry)
+	return r.saveWorkflowConfig(wf)
+}
+
+func mergeWorkflowConfigFileRef(existing, next config.ConfigFileRef) config.ConfigFileRef {
+	if next.Label == "" {
+		next.Label = existing.Label
+	}
+	return next
+}
+
+func (r *Runner) saveWorkflowConfig(wf *config.WorkflowConfig) error {
+	if r == nil || r.Registry == nil {
+		return nil
+	}
+	path := runnerWorkflowPath(r.Registry, wf.ID)
+	if path == "" {
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	if _, err := os.Stat(path); err == nil && !replace {
-		return fmt.Errorf("目标配置文件已存在")
-	} else if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("检查目标配置文件失败: %w", err)
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(wf); err != nil {
+		_ = enc.Close()
+		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		return err
+	}
+	if existing, ok := r.Registry.Workflows[wf.ID]; ok {
+		existing.Config = wf
+		existing.Path = path
+	} else {
+		r.Registry.Workflows[wf.ID] = &registry.Workflow{Config: wf, Path: path}
+	}
+	return nil
+}
+
+func runnerWorkflowPath(reg *registry.Registry, id string) string {
+	if reg == nil {
+		return ""
+	}
+	if wf, ok := reg.Workflows[id]; ok && wf.Path != "" {
+		return wf.Path
+	}
+	return filepath.Join(reg.BaseDir, filepath.FromSlash(firstPluginRoot(reg)), "user.workflows", "workflows", runnerWorkflowFilename(id))
+}
+
+func runnerWorkflowFilename(id string) string {
+	clean := strings.TrimSpace(id)
+	replacer := strings.NewReplacer("\\", "_", "/", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
+	clean = replacer.Replace(clean)
+	clean = strings.Trim(clean, ". ")
+	if clean == "" {
+		clean = "workflow"
+	}
+	return clean + ".yaml"
 }
 
 func addUploadContext(context map[string]string, nodeID string, upload config.WorkflowUploadResult, runDir string) {

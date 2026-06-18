@@ -19,6 +19,7 @@ import (
 
 	"shell_ops/internal/config"
 	"shell_ops/internal/registry"
+	"shell_ops/internal/runbundle"
 	"shell_ops/internal/runner"
 )
 
@@ -2344,10 +2345,15 @@ func TestRunEventsAPIStreamsAppendedLogsAndCompletes(t *testing.T) {
 	if err := os.WriteFile(stdoutPath, []byte("old-line\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(NewHandler(reg))
+	state := newServerState(reg)
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	state.registerRun("run-follow", cancel)
+	server := httptest.NewServer(runsHandler(state))
+	defer state.finishRun("run-follow")
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/api/runs/run-follow/events")
+	resp, err := http.Get(server.URL + "/run-follow/events")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2382,6 +2388,61 @@ func TestRunEventsAPIStreamsAppendedLogsAndCompletes(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("事件流未在运行结束后关闭")
+	}
+}
+
+func TestRunsAPIReconcilesOrphanRunningRecord(t *testing.T) {
+	reg := testRegistry(t)
+	writeRunFixture(t, reg.BaseDir, "run-orphan", `{"id":"run-orphan","kind":"tool","target":"demo.hello","status":"running","started_at":"2026-06-14T10:00:00Z","steps":[{"id":"demo.hello","status":"running","started_at":"2026-06-14T10:00:00Z"}]}`)
+	handler := NewHandler(reg)
+
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/runs/run-orphan", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var detailBody struct {
+		Data runDetail `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &detailBody); err != nil {
+		t.Fatal(err)
+	}
+	if detailBody.Data.Record.Status != "failed" {
+		t.Fatalf("record status = %s, want failed", detailBody.Data.Record.Status)
+	}
+	if detailBody.Data.Record.Error == "" || !strings.Contains(detailBody.Data.Record.Error, "异常退出") {
+		t.Fatalf("record error = %q, want abnormal exit message", detailBody.Data.Record.Error)
+	}
+	if len(detailBody.Data.Record.Steps) != 1 || detailBody.Data.Record.Steps[0].Status != "failed" {
+		t.Fatalf("steps = %#v, want failed running step", detailBody.Data.Record.Steps)
+	}
+
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/runs/", nil))
+	if listRes.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", listRes.Code, listRes.Body.String())
+	}
+	if !strings.Contains(listRes.Body.String(), `"status":"failed"`) {
+		t.Fatalf("list did not expose reconciled status: %s", listRes.Body.String())
+	}
+}
+
+func TestRunReconcilerMarksOrphanRunningRecord(t *testing.T) {
+	reg := testRegistry(t)
+	writeRunFixture(t, reg.BaseDir, "run-orphan", `{"id":"run-orphan","kind":"tool","target":"demo.hello","status":"running","started_at":"2026-06-14T10:00:00Z","steps":[{"id":"demo.hello","status":"waiting","started_at":"2026-06-14T10:00:00Z"}]}`)
+	state := newServerState(reg)
+
+	state.reconcileOrphanRuns(reg)
+
+	record, err := runbundle.LoadRecord(reg, "run-orphan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "failed" {
+		t.Fatalf("record status = %s, want failed", record.Status)
+	}
+	if len(record.Steps) != 1 || record.Steps[0].Status != "failed" {
+		t.Fatalf("steps = %#v, want waiting step reconciled to failed", record.Steps)
 	}
 }
 
@@ -2630,6 +2691,31 @@ func TestWorkflowConfigFilesUseRealMountedUploadPath(t *testing.T) {
 	}
 	if got := string(data); got != "updated=true\n" {
 		t.Fatalf("upload config content = %q", got)
+	}
+}
+
+func TestWorkflowConfigFilesWithDeclarationsHideScannedFiles(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	extractedPath := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "config", "workflows", "demo.mergedconfig", "everisk-deployment", "hosts-everisk-deploy")
+	if err := os.MkdirAll(filepath.Dir(extractedPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(extractedPath, []byte("hosts=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	saveReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.mergedconfig/save", strings.NewReader(`{"workflow":{"id":"demo.mergedconfig","name":"合并配置","category":"demo","config_files":[{"id":"declared.conf","label":"声明配置","config_dir":"config/workflows/demo.mergedconfig","path":"declared.conf","access":"read_write","create":true}],"nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`))
+	saveRes := httptest.NewRecorder()
+	handler.ServeHTTP(saveRes, saveReq)
+	if saveRes.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", saveRes.Code, saveRes.Body.String())
+	}
+
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/workflows/demo.mergedconfig/files", nil))
+	body := listRes.Body.String()
+	if listRes.Code != http.StatusOK || !strings.Contains(body, `"id":"declared.conf"`) || strings.Contains(body, `"id":"everisk-deployment/hosts-everisk-deploy"`) {
+		t.Fatalf("list status = %d, body = %s", listRes.Code, body)
 	}
 }
 

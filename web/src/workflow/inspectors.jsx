@@ -1,5 +1,6 @@
 import React, {useState} from 'react'
 import FileUploadInput from '../FileUploadInput.jsx'
+import {conditionOperators, controlNodeHelp, controlNodeTitle} from './catalog.js'
 import {
   defaultExtractConfig as modelDefaultExtractConfig,
   defaultCondition,
@@ -10,17 +11,6 @@ import {
   normalizeLoopConfig,
   normalizeUploadConfig
 } from './model.js'
-
-const conditionOperators = [
-  {value: 'eq', label: '等于'},
-  {value: 'neq', label: '不等于'},
-  {value: 'contains', label: '包含'},
-  {value: 'not_contains', label: '不包含'},
-  {value: 'in', label: '在列表中'},
-  {value: 'not_in', label: '不在列表中'},
-  {value: 'exists', label: '存在'},
-  {value: 'empty', label: '为空'}
-]
 
 function NodeConfigModal({node, kindLabel, children, onClose, onSave}) {
   return (
@@ -243,6 +233,7 @@ function ControlNodeInspector({node, tools, nodes, loopTool, sources, onNameChan
             <input value={upload.target_dir || ''} placeholder="可留空，例如 assets/release" onChange={event => onUploadChange({...upload, target_dir: event.target.value})} />
           </label>
           <div className="empty small">目标子目录只能是平台 uploads 下的相对路径；运行前在执行面板选择本地文件、多个文件或目录。</div>
+          <div className="empty small">如需把上传包中的配置文件沉淀为工作流配置，请在该节点后连接“提取配置”节点，并使用上传节点输出的文件名、相对路径或目录。</div>
         </>
       ) : isExtractConfig ? (
         <>
@@ -258,7 +249,7 @@ function ControlNodeInspector({node, tools, nodes, loopTool, sources, onNameChan
           ) : (
             <FileExtractEditor extract={extract} sources={sources} onChange={updateExtract} />
           )}
-          <div className="empty small">执行成功后，会从本次运行已上传的文件中匹配来源并复制到工作流配置中心。</div>
+          <div className="empty small">建议把“提取配置”接在“上传文件”节点之后；源文件可选上传节点输出，也可手动填写上传目录内的相对路径。目标配置路径始终是工作流配置中心内的相对路径。</div>
         </>
       ) : (
         <div className="empty small">{controlNodeHelp(node.data.controlType)}。该节点不需要配置工具或参数，运行时自身记录为成功。</div>
@@ -273,10 +264,10 @@ function FileExtractEditor({extract, sources, onChange}) {
       <label>
         <span>源文件来源</span>
         <select value={sources.some(source => source.value === extract.file_name) ? extract.file_name : ''} onChange={event => onChange({file_name: event.target.value})}>
-              <option value="">手动输入 / 不设置</option>
+              <option value="">手动输入上传文件名或相对路径</option>
               {sources.map(source => <option key={source.value} value={source.value}>{source.label}</option>)}
         </select>
-        <input value={extract.file_name || ''} placeholder="app.yaml、conf/app.yaml 或 {{ .steps.prev.outputs.output_file }}" onChange={event => onChange({file_name: event.target.value})} />
+        <input value={extract.file_name || ''} placeholder="app.yaml、conf/app.yaml 或 {{ .steps.upload.file.relative_path }}" onChange={event => onChange({file_name: event.target.value})} />
       </label>
       <label>
         <span>目标配置路径</span>
@@ -311,7 +302,7 @@ function DirectoryExtractEditor({extract, sources, onChange}) {
       <label>
         <span>源目录来源</span>
         <select value={sources.some(source => source.value === extract.source_dir) ? extract.source_dir : ''} onChange={event => onChange({source_dir: event.target.value})}>
-          <option value="">手动输入 / 不设置</option>
+          <option value="">手动输入上传目录来源</option>
           {sources.map(source => <option key={source.value} value={source.value}>{source.label}</option>)}
         </select>
         <input value={extract.source_dir || ''} placeholder="{{ .steps.upload.file.relative_dir }}" onChange={event => onChange({source_dir: event.target.value})} />
@@ -432,24 +423,6 @@ function isTemplateValue(value) {
 
 function parseBoolParamValue(value) {
   return value === true || value === 'true' || value === '1' || value === 'yes' || value === 'on'
-}
-
-function controlNodeTitle(type) {
-  if (type === 'condition') return '条件分支'
-  if (type === 'parallel') return '并行分支'
-  if (type === 'join') return '合流'
-  if (type === 'loop') return '循环'
-  if (type === 'upload') return '上传文件'
-  if (type === 'extract_config') return '提取配置'
-  return type || '编排节点'
-}
-
-function controlNodeHelp(type) {
-  if (type === 'parallel') return '将后续任务拆分为多个分支路径'
-  if (type === 'join') return '等待多个上游分支完成后继续流程'
-  if (type === 'upload') return '运行前上传本地文件、批量文件或目录到平台目录'
-  if (type === 'extract_config') return '按文件名从上传结果提取到工作流配置中心'
-  return '编排控制节点'
 }
 
 function updateCaseValuesText(value) {

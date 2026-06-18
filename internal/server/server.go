@@ -776,6 +776,93 @@ func (s *serverState) cancelRun(id string) bool {
 	return true
 }
 
+func (s *serverState) reconcileRunRecord(reg *registry.Registry, id string) (runner.RunRecord, error) {
+	record, err := runbundle.LoadRecord(reg, id)
+	if err != nil {
+		return runner.RunRecord{}, err
+	}
+	if record.Status != "running" || s.hasActiveRun(record.ID) {
+		return record, nil
+	}
+	record.EndedAt = time.Now()
+	record.Status = "failed"
+	record.Error = "运行任务已异常退出或服务已重启，当前进程没有该任务的运行句柄。"
+	for index := range record.Steps {
+		if record.Steps[index].Status != "running" && record.Steps[index].Status != "waiting" {
+			continue
+		}
+		record.Steps[index].Status = "failed"
+		record.Steps[index].EndedAt = record.EndedAt
+		record.Steps[index].Error = "运行任务已异常退出或服务已重启。"
+	}
+	if err := saveRunRecord(reg, &record); err != nil {
+		return runner.RunRecord{}, err
+	}
+	return record, nil
+}
+
+func (s *serverState) reconcileOrphanRuns(reg *registry.Registry) {
+	if s == nil || reg == nil {
+		return
+	}
+	items, err := runbundle.List(reg)
+	if err != nil {
+		return
+	}
+	for _, item := range items {
+		if item.Status != "running" || s.hasActiveRun(item.ID) {
+			continue
+		}
+		_, _ = s.reconcileRunRecord(reg, item.ID)
+	}
+}
+
+func (s *serverState) startRunReconciler() {
+	go func() {
+		s.reconcileOrphanRuns(s.registry())
+	}()
+}
+
+func saveRunRecord(reg *registry.Registry, record *runner.RunRecord) error {
+	if record == nil || strings.TrimSpace(record.ID) == "" {
+		return fmt.Errorf("运行记录 ID 不能为空")
+	}
+	runDir, err := runbundle.RunDir(reg, record.ID)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	tempPath := filepath.Join(runDir, fmt.Sprintf("result.json.%d.tmp", time.Now().UnixNano()))
+	resultPath := filepath.Join(runDir, "result.json")
+	if err := os.WriteFile(tempPath, data, 0o644); err != nil {
+		return err
+	}
+	var lastErr error
+	for attempt := 0; attempt < 25; attempt++ {
+		if err := os.Rename(tempPath, resultPath); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if err := os.Remove(resultPath); err != nil && !os.IsNotExist(err) {
+			lastErr = err
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		if err := os.Rename(tempPath, resultPath); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = os.Remove(tempPath)
+	return lastErr
+}
+
 func ListenAndServe(addr string, reg *registry.Registry) error {
 	return http.ListenAndServe(addr, NewHandler(reg))
 }
@@ -786,6 +873,7 @@ func ListenAndServeWithToken(addr string, reg *registry.Registry, token string) 
 
 func NewHandler(reg *registry.Registry) http.Handler {
 	state := newServerState(reg)
+	state.startRunReconciler()
 	mux := http.NewServeMux()
 	registerWeb(mux)
 	mux.HandleFunc("/api/catalog", catalogHandler(state))
@@ -1249,7 +1337,7 @@ func watchRunCompletion(state *serverState, reg *registry.Registry, runID string
 	readFailures := 0
 	for {
 		time.Sleep(100 * time.Millisecond)
-		detail, err := loadRunDetail(reg, runID)
+		detail, err := loadRunDetail(nil, reg, runID)
 		if err != nil {
 			readFailures++
 			if readFailures < 5 {
@@ -1524,7 +1612,7 @@ func runsHandler(state *serverState) http.HandlerFunc {
 			return
 		}
 		if strings.Trim(id, "/") == "" {
-			items, err := runbundle.List(reg)
+			items, err := listRuns(state, reg)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
 				return
@@ -1537,10 +1625,10 @@ func runsHandler(state *serverState) http.HandlerFunc {
 			return
 		}
 		if runID, ok := strings.CutSuffix(id, "/events"); ok {
-			handleRunEvents(w, req, reg, strings.Trim(runID, "/"))
+			handleRunEvents(w, req, state, reg, strings.Trim(runID, "/"))
 			return
 		}
-		detail, err := loadRunDetail(reg, id)
+		detail, err := loadRunDetail(state, reg, id)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
 			return
@@ -1574,9 +1662,9 @@ func handleRunCancel(w http.ResponseWriter, state *serverState, reg *registry.Re
 		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
 		return
 	}
-	detail, err := loadRunDetail(reg, id)
+	detail, err := loadRunDetail(state, reg, id)
 	if err == nil && detail.Record.Status != "running" {
-		writeJSON(w, http.StatusBadRequest, response{Error: "只能取消运行中的任务"})
+		writeJSON(w, http.StatusBadRequest, response{Status: detail.Record.Status, Data: detail, Error: "只能取消运行中的任务"})
 		return
 	}
 	if state.hasActiveRun(id) {
@@ -1616,7 +1704,7 @@ func handleRunNodeRerun(w http.ResponseWriter, req *http.Request, state *serverS
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 		return
 	}
-	detail, err := loadRunDetail(reg, runID)
+	detail, err := loadRunDetail(state, reg, runID)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
 		return
@@ -1672,7 +1760,7 @@ func handleRunNodeRerun(w http.ResponseWriter, req *http.Request, state *serverS
 		writeRunResponse(w, updated, err)
 		return
 	}
-	rerunDetail, err := loadRunDetail(reg, runID)
+	rerunDetail, err := loadRunDetail(state, reg, runID)
 	if err != nil {
 		writeJSON(w, http.StatusOK, response{ID: updated.ID, Status: updated.Status, Data: runDetail{Record: *updated}})
 		return
@@ -1689,7 +1777,7 @@ func handleRunUploadNode(w http.ResponseWriter, req *http.Request, state *server
 		writeJSON(w, http.StatusConflict, response{Error: "运行任务未处于活动状态，无法上传节点文件"})
 		return
 	}
-	detail, err := loadRunDetail(reg, runID)
+	detail, err := loadRunDetail(state, reg, runID)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
 		return
@@ -1815,12 +1903,12 @@ func handleRunsCleanup(w http.ResponseWriter, req *http.Request, reg *registry.R
 	writeJSON(w, http.StatusOK, response{Status: "ok", Data: result})
 }
 
-func handleRunEvents(w http.ResponseWriter, req *http.Request, reg *registry.Registry, id string) {
+func handleRunEvents(w http.ResponseWriter, req *http.Request, state *serverState, reg *registry.Registry, id string) {
 	if strings.TrimSpace(id) == "" {
 		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
 		return
 	}
-	detail, err := loadRunDetail(reg, id)
+	detail, err := loadRunDetail(state, reg, id)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
 		return
@@ -1876,7 +1964,7 @@ func handleRunEvents(w http.ResponseWriter, req *http.Request, reg *registry.Reg
 		case <-req.Context().Done():
 			return
 		case <-ticker.C:
-			next, err := loadRunDetail(reg, id)
+			next, err := loadRunDetail(nil, reg, id)
 			if err == nil {
 				detail = next
 				tailer.record = next.Record
@@ -2058,8 +2146,44 @@ func handlePluginRuntimeDownload(w http.ResponseWriter, req *http.Request, state
 	_, _ = w.Write(data)
 }
 
-func loadRunDetail(reg *registry.Registry, id string) (runDetail, error) {
-	record, err := runbundle.LoadRecord(reg, id)
+func listRuns(state *serverState, reg *registry.Registry) ([]runbundle.Summary, error) {
+	items, err := runbundle.List(reg)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]runbundle.Summary, 0, len(items))
+	for _, item := range items {
+		if item.Status != "running" || state == nil || state.hasActiveRun(item.ID) {
+			out = append(out, item)
+			continue
+		}
+		record, err := state.reconcileRunRecord(reg, item.ID)
+		if err != nil {
+			out = append(out, item)
+			continue
+		}
+		out = append(out, runbundle.Summary{
+			ID:        record.ID,
+			Kind:      record.Kind,
+			Target:    record.Target,
+			Status:    record.Status,
+			StartedAt: record.StartedAt,
+			EndedAt:   record.EndedAt,
+			Params:    record.Params,
+			Error:     record.Error,
+		})
+	}
+	return out, nil
+}
+
+func loadRunDetail(state *serverState, reg *registry.Registry, id string) (runDetail, error) {
+	var record runner.RunRecord
+	var err error
+	if state != nil {
+		record, err = state.reconcileRunRecord(reg, id)
+	} else {
+		record, err = runbundle.LoadRecord(reg, id)
+	}
 	if err != nil {
 		return runDetail{}, err
 	}
@@ -3051,6 +3175,10 @@ func scanWorkflowConfigFiles(reg *registry.Registry, workflowID string) ([]plugi
 	if len(wf.Config.ConfigFiles) > 0 {
 		return workflowDeclaredConfigFileStatuses(reg, wf)
 	}
+	return scanWorkflowConfigDirFiles(reg, workflowID)
+}
+
+func scanWorkflowConfigDirFiles(reg *registry.Registry, workflowID string) ([]pluginConfigFileStatus, error) {
 	root := workflowConfigDir(reg, workflowID)
 	if _, err := os.Stat(root); err != nil {
 		if os.IsNotExist(err) {
@@ -3059,7 +3187,7 @@ func scanWorkflowConfigFiles(reg *registry.Registry, workflowID string) ([]plugi
 		return nil, err
 	}
 	files := []pluginConfigFileStatus{}
-	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

@@ -11,5 +11,4 @@ contributes:
   categories: []
   tools: []
   workflows:
-    - path: workflows/demo.test.yaml
     - path: workflows/everisk.pkg.yaml

@@ -198,6 +198,12 @@ button { cursor: pointer; }
   background: var(--color-surface);
   box-shadow: var(--shadow-whisper);
 }
+.tabPanel.active {
+  display: block;
+}
+.tabPanel.inactive {
+  display: none;
+}
 .configPanelShell {
   display: grid;
   gap: 16px;
@@ -350,6 +356,14 @@ button { cursor: pointer; }
 }
 .fileUploadButton input[type="file"] {
   display: none;
+}
+@media (max-width: 720px) {
+  .fileUploadInput {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .configReplaceFields {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .advancedParams { display: grid; gap: 12px; }
 
@@ -605,6 +619,30 @@ input:disabled { color: var(--color-muted); background: var(--color-bg); }
   justify-content: flex-end;
   gap: 8px;
 }
+.segmentedControl {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--color-input-border);
+  border-radius: 8px;
+  background: var(--color-panel);
+}
+.segmentedControl button {
+  min-height: 34px;
+  border: 0;
+  border-radius: 0;
+  padding: 7px 12px;
+  color: var(--color-muted);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 800;
+}
+.segmentedControl button + button {
+  border-left: 1px solid var(--color-input-border);
+}
+.segmentedControl button.active {
+  color: var(--color-surface);
+  background: var(--color-black);
+}
 .compactResult { min-height: 74px; margin-top: 14px; font-size: 12px; }
 .logBlock, .stepLogs { display: grid; gap: 8px; }
 .logBlock h4, .stepLogs h4 { margin: 0; color: var(--color-text); font-size: 14px; font-weight: 800; }
@@ -647,6 +685,42 @@ input:disabled { color: var(--color-muted); background: var(--color-bg); }
   margin: 0 12px 12px;
   padding-left: 12px;
   border-left: 2px solid var(--color-border);
+}
+.runRecordCanvas {
+  display: grid;
+  gap: 12px;
+  min-height: 640px;
+}
+.runRecordCanvasHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+.runRecordCanvasHeader strong,
+.runRecordCanvasHeader span {
+  display: block;
+}
+.runRecordCanvasHeader strong {
+  color: var(--color-black);
+  font-size: 15px;
+  font-weight: 900;
+}
+.runRecordCanvasHeader span {
+  margin-top: 4px;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+.runRecordCanvasViewport {
+  position: relative;
+  min-height: 600px;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-panel);
+}
+.runRecordCanvasViewport .react-flow {
+  min-height: 600px;
 }
 details summary { cursor: pointer; color: var(--color-link); font-weight: 800; }
 .liveTerminal {
@@ -902,12 +976,9 @@ pre {
 }
 
 .executeModeLayout {
-  grid-template-columns: minmax(420px, 510px) minmax(620px, 1fr);
   grid-template-areas:
-    "toolbar canvas"
-    "params canvas"
-    "footer result";
-  grid-template-rows: auto minmax(0, 1fr) auto;
+    "toolbar canvas";
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .editorToolbar {
@@ -924,12 +995,46 @@ pre {
   gap: 10px;
 }
 
+.executeModeSidebar {
+  align-self: start;
+}
+
 .workflowResultCard {
-  grid-area: result;
   align-self: stretch;
-  min-height: 300px;
+  min-height: 100%;
   margin-top: 0;
   overflow: hidden;
+}
+
+.workflowExecuteResultPane {
+  grid-area: canvas;
+  position: relative;
+  min-width: 0;
+  min-height: clamp(620px, 68vh, 760px);
+  height: 100%;
+}
+
+.workflowExecuteResultPane .workflowResultCard {
+  height: 100%;
+}
+
+.workflowExecuteViewActions {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 24;
+  display: flex;
+  justify-content: flex-end;
+  pointer-events: auto;
+}
+
+.workflowExecuteViewActions + .workflowResultCard .resultPanelHeader {
+  padding-right: 96px;
+}
+
+.canvasCard .workflowExecuteViewActions {
+  top: 18px;
+  right: 18px;
 }
 
 .workflowResultCard .runDetail {
@@ -2061,15 +2166,19 @@ pre {
   box-shadow: var(--shadow-standard);
 }
 .canvasDock button {
+  display: inline-grid;
   min-width: 38px;
+  width: 38px;
   height: 34px;
+  place-items: center;
   border: 1px solid var(--color-input-border);
   border-radius: 8px;
-  padding: 0 12px;
+  padding: 0;
   color: var(--color-text);
   background: var(--color-surface);
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 900;
+  line-height: 1;
   transition: background .15s ease, border-color .15s ease, box-shadow .15s ease, transform .15s ease;
 }
 .canvasDock button:hover { border-color: var(--color-black); background: var(--color-bg); box-shadow: var(--shadow-whisper); transform: translateY(-1px); }
@@ -2190,6 +2299,61 @@ pre {
 .pluginConfigEditor label span { display: block; margin-bottom: 8px; color: var(--color-text); font-size: 14px; font-weight: 800; }
 .pluginConfigEditor textarea { min-height: 420px; }
 .pluginConfigEditor .smallTextarea { min-height: 104px; }
+
+.configReplaceToolbar {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 12px;
+  background: var(--color-panel);
+}
+
+.configReplaceHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.configReplaceHeader strong {
+  color: var(--color-black);
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.configReplaceHeader span {
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.configReplaceFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.configReplaceFields label span {
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.configReplaceFields input {
+  width: 100%;
+}
+
+.configReplaceActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.configReplaceActions .secondary {
+  min-width: 118px;
+}
 
 .paginationBar {
   display: flex;
@@ -2497,30 +2661,15 @@ fieldset legend {
   .executeModeLayout {
     grid-template-areas:
       "toolbar"
-      "params"
-      "canvas"
-      "result"
-      "footer";
-    grid-template-rows: auto auto auto auto auto;
+      "canvas";
+    grid-template-rows: auto auto;
   }
   .editorToolbar {
     position: static;
     max-height: none;
   }
-  .workflowRunParamsPanel {
-    position: static;
-    max-height: none;
-  }
-  .executeModeLayout .workflowRunParamsPanel {
-    top: auto;
-    padding: 20px;
-  }
   .executeModeLayout .workflowRunActionRow {
     display: flex;
-  }
-  .workflowSidebarFooter {
-    grid-area: footer;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .canvasCard, .canvasCard .react-flow { min-height: 560px; }
 }
@@ -2549,6 +2698,7 @@ fieldset legend {
   .buttonRow { flex-direction: column; }
   .pluginQuickActions { grid-template-columns: 1fr; }
   .runHistoryItem { grid-template-columns: 1fr; }
+  .runCancelButton { grid-column: 1; justify-self: start; }
   .canvasDock {
     top: 10px;
     right: 10px;
@@ -2568,9 +2718,6 @@ fieldset legend {
     width: min(360px, calc(100% - 24px));
   }
   .nodePickerList {
-    grid-template-columns: 1fr;
-  }
-  .workflowSidebarFooter {
     grid-template-columns: 1fr;
   }
 }
@@ -3019,12 +3166,12 @@ fieldset legend {
 }
 
 .workflowRunParamsPanel {
-  grid-area: params;
-  position: sticky;
-  top: 24px;
-  align-self: start;
-  max-height: calc(100vh - 48px);
+  max-height: min(76vh, 820px);
   overflow: auto;
+}
+
+.workflowRunParamsModal {
+  width: min(760px, 100%);
 }
 
 .workflowRunParamsPanel .cardHeader {
@@ -3067,39 +3214,6 @@ fieldset legend {
   font-weight: 700;
 }
 
-.executeModeLayout .workflowRunParamsPanel {
-  top: 260px;
-  padding: 16px;
-}
-
-.executeModeLayout .workflowRunParamsPanel .cardHeader {
-  margin-bottom: 12px;
-}
-
-.executeModeLayout .workflowRunParamsPanel .cardHeader h3 {
-  font-size: 16px;
-}
-
-.executeModeLayout .workflowRunParamsPanel .cardHeader span {
-  font-size: 12px;
-}
-
-.executeModeLayout .workflowRunParamSection,
-.executeModeLayout .workflowRunParamGroup {
-  gap: 8px;
-  padding: 10px;
-}
-
-.executeModeLayout .workflowRunActionRow {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-.executeModeLayout .workflowRunActionRow .primary {
-  flex: initial;
-}
-
 .workflowRunParamsPanel label.requiredField > span {
   color: var(--color-danger);
   font-weight: 900;
@@ -3130,6 +3244,22 @@ fieldset legend {
 .workflowUploadPicker {
   display: grid;
   gap: 8px;
+}
+
+.uploadSelectionMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.uploadSelectionMeta span {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 5px 8px;
+  color: var(--color-muted);
+  background: var(--color-panel);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .workflowUploadPicker .buttonRow {
@@ -3163,21 +3293,12 @@ fieldset legend {
   flex: 1 1 120px;
 }
 
-.workflowSidebarFooter {
-  grid-area: footer;
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 12px;
-  align-self: stretch;
-  min-height: 0;
-}
-
 .workflowSidebarHint {
   display: grid;
   gap: 4px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-control);
-  padding: 12px;
+  padding: 10px;
   background: var(--color-surface);
 }
 
@@ -3238,11 +3359,8 @@ fieldset legend {
     grid-template-columns: 1fr;
     grid-template-areas:
       "toolbar"
-      "params"
-      "canvas"
-      "result"
-      "footer";
-    grid-template-rows: auto auto auto auto auto;
+      "canvas";
+    grid-template-rows: auto auto;
     min-height: 0;
   }
 
@@ -3252,24 +3370,15 @@ fieldset legend {
       "canvas";
   }
 
-  .editorToolbar,
-  .workflowRunParamsPanel {
+  .editorToolbar {
     position: static;
     max-height: none;
-  }
-
-  .executeModeLayout .workflowRunParamsPanel {
-    top: auto;
-    padding: 20px;
   }
 
   .executeModeLayout .workflowRunActionRow {
     display: flex;
   }
 
-  .workflowSidebarFooter {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 640px) {
@@ -3281,7 +3390,4 @@ fieldset legend {
     grid-template-columns: 1fr;
   }
 
-  .workflowSidebarFooter {
-    grid-template-columns: 1fr;
-  }
 }

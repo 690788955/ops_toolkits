@@ -25,6 +25,7 @@ If the Web UI changes, `npm run build --prefix web` must be run so `internal/ser
 - Parameter precedence is defaults < parameter file < CLI/API/Web overrides.
 - Required parameter validation belongs in `internal/config` and must be reused across entrypoints.
 - Runtime tools must be plugin-oriented: `plugins/<plugin-id>/plugin.yaml` plus plugin-owned implementation files.
+- Workflow runner paths emitted by containerized tools may use WSL aliases such as `/mnt/f/...`; when the runner consumes those paths, normalize them to host paths and still constrain reads to `registry.BaseDir`.
 - Plugin upload ZIPs must contain exactly one plugin package, discovered by scanning for `plugin.yaml`; reject archives with zero or multiple plugin manifests.
 - Plugin export ZIPs must reuse the upload-compatible single-plugin package shape and follow `plugin-import-export.md` for route, catalog, and safety contracts.
 - Plugin ZIP extraction must accept normal directory entries such as `vendor.backup/` while still rejecting traversal, absolute paths, symlinks, and special files.
@@ -101,8 +102,89 @@ For more detail, read `../guides/cross-platform-runtime-thinking-guide.md`.
 - Registry plugin normalization needs tests in `internal/registry`.
 - Interactive menu pseudo-category behavior needs tests in `internal/menu` covering the `全局/全部` entry, global entry inclusion of all tools and workflows, and real category filtering.
 - Any change to parameter merge or validation should include regression tests.
+- Any change to workflow file extraction must cover both upload-result matching and local source paths rendered from upstream step outputs, including WSL-style `/mnt/<drive>/...` aliases.
 - Any change to API routes should be manually verified with `opsctl serve --port <port>` and `/api/catalog`.
 - Any change to Web UI should build successfully and be verified through the embedded server.
+
+---
+
+## Scenario: Orphan Running Record Reconciliation
+
+### 1. Scope / Trigger
+
+- Trigger: run history, run detail, run events, cancellation, node rerun, or upload APIs read or mutate existing run records.
+- Applies when changing `/api/runs/`, `/api/runs/{id}`, `/api/runs/{id}/events`, `/api/runs/{id}/cancel`, node rerun, upload-node APIs, `serverState.active`, or run-history Web UI refresh behavior.
+
+### 2. Signatures
+
+- `GET /api/runs/` returns run summaries and may reconcile orphan `running` records before serializing the list.
+- `GET /api/runs/{id}` returns run detail and may reconcile an orphan `running` record before serializing the detail.
+- `GET /api/runs/{id}/events` must perform one initial reconciliation check before streaming; active runs continue to stream normally.
+- Server startup must launch a lightweight asynchronous reconciliation pass so stale persisted runs can converge without waiting for the first operator page refresh.
+- Web run-history panel must refresh asynchronously while any list item or selected detail has `status: "running"`.
+
+### 3. Contracts
+
+- `serverState.active` is the current process source of truth for cancellable/observable in-flight runs.
+- A persisted run record with `status: "running"` and no active handle in `serverState.active` is an orphan. Treat it as an abnormal exit or server restart.
+- Reconciliation must rewrite `result.json` with:
+  - `record.status = "failed"`
+  - `record.ended_at = now`
+  - a readable Chinese error explaining that the run has no current process handle
+  - every `running` or `waiting` step changed to `failed` with the same end time
+- Active runs must not be reconciled by list/detail/event reads.
+- Internal completion watchers for active runs must read raw records without triggering orphan reconciliation.
+- Background reconciliation and unlocked handlers must use `serverState.registry()`/`swap()` for registry access. Code that already holds `state.mu` may read or write `state.reg` directly and must not call `swap()` while holding the same lock.
+- Frontend refresh must be silent during polling: do not reset selection, clear logs, or flicker the loading/message state.
+
+### 4. Validation & Error Matrix
+
+| Condition | Expected behavior |
+|---|---|
+| persisted record is `running` and active handle exists | keep `running`; cancellation and events operate normally |
+| persisted record is `running` and active handle is missing | rewrite as `failed`; startup reconciliation and list/detail expose the failed state |
+| persisted record is `waiting` only at step level under a running orphan record | failed together with the parent record |
+| persisted record is already terminal | do not rewrite status or timestamps |
+| reconciliation write fails | keep serving the original summary/detail behavior where possible and return normal read errors for detail reads |
+| cancel request targets a reconciled orphan | return a non-running error response with the reconciled detail/status |
+
+### 5. Good/Base/Bad Cases
+
+- Good: the server restarts while a workflow was recorded as `running`; opening run history changes the record to `failed` and removes cancel affordances on the next refresh.
+- Base: a normal active workflow is listed and selected while running; it remains `running` until the runner writes a terminal result.
+- Bad: an SSE watcher for an active run calls the reconciled detail loader and marks its own run failed before the runner finishes.
+
+### 6. Tests Required
+
+- Server API test must create a persisted `running` record with no registered active handle, call detail/list APIs, and assert the record and running/waiting steps become `failed`.
+- Server event-stream tests for active runs must register the run in `serverState.active` so the initial event read does not reconcile it.
+- Frontend tests/build must pass after changing polling behavior; manual UI verification should cover a stale `running` record moving to `failed` without losing the selected detail panel.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+detail, err := loadRunDetail(state, reg, runID)
+```
+
+inside the active run completion watcher.
+
+Why wrong:
+
+- The watcher belongs to the currently active process and must not classify its own still-running record as orphaned during transient file reads.
+
+#### Correct
+
+```go
+detail, err := loadRunDetail(nil, reg, runID)
+```
+
+inside active completion watchers, while HTTP list/detail reads use the state-aware loader.
+
+Why correct:
+
+- Active runner bookkeeping and operator-facing history reads have different responsibilities: watchers observe raw persistence, while HTTP reads reconcile stale persisted state for the UI.
 
 ---
 

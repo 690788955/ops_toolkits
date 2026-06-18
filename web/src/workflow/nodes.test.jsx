@@ -165,15 +165,73 @@ describe('workflow node run status', () => {
       })
       await act(async () => {})
 
+      const runButton = host.querySelector('button[aria-label="运行工作流"]')
+      expect(runButton).toBeTruthy()
+      await act(async () => {
+        runButton.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+      })
+
       const nextButton = Array.from(host.querySelectorAll('button')).find(item => item.textContent === '下一步')
       expect(nextButton).toBeTruthy()
       await act(async () => {
         nextButton.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
       })
 
-      expect(host.textContent).toContain('启动运行')
+      expect(host.textContent).toContain('确认运行')
       expect(host.textContent).toContain('开始运行')
       expect(setResult).toHaveBeenLastCalledWith({message: '参数已确认，可开始运行。'})
+    } finally {
+      root.unmount()
+      host.remove()
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('opens run params from the execute sidebar action', async () => {
+    const workflow = {
+      id: 'sidebar-run-flow',
+      name: '侧栏运行工作流',
+      category: 'global',
+      parameters: [],
+      nodes: [{id: 'upload_1', type: 'upload', name: '上传文件'}],
+      edges: []
+    }
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async path => {
+      if (path === '/api/workflows/sidebar-run-flow') {
+        return new Response(JSON.stringify({data: {config: workflow}}), {status: 200, headers: {'Content-Type': 'application/json'}})
+      }
+      return new Response(JSON.stringify({error: `unexpected path ${path}`}), {status: 404, headers: {'Content-Type': 'application/json'}})
+    })
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    try {
+      await act(async () => {
+        root.render(React.createElement(WorkflowEditor, {
+          catalog: {tools: [], workflows: [workflow]},
+          activeCategory: '',
+          setResult: vi.fn(),
+          refreshCatalog: vi.fn()
+        }))
+      })
+
+      const select = host.querySelector('select')
+      const setSelectValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
+      await act(async () => {
+        setSelectValue.call(select, 'sidebar-run-flow')
+        select.dispatchEvent(new Event('change', {bubbles: true}))
+      })
+      await act(async () => {})
+
+      const sidebarRunButton = host.querySelector('button[aria-label="从执行面板运行工作流"]')
+      expect(sidebarRunButton).toBeTruthy()
+      await act(async () => {
+        sidebarRunButton.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+      })
+
+      expect(host.textContent).toContain('填写运行参数')
+      expect(host.textContent).toContain('上传文件')
     } finally {
       root.unmount()
       host.remove()
@@ -226,10 +284,79 @@ describe('workflow node run status', () => {
       })
       await act(async () => {})
 
+      const runButton = host.querySelector('button[aria-label="运行工作流"]')
+      expect(runButton).toBeTruthy()
+      await act(async () => {
+        runButton.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+      })
+
       expect(host.textContent).toContain('分片包 MD5 校验并合并')
       expect(host.textContent).toContain('Docker 容器执行')
       expect(host.textContent).toContain('分片包文件名')
       expect(host.textContent).not.toContain('当前工作流无需参数。')
+    } finally {
+      root.unmount()
+      host.remove()
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('switches execution mode between canvas and logs in the main pane', async () => {
+    const workflow = {
+      id: 'view-switch-flow',
+      name: '视图切换工作流',
+      category: 'global',
+      parameters: [],
+      nodes: [{id: 'inspect', type: 'tool', name: '巡检', tool: 'demo.inspect'}],
+      edges: []
+    }
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async path => {
+      if (path === '/api/workflows/view-switch-flow') {
+        return new Response(JSON.stringify({data: {config: workflow}}), {status: 200, headers: {'Content-Type': 'application/json'}})
+      }
+      return new Response(JSON.stringify({error: `unexpected path ${path}`}), {status: 404, headers: {'Content-Type': 'application/json'}})
+    })
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    try {
+      await act(async () => {
+        root.render(React.createElement(WorkflowEditor, {
+          catalog: {tools: [{id: 'demo.inspect', name: '巡检工具'}], workflows: [workflow]},
+          activeCategory: '',
+          setResult: vi.fn(),
+          refreshCatalog: vi.fn(),
+          resultPanel: React.createElement('section', {className: 'card resultCard workflowResultCard'}, '执行日志面板')
+        }))
+      })
+
+      const select = host.querySelector('select')
+      const setSelectValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
+      await act(async () => {
+        setSelectValue.call(select, 'view-switch-flow')
+        select.dispatchEvent(new Event('change', {bubbles: true}))
+      })
+      await act(async () => {})
+
+      expect(host.querySelector('.canvasCard')).toBeTruthy()
+      expect(host.textContent).not.toContain('执行日志面板')
+
+      const logButton = [...host.querySelectorAll('[aria-label="工作流执行详情视图"] button')].find(button => button.textContent === '日志')
+      await act(async () => {
+        logButton.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+      })
+
+      expect(host.querySelector('.canvasCard')).toBeNull()
+      expect(host.textContent).toContain('执行日志面板')
+
+      const canvasButton = [...host.querySelectorAll('[aria-label="工作流执行详情视图"] button')].find(button => button.textContent === '画布')
+      await act(async () => {
+        canvasButton.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+      })
+
+      expect(host.querySelector('.canvasCard')).toBeTruthy()
+      expect(host.textContent).not.toContain('执行日志面板')
     } finally {
       root.unmount()
       host.remove()

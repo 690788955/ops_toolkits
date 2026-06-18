@@ -71,6 +71,9 @@ Saved workflow draft shape:
 - Node parameter editors must preserve readable vertical rhythm in modal/inspector surfaces: mapping rows should stack parameter identity, source selector, and manual input on narrow panels instead of compressing selector/input controls into one tight row.
 - Workflow auto layout is a frontend-only canvas operation: it may recompute React Flow `nodes[].position` for the current editor session and call `fitView`, but it must not add position fields to `buildWorkflowDraft`, change workflow schema, or affect save/run/validation semantics.
 - Workflow run overlay is frontend-only canvas state: execution may temporarily inject `data.run` into display nodes and edge `className`/`data.run` into display edges, but this state must be derived from the current run response/detail and must never be written into `nodes`, `edges`, `buildWorkflowDraft`, or saved workflow files. Loading/creating/editing workflow structure or node params must clear stale run overlays.
+- A running workflow canvas must survive tab/page switches inside the SPA: after the workflow editor has been opened once, hide it when leaving the Workflows tab instead of unmounting it, so `activeRun`, polling state, run overlays, and node log selection remain consistent when the user returns.
+- The workflow editor may remember only the selected workflow ID per sidebar category in localStorage; it must not persist workflow run params, node params, upload file handles, logs, run details, or overlays. Auto-restore may load the remembered workflow only when the current editor has no selected workflow, no canvas nodes, and no active running workflow.
+- Run history canvas view is read-only: reconstruct display nodes/edges from the current workflow config referenced by `record.target`, then derive `data.run`/edge classes from the selected run detail. It must reuse workflow canvas conversion helpers and must not expose edit, connect, delete, run, or save handlers.
 - Canvas run overlay maps `record.steps[].id` to current node IDs when present; loop iteration IDs such as `loopID#1-targetID` are aggregate display details only and must not require matching canvas node IDs for every iteration target, because loop runtime/UI contracts may evolve independently of canvas node structure.
 - The inspector for a selected condition node must let users edit:
   - display name
@@ -374,6 +377,7 @@ Saved workflow draft must remain free of display-only fields:
 - If `connection.sourceHandle` identifies a condition case/default branch, the created edge must keep the same `data.case` and visible label behavior as normal condition edges.
 - Picker placement must be bounded by the workflow canvas container, not just by `window`, so it stays visible near canvas edges.
 - Tool nodes may show compact always-visible source and parameter readiness, but detailed tool IDs should stay hover/focus/selection-level secondary text.
+- Control-node metadata and condition operators must come from a shared frontend source such as `web/src/workflow/catalog.js`. Do not redefine the control-node catalog, control-node titles/help text, or condition operator allowlist inside `WorkflowEditor`, `picker`, `inspectors`, or `model`; duplicated constants drift quickly when special nodes such as upload or extract-config change wording or validation.
 
 ### 4. Validation & Error Matrix
 

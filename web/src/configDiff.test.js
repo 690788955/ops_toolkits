@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest'
-import {buildTextDiff} from './configDiff.js'
+import {buildTextDiff, countTextMatches, replaceTextDraft} from './configDiff.js'
 
 describe('config diff', () => {
   it('summarizes added, removed, and unchanged lines', () => {
@@ -15,5 +15,17 @@ describe('config diff', () => {
 
     expect(diff.changed).toBe(false)
     expect(diff.stats).toEqual({added: 0, removed: 0, unchanged: 2})
+  })
+
+  it('counts matches and replaces the first or all occurrences', () => {
+    expect(countTextMatches('host=1\nhost=2\n', 'host')).toBe(2)
+    expect(replaceTextDraft('host=1\nhost=2\n', 'host', 'node', 'first')).toEqual({
+      content: 'node=1\nhost=2\n',
+      replacements: 1
+    })
+    expect(replaceTextDraft('host=1\nhost=2\n', 'host', 'node', 'all')).toEqual({
+      content: 'node=1\nnode=2\n',
+      replacements: 2
+    })
   })
 })
