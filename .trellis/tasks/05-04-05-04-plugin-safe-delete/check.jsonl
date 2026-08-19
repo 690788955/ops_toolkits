@@ -1,5 +1,0 @@
-{"file":".trellis/spec/backend/index.md","reason":"Backend spec index for checking plugin management API and safety conventions."}
-{"file":".trellis/spec/backend/directory-structure.md","reason":"Check plugins.disabled semantics and runtime layout constraints."}
-{"file":".trellis/spec/backend/plugin-import-export.md","reason":"Check route precedence, catalog contract, and plugin filesystem safety boundaries."}
-{"file":".trellis/tasks/05-04-05-04-plugin-safe-delete/research/plugin-delete-safety.md","reason":"Check implementation against researched disable-before-delete conventions."}
-{"file":".trellis/spec/frontend/index.md","reason":"Frontend spec index for Web plugin manager review."}

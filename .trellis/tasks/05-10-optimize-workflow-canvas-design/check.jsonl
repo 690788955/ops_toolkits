@@ -1,4 +1,0 @@
-{"file":".trellis/tasks/05-10-optimize-workflow-canvas-design/prd.md","reason":"Quality check must verify the implementation matches confirmed requirements and acceptance criteria."}
-{"file":".trellis/tasks/05-10-optimize-workflow-canvas-design/research/canvas-ux-patterns.md","reason":"Quality check should verify implementation follows researched UX direction and avoids known anti-patterns."}
-{"file":".trellis/spec/frontend/workflow-editor-condition-controls.md","reason":"Quality check must verify compact card, node picker, modal, run overlay, auto-layout, and condition/control node contracts remain intact."}
-{"file":".trellis/spec/backend/workflow-conditional-nodes.md","reason":"Quality check must verify frontend changes do not break persisted workflow schema or condition/control/loop runtime assumptions."}

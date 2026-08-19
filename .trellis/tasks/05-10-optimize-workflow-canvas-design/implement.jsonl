@@ -1,4 +1,0 @@
-{"file":".trellis/tasks/05-10-optimize-workflow-canvas-design/prd.md","reason":"Confirmed MVP scope, technical approach, acceptance criteria, and implementation plan for the canvas UX optimization."}
-{"file":".trellis/tasks/05-10-optimize-workflow-canvas-design/research/canvas-ux-patterns.md","reason":"Research comparing ProductFlow-style card canvas, XyFlow, n8n, and Node-RED patterns; identifies what to borrow and what to avoid."}
-{"file":".trellis/spec/frontend/workflow-editor-condition-controls.md","reason":"Frontend workflow editor contracts for compact node cards, palette/node picker behavior, modal editing, run overlays, auto-layout, and condition/control nodes."}
-{"file":".trellis/spec/backend/workflow-conditional-nodes.md","reason":"Backend workflow schema/runtime constraints that frontend canvas changes must preserve for condition/control/loop nodes and edge cases."}

@@ -1,5 +1,0 @@
-{"file":".trellis/tasks/05-07-config-files-absolute-path/prd.md","reason":"确认 host config_files 目录白名单、mapping 绝对路径和权限检查需求。"}
-{"file":".trellis/tasks/05-07-config-files-absolute-path/research/absolute-path-config-mapping.md","reason":"宿主绝对路径配置文件映射的安全控制、API/UI 设计和测试矩阵研究。"}
-{"file":".trellis/spec/backend/plugin-import-export.md","reason":"插件导入导出、安全边界、host 文件不得进入插件包导出的契约。"}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"后端质量门禁、插件上传/配置文件相关测试要求和插件优先运行时约束。"}
-{"file":".trellis/spec/guides/cross-platform-runtime-thinking-guide.md","reason":"Windows/POSIX 绝对路径语义和运行时路径边界注意事项。"}

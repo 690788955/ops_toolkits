@@ -1,3 +1,0 @@
-{"path": ".trellis/spec/backend/cli-interaction-patterns.md", "why": "了解 CLI 交互模式和输出格式的现有规范"}
-{"path": "web/src/main.jsx", "why": "需要修改 LogBlock 组件，添加格式切换功能"}
-{"path": "web/src/styles.css", "why": "使用现有的 .tab 和 .tab.active 样式"}

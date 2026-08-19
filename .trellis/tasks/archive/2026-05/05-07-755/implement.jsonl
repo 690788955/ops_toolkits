@@ -1,3 +1,0 @@
-{"file":".trellis/tasks/05-07-755/prd.md","reason":"确认上传插件默认递归 0755 的目标、范围、验收标准和不改动项。"}
-{"file":".trellis/spec/backend/plugin-import-export.md","reason":"插件上传导入导出 API、安全边界、ZIP 结构和路由契约必须保持一致。"}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"后端质量门禁、插件上传测试要求和插件优先运行时约束。"}

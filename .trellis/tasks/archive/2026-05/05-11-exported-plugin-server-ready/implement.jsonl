@@ -1,7 +1,0 @@
-{"file":".trellis/spec/backend/plugin-import-export.md","reason":"插件导入导出 ZIP 契约、安全边界、路由优先级、host absolute 文件不得进入导出包。"}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Go 构建、验证命令、当前运行结构和避免 legacy 根目录假设。"}
-{"file":".trellis/spec/backend/directory-structure.md","reason":"后端目录职责和新增打包/HTTP 逻辑应放置的位置。"}
-{"file":".trellis/spec/guides/cross-platform-runtime-thinking-guide.md","reason":"多平台 opsctl 二进制、路径和运行验证的跨平台约束。"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"后端导出 API、Web 下载入口和测试需要跨层一致。"}
-{"file":".trellis/spec/frontend/component-guidelines.md","reason":"Web 插件管理下拉按钮 UI 组件修改规范。"}
-{"file":".trellis/spec/frontend/quality-guidelines.md","reason":"前端构建和交互质量检查。"}

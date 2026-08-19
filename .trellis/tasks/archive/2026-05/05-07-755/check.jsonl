@@ -1,3 +1,0 @@
-{"file":".trellis/tasks/05-07-755/prd.md","reason":"检查实现是否满足上传插件默认递归 0755 的验收标准。"}
-{"file":".trellis/spec/backend/plugin-import-export.md","reason":"检查插件上传安全边界、ZIP 结构和 API 行为未回归。"}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行项目要求的测试和质量门禁。"}

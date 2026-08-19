@@ -1,2 +1,0 @@
-{"path":".trellis/spec/frontend/component-guidelines.md","why":"确认前端组件修改的约束；当前任务只恢复 LogBlock 为简单展示组件"}
-{"path":".trellis/spec/frontend/quality-guidelines.md","why":"确认前端质量检查要求；当前任务需构建并浏览器验证"}

@@ -1,2 +1,0 @@
-{"file":".trellis/spec/frontend/index.md","reason":"Frontend spec index for workflow editor UI conventions and relevant guideline discovery."}
-{"file":".trellis/spec/frontend/workflow-editor-condition-controls.md","reason":"Contracts for condition control cards, condition canvas nodes, branch labels, and readable node parameter editors."}

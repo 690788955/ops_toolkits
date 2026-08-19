@@ -1,4 +1,0 @@
-{"file":".trellis/tasks/05-07-config-files-absolute-path/prd.md","reason":"检查实现是否满足目录白名单、权限状态和映射访问验收标准。"}
-{"file":".trellis/tasks/05-07-config-files-absolute-path/research/absolute-path-config-mapping.md","reason":"检查安全控制和测试矩阵是否覆盖宿主绝对路径风险。"}
-{"file":".trellis/spec/backend/plugin-import-export.md","reason":"检查插件包边界、导出安全和 API 合同未回归。"}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"执行项目要求的质量门禁。"}

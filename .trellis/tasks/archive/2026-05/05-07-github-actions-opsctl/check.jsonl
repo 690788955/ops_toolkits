@@ -1,2 +1,0 @@
-{"file":".trellis/spec/guides/cross-platform-runtime-thinking-guide.md","reason":"质量检查需确认产物结构不回退到 legacy root opsctl/tools/workflows 假设，并覆盖 Windows/Linux/macOS 架构差异。"}
-{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"质量检查需确认未创建重复 CI 流程，且现有 Web/Go 构建步骤被合理复用。"}

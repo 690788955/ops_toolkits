@@ -1,2 +1,0 @@
-{"file":".trellis/spec/frontend/index.md","reason":"Frontend spec index for checking applicable UI guidelines."}
-{"file":".trellis/spec/frontend/workflow-editor-condition-controls.md","reason":"Quality checks must verify condition node contracts, edge case round-trip, disabled planned cards, and readable parameter editor layout."}
