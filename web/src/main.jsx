@@ -5,6 +5,7 @@ import './styles.css'
 import * as yaml from 'js-yaml'
 import {deleteJSON, fetchJSON, fetchRunDetail, postJSON, postPluginZip, putJSON} from './api.js'
 import {buildTextDiff, countTextMatches, replaceTextDraft} from './configDiff.js'
+import {buildConfigItemCollections} from './configItems.js'
 import {filterEntries, readableAPIError, summarizeAPIResponse, tagsForEntries} from './utils.js'
 import FileUploadInput from './FileUploadInput.jsx'
 import {normalizeLogFontSize} from './logUtils.js'
@@ -89,6 +90,16 @@ function App() {
     return filterEntries(toolEntries, searchText, activeTag)
   }, [toolEntries, searchText, activeTag])
 
+  const workflowCount = useMemo(() => {
+    const workflows = catalog?.workflows || []
+    return activeCategory ? workflows.filter(item => item.category === activeCategory).length : workflows.length
+  }, [catalog, activeCategory])
+
+  const configCount = useMemo(() => {
+    const {toolConfigItems, workflowConfigItems} = buildConfigItemCollections(catalog, activeCategory)
+    return toolConfigItems.length + workflowConfigItems.length
+  }, [catalog, activeCategory])
+
   function resetResult() {
     runVersionRef.current += 1
     setResultExpanded(false)
@@ -107,6 +118,13 @@ function App() {
 
   async function runSelected() {
     if (!selected) return
+    const missingRequired = (selected.parameters || [])
+      .filter(param => param.required && !hasConfiguredParamValue(params?.[param.name]))
+      .map(param => param.description || param.name)
+    if (missingRequired.length > 0) {
+      setResult({message: `请先填写必填参数：${missingRequired.join('、')}`})
+      return
+    }
     const needsConfirm = selected.confirm?.required
     if (needsConfirm && !window.confirm(selected.confirm.message || '该操作需要确认，是否继续？')) return
     runVersionRef.current += 1
@@ -115,8 +133,9 @@ function App() {
     try {
       const body = await postJSON(`/api/tools/${selected.id}/run?async=true`, {params, confirm: Boolean(needsConfirm)})
       if (body.id) {
-        setResult({run: body, message: '执行中...'})
-        pollToolRunDetail(body, runVersion)
+        const running = {...body, status: body.status || 'running'}
+        setResult({run: running, message: '执行中...'})
+        pollToolRunDetail(running, runVersion)
         return
       }
       setResult({message: summarizeAPIResponse(body, '执行请求已提交。'), response: body})
@@ -201,7 +220,10 @@ function App() {
             )
           })}
         </div>
-        <button className="pluginAction" onClick={() => setPluginModalOpen(true)} title="插件管理">+</button>
+        <button className="pluginAction" onClick={() => setPluginModalOpen(true)} title="插件管理">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z" /></svg>
+          <span>插件管理</span>
+        </button>
       </aside>
 
       <main className="content">
@@ -217,11 +239,15 @@ function App() {
         </header>
 
         <div className="tabs">
-          <button className={activeTab === 'tools' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('tools'); setSelected(null); setActiveTag(''); resetResult() }}>工具</button>
-          <button className={activeTab === 'workflows' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('workflows'); setSelected(null); setActiveTag(''); resetResult() }}>工作流</button>
-          {hasConfigTab && <button className={activeTab === 'config' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('config'); setSelected(null); setActiveTag(''); setConfigSelectedPlugin(null); setConfigSelectedWorkflow(null); resetResult() }}>配置</button>}
+          <button className={activeTab === 'tools' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('tools'); setSelected(null); setActiveTag(''); resetResult() }}>工具 <span className="tabCount">{toolEntries.length}</span></button>
+          <button className={activeTab === 'workflows' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('workflows'); setSelected(null); setActiveTag(''); resetResult() }}>工作流 <span className="tabCount">{workflowCount}</span></button>
+          {hasConfigTab && <button className={activeTab === 'config' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('config'); setSelected(null); setActiveTag(''); setConfigSelectedPlugin(null); setConfigSelectedWorkflow(null); resetResult() }}>配置 <span className="tabCount">{configCount}</span></button>}
           <button className={activeTab === 'runs' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('runs'); setSelected(null); setActiveTag(''); resetResult() }}>运行记录</button>
         </div>
+
+        {activeTab === 'tools' && !selected && (
+          <GettingStartedCard toolCount={toolEntries.length} />
+        )}
 
         {workflowEditorMounted && (
           <div className={activeTab === 'workflows' ? 'tabPanel active' : 'tabPanel inactive'} aria-hidden={activeTab !== 'workflows'}>
@@ -255,7 +281,7 @@ function App() {
             refreshCatalog={refreshCatalog}
           />
         ) : activeTab !== 'workflows' ? (
-          <RunPanel entries={entries} totalEntries={toolEntries.length} selected={selected} params={params} setParams={setParams} selectEntry={selectEntry} runSelected={runSelected} searchText={searchText} setSearchText={setSearchText} activeTag={activeTag} setActiveTag={setActiveTag} availableTags={availableTags} />
+          <RunPanel entries={entries} totalEntries={toolEntries.length} selected={selected} params={params} setParams={setParams} selectEntry={selectEntry} runSelected={runSelected} searchText={searchText} setSearchText={setSearchText} activeTag={activeTag} setActiveTag={setActiveTag} availableTags={availableTags} isRunning={result?.run?.status === 'running'} />
         ) : null}
 
         {activeTab === 'tools' && (
@@ -316,6 +342,22 @@ function App() {
         />
       )}
     </div>
+  )
+}
+
+function GettingStartedCard({toolCount}) {
+  return (
+    <section className="gettingStarted" aria-labelledby="getting-started-title">
+      <div className="gettingStartedCopy">
+        <h3 id="getting-started-title">从一个安全的工具执行开始</h3>
+        <p>先选择工具并填写参数，执行结果和实时日志会显示在下方。熟悉单个工具后，再用工作流把多个步骤串起来。</p>
+      </div>
+      <div className="gettingStartedSteps">
+        <div className="gettingStartedStep"><strong>1</strong><span><b>选择工具</b><small>{toolCount} 个可用工具</small></span></div>
+        <div className="gettingStartedStep"><strong>2</strong><span><b>填写参数</b><small>必填项会在执行前校验</small></span></div>
+        <div className="gettingStartedStep"><strong>3</strong><span><b>查看结果</b><small>支持日志、状态和支持包</small></span></div>
+      </div>
+    </section>
   )
 }
 
@@ -541,8 +583,7 @@ function formatRunTime(value) {
 
 function ConfigPanel({catalog, activeCategory, configSelectedPlugin, setConfigSelectedPlugin, configSelectedWorkflow, setConfigSelectedWorkflow, refreshCatalog}) {
   const [configView, setConfigView] = useState('tools')
-  const toolConfigItems = useMemo(() => buildToolConfigItems(catalog, activeCategory), [catalog, activeCategory])
-  const workflowConfigItems = useMemo(() => buildWorkflowConfigItems(catalog, activeCategory), [catalog, activeCategory])
+  const {toolConfigItems, workflowConfigItems} = useMemo(() => buildConfigItemCollections(catalog, activeCategory), [catalog, activeCategory])
 
   if (configSelectedPlugin) {
     return (
@@ -593,116 +634,6 @@ function ConfigPanel({catalog, activeCategory, configSelectedPlugin, setConfigSe
     </div>
   )
 }
-
-function buildToolConfigItems(catalog, activeCategory) {
-  const items = []
-
-  const plugins = catalog?.plugins || []
-  const tools = catalog?.tools || []
-  const workflows = catalog?.workflows || []
-
-  plugins.forEach(plugin => {
-    const configFiles = []
-    const seenFiles = new Set()
-    tools.forEach(tool => {
-      if (tool.source?.plugin_id !== plugin.id) {
-        return
-      }
-      ;(tool.config_file_entries || tool.config_files || []).forEach(file => {
-        const key = typeof file === 'string' ? file : (file.id || file.path)
-        if (key && !seenFiles.has(key)) {
-          seenFiles.add(key)
-          configFiles.push(normalizeConfigFileItem(file, plugin.id))
-        }
-      })
-    })
-
-    if (configFiles.length === 0) {
-      return
-    }
-
-    const relatedCategories = new Set()
-    tools.forEach(tool => {
-      if (tool.source?.plugin_id === plugin.id && tool.category) {
-        relatedCategories.add(tool.category)
-      }
-    })
-    workflows.forEach(wf => {
-      if (wf.source?.plugin_id === plugin.id && wf.category) {
-        relatedCategories.add(wf.category)
-      }
-    })
-
-    if (activeCategory && !relatedCategories.has(activeCategory)) {
-      return
-    }
-
-    configFiles.sort((a, b) => `${a.path || ''}${a.label || ''}`.localeCompare(`${b.path || ''}${b.label || ''}`))
-
-    items.push({
-      type: 'plugin',
-      id: plugin.id,
-      name: plugin.name || plugin.id,
-      typeLabel: '插件',
-      description: plugin.description || `插件 ${plugin.id} 声明的配置文件`,
-      files: configFiles,
-      disabled: plugin.disabled,
-      version: plugin.version,
-      relatedCategories: Array.from(relatedCategories)
-    })
-  })
-
-  return items
-}
-
-function buildWorkflowConfigItems(catalog, activeCategory) {
-  return (catalog?.workflows || [])
-    .filter(workflow => !activeCategory || workflow.category === activeCategory)
-    .map(workflow => {
-      const files = (workflow.config_files || []).map(normalizeWorkflowConfigListItem)
-      return {
-        type: 'workflow',
-        id: workflow.id,
-        name: workflow.name || workflow.id,
-        typeLabel: '工作流',
-        description: workflow.description || `工作流 ${workflow.id} 的真实挂载路径配置文件`,
-        files,
-        category: workflow.category,
-        source: workflow.source
-      }
-    })
-    .sort((left, right) => String(left.name || left.id).localeCompare(String(right.name || right.id), 'zh-CN'))
-}
-
-
-function normalizeConfigFileItem(file, pluginID) {
-  if (typeof file === 'string') {
-    return {path: `plugins/${pluginID}/${file}`, label: '配置文件'}
-  }
-  const scope = file.scope || 'plugin'
-  const configDir = file.config_dir || (scope === 'plugin' ? 'config' : '')
-  const itemPath = file.path || file.id
-  const displayPath = scope === 'host_absolute' ? [configDir, itemPath].filter(Boolean).join('/') : `plugins/${pluginID}/${[configDir, itemPath].filter(Boolean).join('/')}`
-  const accessLabel = file.access === 'read_write' ? '可读写' : '只读'
-  return {
-    path: displayPath,
-    label: file.label || (scope === 'host_absolute' ? `宿主配置文件（${accessLabel}）` : '配置文件')
-  }
-}
-
-function normalizeWorkflowConfigListItem(file) {
-  if (typeof file === 'string') {
-    return {path: file, label: '配置文件'}
-  }
-  const path = file.path || file.id || ''
-  const configDir = file.display_root || file.displayRoot || file.config_dir || file.configDir || ''
-  const displayPath = file.display_path || file.displayPath || [configDir, path].filter(Boolean).join('/') || path
-  return {
-    path: displayPath,
-    label: file.label || '配置文件'
-  }
-}
-
 
 function ConfigItemsList({items, onSelect, emptyText = '当前没有可配置项。'}) {
   return (
@@ -2164,7 +2095,7 @@ function TagList({tags}) {
   )
 }
 
-function RunPanel({entries, totalEntries, selected, params, setParams, selectEntry, runSelected, searchText, setSearchText, activeTag, setActiveTag, availableTags}) {
+function RunPanel({entries, totalEntries, selected, params, setParams, selectEntry, runSelected, searchText, setSearchText, activeTag, setActiveTag, availableTags, isRunning = false}) {
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
   const paginationEnabled = true
@@ -2247,19 +2178,19 @@ function RunPanel({entries, totalEntries, selected, params, setParams, selectEnt
             </div>
             <div className="form">
               {(selected.parameters || []).map(param => (
-                <label key={param.name}>
+                <label key={param.name} className={param.required && !hasConfiguredParamValue(params[param.name]) ? 'requiredField' : ''}>
                   <span>{param.description || param.name}{param.required ? ' *' : ''}</span>
                   {param.type === 'bool' ? (
                     <input type="checkbox" checked={parseBoolParamValue(params[param.name])} onChange={event => setParams({...params, [param.name]: event.target.checked})} />
                   ) : param.type === 'file' ? (
                     <FileUploadInput value={params[param.name] || ''} onChange={value => setParams({...params, [param.name]: value})} />
                   ) : (
-                    <input value={params[param.name] || ''} placeholder={param.name} onChange={event => setParams({...params, [param.name]: event.target.value})} />
+                    <input aria-required={param.required || undefined} value={params[param.name] || ''} placeholder={param.name} onChange={event => setParams({...params, [param.name]: event.target.value})} />
                   )}
                 </label>
               ))}
               {(selected.parameters || []).length === 0 && <div className="empty small">无需参数。</div>}
-              <button className="primary" onClick={runSelected}>开始执行</button>
+              <button className="primary" disabled={isRunning || (selected.parameters || []).some(param => param.required && !hasConfiguredParamValue(params[param.name]))} onClick={runSelected}>{isRunning ? '执行中...' : '开始执行'}</button>
             </div>
           </>
         )}
@@ -2275,4 +2206,11 @@ if (rootElement) {
 
 function parseBoolParamValue(value) {
   return value === true || value === 'true' || value === '1' || value === 'yes' || value === 'on'
+}
+
+function hasConfiguredParamValue(value) {
+  if (value === undefined || value === null) return false
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value === 'object') return Object.keys(value).length > 0
+  return String(value).trim() !== ''
 }

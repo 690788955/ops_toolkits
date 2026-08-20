@@ -25,6 +25,8 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }, [catalog, sidebarScopedCategory])
   const [selectedWorkflowID, setSelectedWorkflowID] = useState('')
   const [canvasMode, setCanvasMode] = useState('execute')
+  const [workflowAction, setWorkflowAction] = useState('')
+  const [savedDraftSignature, setSavedDraftSignature] = useState(() => workflowDraftSignature(emptyWorkflow(activeCategory), [], [], activeCategory, '[]'))
   const [executeDetailView, setExecuteDetailView] = useState('canvas')
   const [selectedNodeID, setSelectedNodeID] = useState('')
   const [selectedEdgeID, setSelectedEdgeID] = useState('')
@@ -131,6 +133,11 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     activeRunID
   ), [nodes, canvasRunState, catalog.tools, isEditingCanvas, isActiveRunRunning, activeRunID, rerunWorkflowNode])
   const displayEdges = useMemo(() => buildDisplayEdges(edges, displayNodes, canvasRunState), [edges, displayNodes, canvasRunState])
+  const currentDraftSignature = useMemo(
+    () => workflowDraftSignature(workflow, nodes, edges, activeCategory, workflowParamsText),
+    [workflow, nodes, edges, activeCategory, workflowParamsText]
+  )
+  const hasUnsavedChanges = currentDraftSignature !== savedDraftSignature
 
   useEffect(() => {
     if (selectedWorkflowID || nodes.length > 0 || isActiveRunRunning) return
@@ -142,6 +149,16 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     }
     loadWorkflow(rememberedID, {silent: true})
   }, [selectedWorkflowID, nodes.length, isActiveRunRunning, sidebarScopedCategory, workflowOptions])
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) return undefined
+    function warnBeforeLeave(event) {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', warnBeforeLeave)
+    return () => window.removeEventListener('beforeunload', warnBeforeLeave)
+  }, [hasUnsavedChanges])
 
   useEffect(() => {
     if (!selectedEdge) {
@@ -277,10 +294,12 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
 
   async function loadWorkflow(id, options = {}) {
     if (!id) return
+    if (!options.silent && id !== selectedWorkflowID && !confirmDiscardDraft()) return
     clearCanvasRunOverlay()
+    setWorkflowAction('loading')
     if (!options.silent) setResult({message: '加载工作流...'})
     try {
-      const body = await fetchJSON(`/api/workflows/${id}`)
+      const body = await fetchJSON(`/api/workflows/${encodeURIComponent(id)}`)
       const config = body.data.Config || body.data.config
       setWorkflow(config)
       setWorkflowParamsText(JSON.stringify(config.parameters || [], null, 2))
@@ -292,8 +311,10 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
         .filter(node => !legacyTargets.has(node.id))
         .map((node, index) => workflowNodeToFlowNode(node, index, removeNode, workflowNodes))
       const flowEdges = remapLegacyLoopEdges(config.edges || [], legacyTargetMap).map((edge, index) => flowEdgeFromWorkflowEdge(edge, index, flowNodes))
-      setNodes(workflowModel.autoLayoutNodes(flowNodes, flowEdges))
+      const layoutNodes = workflowModel.autoLayoutNodes(flowNodes, flowEdges)
+      setNodes(layoutNodes)
       setEdges(flowEdges)
+      setSavedDraftSignature(workflowDraftSignature(config, layoutNodes, flowEdges, activeCategory, JSON.stringify(config.parameters || [])))
       setSelectedWorkflowID(id)
       setSelectedNodeID('')
       setSelectedEdgeID('')
@@ -305,11 +326,14 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       rememberWorkflowID(sidebarScopedCategory, id)
       if (!options.silent) setResult({message: `已加载工作流 ${id}`})
     } catch (err) {
-      if (!options.silent) setResult({message: String(err)})
+      if (!options.silent) setResult({message: readableAPIError(err, '加载工作流失败。'), response: err.body})
+    } finally {
+      setWorkflowAction('')
     }
   }
 
   function createWorkflow() {
+    if (!confirmDiscardDraft()) return
     clearCanvasRunOverlay()
     const next = emptyWorkflow(activeCategory)
     setCanvasMode('edit')
@@ -323,8 +347,15 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     setSelectedEdgeID('')
     setNodeConfigModalOpen(false)
     setEdgeConfigModalOpen(false)
+    setEditorValidation(null)
+    setSavedDraftSignature(workflowDraftSignature(next, [], [], activeCategory, '[]'))
     closeNodePicker()
     setResult({message: '已创建空白工作流草稿'})
+  }
+
+  function confirmDiscardDraft() {
+    if (!hasUnsavedChanges) return true
+    return window.confirm('当前工作流有未保存的修改。继续后这些修改会丢失，是否继续？')
   }
 
   function resetRunParamsToDefaults() {
@@ -863,12 +894,15 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       return
     }
     try {
+      setWorkflowAction('validating')
       setEditorValidation(null)
       setWorkflow(check.draft)
       const body = await postJSON(`/api/workflows/${check.draft.id || 'draft'}/validate`, {workflow: check.draft})
       setResult({message: summarizeAPIResponse(body, '工作流校验通过。'), response: body})
     } catch (err) {
       setResult({message: readableAPIError(err, '工作流校验失败。'), response: err.body})
+    } finally {
+      setWorkflowAction('')
     }
   }
 
@@ -882,15 +916,19 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     const edgeCount = check.draft.edges?.length || 0
     if (!window.confirm(`确认保存工作流「${check.draft.name || check.draft.id}」？\n\n节点：${nodeCount}\n依赖：${edgeCount}\n保存后会覆盖当前工作流配置。`)) return
     try {
+      setWorkflowAction('saving')
       setEditorValidation(null)
       setWorkflow(check.draft)
       const body = await postJSON(`/api/workflows/${check.draft.id}/save`, {workflow: check.draft})
       setSelectedWorkflowID(check.draft.id)
+      setSavedDraftSignature(workflowDraftSignature(check.draft, nodes, edges, activeCategory, workflowParamsText))
       rememberWorkflowID(sidebarScopedCategory, check.draft.id)
       await refreshCatalog({keepCategory: true})
       setResult({message: summarizeAPIResponse(body, '工作流保存成功。'), response: body})
     } catch (err) {
       setResult({message: readableAPIError(err, '工作流保存失败。'), response: err.body})
+    } finally {
+      setWorkflowAction('')
     }
   }
 
@@ -900,6 +938,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     const label = workflow.name || id
     if (!window.confirm(`确认删除工作流「${label}」？\n\n该操作会删除 Web 页面保存的工作流配置，且不可撤销。`)) return
     try {
+      setWorkflowAction('deleting')
       const body = await deleteJSON(`/api/workflows/${encodeURIComponent(id)}`)
       clearCanvasRunOverlay()
       const next = emptyWorkflow(activeCategory)
@@ -916,12 +955,15 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       setNodeConfigModalOpen(false)
       setEdgeConfigModalOpen(false)
       setEditorValidation(null)
+      setSavedDraftSignature(workflowDraftSignature(next, [], [], activeCategory, '[]'))
       setUploadNodeFiles({})
       closeNodePicker()
       await refreshCatalog({keepCategory: true})
       setResult({message: summarizeAPIResponse(body, '工作流已删除。'), response: body})
     } catch (err) {
       setResult({message: readableAPIError(err, '工作流删除失败。'), response: err.body})
+    } finally {
+      setWorkflowAction('')
     }
   }
 
@@ -1074,20 +1116,49 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   }
 
   const quickToolOptions = toolOptions.slice(0, 4)
+  const draftCheck = preflightWorkflowDraft(isEditingCanvas ? 'save' : 'run')
+  const draftStatus = draftCheck.errors.length > 0
+    ? {kind: 'warning', title: `${draftCheck.errors.length} 项待完善`, detail: draftCheck.errors[0]}
+    : hasUnsavedChanges
+      ? {kind: 'changed', title: '有未保存修改', detail: '结构检查已通过，保存后可供其他用户加载。'}
+      : {kind: 'ready', title: selectedWorkflowID ? '工作流已保存' : '草稿已就绪', detail: '结构检查已通过，可以保存或进入执行模式。'}
   const modeSwitch = (
     <div className="workflowModeSwitch" role="group" aria-label="工作流画布模式">
-      <button className={isEditingCanvas ? 'primary' : 'secondary'} type="button" onClick={() => setCanvasMode('edit')}>编辑模式</button>
+      <button className={isEditingCanvas ? 'primary' : 'secondary'} type="button" onClick={() => setCanvasMode('edit')} disabled={isActiveRunRunning} title={isActiveRunRunning ? '运行期间不能修改工作流' : undefined}>编辑模式</button>
       <button className={!isEditingCanvas ? 'primary' : 'secondary'} type="button" onClick={enterExecuteMode}>执行模式</button>
     </div>
   )
   const workflowLoader = (
-    <label>
-      <span>加载已有工作流</span>
-      <select value={selectedWorkflowID} onChange={event => loadWorkflow(event.target.value)}>
-        <option value="">选择工作流...</option>
-        {workflowOptions.map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
-      </select>
-    </label>
+    <section className="workflowSelection" aria-labelledby="workflow-selection-title">
+      <div className="workflowSelectionHeader">
+        <div>
+          <strong id="workflow-selection-title">打开已有工作流</strong>
+          <span>{workflowOptions.length > 0 ? `当前分类可加载 ${workflowOptions.length} 个` : '当前分类还没有已保存工作流'}</span>
+        </div>
+        <span className={selectedWorkflowID ? 'workflowSelectionState active' : 'workflowSelectionState'}>
+          {selectedWorkflowID ? '已加载' : '未选择'}
+        </span>
+      </div>
+      <label className="workflowSelectionField">
+        <span>选择要加载的工作流</span>
+        <select
+          aria-label="选择要加载的工作流"
+          value={selectedWorkflowID}
+          disabled={Boolean(workflowAction) || isActiveRunRunning || workflowOptions.length === 0}
+          onChange={event => loadWorkflow(event.target.value)}
+        >
+          <option value="">
+            {workflowAction === 'loading'
+              ? '正在加载...'
+              : workflowOptions.length > 0 ? '请选择一个工作流' : '当前分类暂无可加载工作流'}
+          </option>
+          {workflowOptions.map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
+        </select>
+      </label>
+      <small className="workflowSelectionHint">
+        {selectedWorkflowID ? '已加载到当前画布，可继续编辑或执行。' : '没有合适的工作流？点击下方“新建”开始。'}
+      </small>
+    </section>
   )
   const addControlNodeGrid = (
     <div className="canvasHoverToolbarGrid">
@@ -1154,11 +1225,15 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
       {editorValidation?.errors?.length > 0 && <ValidationSummary status={editorValidation} />}
       <div className="form compact">
         {workflowLoader}
+        <div className={`workflowDraftStatus ${draftStatus.kind}`} role="status" aria-live="polite">
+          <strong>{draftStatus.title}</strong>
+          <span>{draftStatus.detail}</span>
+        </div>
         <div className="buttonRow">
-          <button className="secondary" type="button" onClick={createWorkflow}>新建</button>
-          <button className="secondary" type="button" onClick={validateDraft}>校验</button>
-          <button className="primary" type="button" onClick={saveDraft}>保存</button>
-          <button className="secondary danger" type="button" onClick={deleteWorkflow} disabled={!canDeleteWorkflow}>删除工作流</button>
+          <button className="secondary" type="button" onClick={createWorkflow} disabled={Boolean(workflowAction)}>新建</button>
+          <button className="secondary" type="button" onClick={validateDraft} disabled={Boolean(workflowAction)}>{workflowAction === 'validating' ? '校验中...' : '校验'}</button>
+          <button className="primary" type="button" onClick={saveDraft} disabled={Boolean(workflowAction)}>{workflowAction === 'saving' ? '保存中...' : '保存'}</button>
+          <button className="secondary danger" type="button" onClick={deleteWorkflow} disabled={!canDeleteWorkflow || Boolean(workflowAction)}>删除工作流</button>
         </div>
         <div className="buttonRow">
           <button className="secondary danger" type="button" onClick={removeSelectedNode} disabled={!selectedNode}>删除节点</button>
@@ -1214,7 +1289,12 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
         <div className={isActiveRunRunning ? 'workflowSidebarStatus running' : 'workflowSidebarStatus'} title={activeRunID ? `运行 ID：${activeRunID}` : '执行后可在这里取消当前画布发起的运行任务。'}>
           <strong>{isActiveRunRunning ? '运行中' : activeRunID ? runStatusLabel(activeRunStatus) : '未运行'}</strong>
         </div>
-        {isActiveRunRunning ? (
+        {nodes.length === 0 ? (
+          <div className="workflowEmptyStart">
+            <span>先创建工作流并添加至少一个节点，之后即可在此执行。</span>
+            <button className="primary" type="button" onClick={createWorkflow}>新建工作流</button>
+          </div>
+        ) : isActiveRunRunning ? (
           <button className="secondary danger" type="button" onClick={cancelActiveRun} disabled={cancellingRunID === activeRunID} aria-label="取消当前工作流运行">
             {cancellingRunID === activeRunID ? '取消中' : '取消运行'}
           </button>
@@ -2814,4 +2894,15 @@ function uniqueNodeID(toolID, nodes) {
     id = `${base}_${index}`
   }
   return id
+}
+
+function workflowDraftSignature(workflow, nodes, edges, activeCategory, workflowParamsText) {
+  let parameters = []
+  try {
+    const parsed = JSON.parse(workflowParamsText || '[]')
+    if (Array.isArray(parsed)) parameters = parsed
+  } catch {
+    return JSON.stringify({workflow, nodes: (nodes || []).map(node => ({id: node.id, type: node.type, data: node.data})), edges, workflowParamsText})
+  }
+  return JSON.stringify(workflowModel.buildWorkflowDraft(workflow, nodes, edges, activeCategory, parameters))
 }

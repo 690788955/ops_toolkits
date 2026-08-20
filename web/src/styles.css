@@ -39,6 +39,10 @@
 body { margin: 0; background: var(--color-bg); }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
+button:focus-visible, a:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
+  outline: 3px solid rgba(37,71,208,.32);
+  outline-offset: 2px;
+}
 
 .loading {
   display: grid;
@@ -107,19 +111,23 @@ button { cursor: pointer; }
 .categoryList { display: grid; gap: 8px; }
 
 .pluginAction {
-  display: grid;
+  display: flex;
   width: 100%;
   height: 42px;
   margin-top: 12px;
-  place-items: center;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   border: 1px dashed var(--color-muted);
   border-radius: var(--radius-control);
   color: var(--color-text);
   background: var(--color-surface);
-  font-size: 22px;
+  font-size: 13px;
   font-weight: 900;
   transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
 }
+
+.pluginAction svg { width: 17px; height: 17px; fill: currentColor; }
 
 .pluginAction:hover { transform: translateY(-1px); border-color: var(--color-black); box-shadow: var(--shadow-whisper); }
 
@@ -223,6 +231,54 @@ button { cursor: pointer; }
   font-weight: 800;
   transition: background .15s ease, color .15s ease, box-shadow .15s ease, transform .15s ease;
 }
+.tabCount {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  margin-left: 5px;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--color-muted);
+  background: var(--color-panel);
+  font-size: 11px;
+  line-height: 1;
+}
+.tab.active .tabCount { color: var(--color-black); background: var(--color-surface); }
+
+.gettingStarted {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(420px, 1.5fr);
+  gap: 22px;
+  align-items: center;
+  margin-bottom: 20px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  padding: 20px 22px;
+  background: var(--color-surface);
+}
+.gettingStartedCopy { min-width: 0; }
+.gettingStarted h3 { margin: 0; color: var(--color-black); font-size: 20px; font-weight: 900; line-height: 1.2; }
+.gettingStarted p { max-width: 54ch; margin: 8px 0 0; color: var(--color-muted); font-size: 13px; line-height: 1.5; }
+.gettingStartedSteps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.gettingStartedStep { display: flex; gap: 9px; align-items: flex-start; min-width: 0; }
+.gettingStartedStep > strong {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--color-surface);
+  background: var(--color-black);
+  font-size: 12px;
+}
+.gettingStartedStep span { display: grid; gap: 3px; min-width: 0; }
+.gettingStartedStep b { color: var(--color-text); font-size: 13px; }
+.gettingStartedStep small { color: var(--color-muted); font-size: 11px; line-height: 1.35; }
+
+.requiredField > span { color: var(--color-danger); font-weight: 900; }
+.requiredField input:not([type="checkbox"]) { border-color: rgba(180,35,24,.48); background: var(--color-danger-bg); }
+.requiredField input:not([type="checkbox"]):focus { border-color: var(--color-danger); box-shadow: 0 0 0 3px rgba(180,35,24,.12); }
 .tab:hover, .paletteTab:hover { box-shadow: var(--shadow-whisper); }
 .tab.active, .tagChip.active, .paletteTab.active { color: var(--color-surface); background: var(--color-black); border-color: var(--color-black); }
 
@@ -2688,6 +2744,7 @@ fieldset legend {
   .pluginInstalledHeader { grid-template-columns: 1fr; }
   .pluginExportItem { grid-template-columns: 1fr; }
   .pluginItemActions, .pluginExportLinks { justify-content: flex-start; }
+  .gettingStarted { grid-template-columns: 1fr; gap: 16px; }
 }
 
 @media (max-width: 640px) {
@@ -2697,6 +2754,8 @@ fieldset legend {
   .topbar h2 { font-size: 30px; }
   .buttonRow { flex-direction: column; }
   .pluginQuickActions { grid-template-columns: 1fr; }
+  .gettingStarted { padding: 16px; }
+  .gettingStartedSteps { grid-template-columns: 1fr; gap: 9px; }
   .runHistoryItem { grid-template-columns: 1fr; }
   .runCancelButton { grid-column: 1; justify-self: start; }
   .canvasDock {
@@ -3086,6 +3145,93 @@ fieldset legend {
   min-width: 0;
 }
 
+.workflowSelection {
+  display: grid;
+  gap: 11px;
+  border: 1px solid rgba(13,116,206,.28);
+  border-radius: 14px;
+  padding: 14px;
+  background: #f8fbff;
+}
+
+.workflowSelectionHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workflowSelectionHeader > div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.workflowSelectionHeader strong {
+  color: var(--color-black);
+  font-size: 15px;
+  font-weight: 900;
+}
+
+.workflowSelectionHeader > div > span {
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.workflowSelectionState {
+  flex: 0 0 auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  padding: 4px 8px;
+  color: var(--color-muted);
+  background: var(--color-surface);
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.workflowSelectionState.active {
+  border-color: var(--color-success-border);
+  color: var(--color-success);
+  background: var(--color-success-bg);
+}
+
+.workflowSelectionField {
+  display: grid;
+  gap: 6px;
+}
+
+.workflowSelectionField > span {
+  margin: 0 !important;
+  color: var(--color-text) !important;
+  font-size: 12px !important;
+  font-weight: 900 !important;
+}
+
+.workflowSelectionField select {
+  min-height: 46px;
+  border-color: rgba(13,116,206,.42);
+  color: var(--color-black);
+  font-size: 14px;
+  font-weight: 800;
+  background: var(--color-surface);
+}
+
+.workflowSelectionField select:disabled {
+  color: var(--color-muted);
+  background: var(--color-bg);
+  cursor: not-allowed;
+}
+
+.workflowSelectionHint {
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
 .workflowSidebarSection {
   display: grid;
   gap: 10px;
@@ -3143,6 +3289,27 @@ fieldset legend {
   font-weight: 700;
   line-height: 1.45;
 }
+
+.workflowDraftStatus,
+.workflowEmptyStart {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 11px 12px;
+  background: var(--color-panel);
+}
+.workflowDraftStatus strong { color: var(--color-black); font-size: 13px; font-weight: 900; }
+.workflowDraftStatus span { color: var(--color-muted); font-size: 12px; font-weight: 700; line-height: 1.4; }
+.workflowDraftStatus.warning { border-color: var(--color-warning-border); background: var(--color-warning-bg); }
+.workflowDraftStatus.warning strong { color: var(--color-warning-text); }
+.workflowDraftStatus.changed { border-color: rgba(13,116,206,.34); background: #eef7ff; }
+.workflowDraftStatus.changed strong { color: var(--color-link); }
+.workflowDraftStatus.ready { border-color: var(--color-success-border); background: var(--color-success-bg); }
+.workflowDraftStatus.ready strong { color: var(--color-success); }
+.workflowEmptyStart { gap: 10px; }
+.workflowEmptyStart span { color: var(--color-muted); font-size: 12px; font-weight: 700; line-height: 1.45; }
+.workflowEmptyStart .primary { width: 100%; }
 
 .workflowRunParamsBox {
   display: grid;
