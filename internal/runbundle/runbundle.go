@@ -22,6 +22,9 @@ type Summary struct {
 	ID        string            `json:"id"`
 	Kind      string            `json:"kind"`
 	Target    string            `json:"target"`
+	BatchID   string            `json:"batch_id,omitempty"`
+	HostID    string            `json:"host_id,omitempty"`
+	HostName  string            `json:"host_name,omitempty"`
 	Status    string            `json:"status"`
 	StartedAt time.Time         `json:"started_at"`
 	EndedAt   time.Time         `json:"ended_at"`
@@ -218,6 +221,9 @@ func summaryFromRecord(record runner.RunRecord) Summary {
 		ID:        record.ID,
 		Kind:      record.Kind,
 		Target:    record.Target,
+		BatchID:   record.BatchID,
+		HostID:    record.HostID,
+		HostName:  record.HostName,
 		Status:    record.Status,
 		StartedAt: record.StartedAt,
 		EndedAt:   record.EndedAt,

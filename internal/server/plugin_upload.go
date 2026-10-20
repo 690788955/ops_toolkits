@@ -312,7 +312,16 @@ func multipartFile(form *multipart.Form) (multipart.File, *multipart.FileHeader,
 	return nil, nil, fmt.Errorf("缺少上传文件")
 }
 
+type expectedPlugin struct {
+	ID      string
+	Version string
+}
+
 func installUploadedPlugin(state *serverState, data []byte, replace bool) (pluginUploadResult, error) {
+	return installPluginArchive(state, data, replace, nil)
+}
+
+func installPluginArchive(state *serverState, data []byte, replace bool, expected *expectedPlugin) (pluginUploadResult, error) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	reg := state.reg
@@ -334,6 +343,14 @@ func installUploadedPlugin(state *serverState, data []byte, replace bool) (plugi
 	}
 	if err != nil {
 		return pluginUploadResult{}, err
+	}
+	if expected != nil {
+		if expected.ID != "" && pkg.Manifest.ID != expected.ID {
+			return pluginUploadResult{}, fmt.Errorf("插件包清单 ID %s 与市场索引 %s 不一致", pkg.Manifest.ID, expected.ID)
+		}
+		if expected.Version != "" && pkg.Manifest.Version != expected.Version {
+			return pluginUploadResult{}, fmt.Errorf("插件包版本 %s 与市场索引 %s 不一致", pkg.Manifest.Version, expected.Version)
+		}
 	}
 	result := pluginUploadResult{PluginID: pkg.Manifest.ID, Version: pkg.Manifest.Version, Warnings: plugin.PackageWarnings(pkg)}
 	pluginsRoot := firstPluginRoot(reg)
@@ -517,7 +534,8 @@ func existingPlugin(reg *registry.Registry, id string) (plugin.Package, bool) {
 }
 
 func replacePlugin(reg *registry.Registry, state *serverState, srcDir, installDir string) error {
-	backupDir := installDir + ".backup-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	// 备份必须放在插件扫描目录之外，否则 reload 会把旧清单和新清单一起加载。
+	backupDir := filepath.Join(reg.BaseDir, ".plugin-backup-"+filepath.Base(installDir)+"-"+strconv.FormatInt(time.Now().UnixNano(), 10))
 	if err := os.Rename(installDir, backupDir); err != nil {
 		return err
 	}

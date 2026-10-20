@@ -120,7 +120,7 @@ function ToolNode({id, data, selected}) {
   const runTitle = formatNodeRunTitle(data.run)
   const paramStatus = data.paramStatus || toolParamStatus(null, data.params || {})
   const sourceLabel = data.toolMeta?.sourceLabel || '插件工具'
-  const nodeTitle = [data.name || id, sourceLabel, data.tool, paramStatus.title, runTitle].filter(Boolean).join('\n')
+  const nodeTitle = [data.name || id, sourceLabel, data.tool, data.hostLabel, paramStatus.title, runTitle].filter(Boolean).join('\n')
   return (
     <div className={nodeRunClass('toolNode', selected, data.run)} title={nodeTitle}>
       <Handle type="target" position={Position.Left} />
@@ -133,6 +133,7 @@ function ToolNode({id, data, selected}) {
       </div>
       <div className="nodeContent">
         <span className="toolTypeLine">{sourceLabel}</span>
+        {data.hostLabel && <span className="nodeHostLine">{data.hostLabel}</span>}
         <span className={paramStatus.missingRequired > 0 || paramStatus.toolMissing ? 'toolParamStatus warning' : 'toolParamStatus'}>{paramStatus.label}</span>
         {data.tool && <span className="nodeHoverMeta">{data.tool}</span>}
       </div>
@@ -213,7 +214,7 @@ function ControlNode({id, data, selected}) {
         ? extractSummary
       : controlNodeHelp(data.controlType)
   const runTitle = formatNodeRunTitle(data.run)
-  const nodeTitle = [data.name || id, controlShapeLabel(data.controlType), helpText, runTitle].filter(Boolean).join('\n')
+  const nodeTitle = [data.name || id, controlShapeLabel(data.controlType), helpText, data.hostLabel, runTitle].filter(Boolean).join('\n')
   return (
     <div className={nodeRunClass(`controlNode ${data.controlType || ''}`, selected, data.run)} title={nodeTitle}>
       <Handle type="target" position={Position.Left} />
@@ -226,6 +227,7 @@ function ControlNode({id, data, selected}) {
       </div>
       <div className="controlNodeText">
         <small>{controlShapeLabel(data.controlType)} · {helpText}</small>
+        {data.hostLabel && <small className="nodeHostLine">{data.hostLabel}</small>}
       </div>
       <Handle type="source" position={Position.Right} />
       <QuickAddDownstreamButton id={id} onAddDownstream={data.onAddDownstream} />

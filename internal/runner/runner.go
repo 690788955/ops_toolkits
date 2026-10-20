@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -24,14 +26,45 @@ import (
 type Runner struct {
 	Registry *registry.Registry
 	RunsDir  string
+	remote   RemoteExecutor
 }
 
 const workflowUploadResultFile = "upload-result.json"
+
+type RemoteHost struct {
+	ID   string
+	Name string
+}
+
+type RemoteToolRequest struct {
+	HostID        string
+	ToolID        string
+	ToolDir       string
+	Entry         string
+	Workdir       string
+	Args          []string
+	Env           []string
+	ParamFile     string
+	ParamName     string
+	GlobalEnvFile string
+}
+
+type RemoteExecutor interface {
+	DescribeHost(hostID string) (RemoteHost, error)
+	RunTool(ctx context.Context, req RemoteToolRequest, stdout, stderr io.Writer) error
+}
+
+func (r *Runner) SetRemoteExecutor(exec RemoteExecutor) {
+	r.remote = exec
+}
 
 type RunRecord struct {
 	ID        string                 `json:"id"`
 	Kind      string                 `json:"kind"`
 	Target    string                 `json:"target"`
+	BatchID   string                 `json:"batch_id,omitempty"`
+	HostID    string                 `json:"host_id,omitempty"`
+	HostName  string                 `json:"host_name,omitempty"`
 	Status    string                 `json:"status"`
 	StartedAt time.Time              `json:"started_at"`
 	EndedAt   time.Time              `json:"ended_at"`
@@ -45,6 +78,8 @@ type StepRecord struct {
 	ID             string    `json:"id"`
 	Type           string    `json:"type"`
 	Tool           string    `json:"tool,omitempty"`
+	HostID         string    `json:"host_id,omitempty"`
+	HostName       string    `json:"host_name,omitempty"`
 	Status         string    `json:"status"`
 	StartedAt      time.Time `json:"started_at"`
 	EndedAt        time.Time `json:"ended_at"`
@@ -65,7 +100,44 @@ func (r *Runner) RunTool(ctx context.Context, id string, params map[string]strin
 }
 
 func (r *Runner) RunToolValues(ctx context.Context, id string, params map[string]interface{}, out, errOut io.Writer) (*RunRecord, error) {
+	return r.RunToolValuesOn(ctx, id, "", params, out, errOut)
+}
+
+type BatchRun struct {
+	BatchID string                        `json:"batch_id"`
+	Runs    []*RunRecord                  `json:"runs"`
+	Cancels map[string]context.CancelFunc `json:"-"`
+}
+
+func (r *Runner) RunToolValuesOn(ctx context.Context, id, hostID string, params map[string]interface{}, out, errOut io.Writer) (*RunRecord, error) {
+	return r.runToolValuesOn(ctx, id, hostID, "", params, out, errOut)
+}
+
+func (r *Runner) RunToolValuesOnTargets(ctx context.Context, id string, hostIDs []string, params map[string]interface{}, out, errOut io.Writer) (*BatchRun, error) {
+	unique, batchID, err := r.prepareBatchTargets(id, hostIDs)
+	if err != nil {
+		return nil, err
+	}
+	runs := make([]*RunRecord, len(unique))
+	errs := make([]error, len(unique))
+	var wg sync.WaitGroup
+	for index, hostID := range unique {
+		wg.Add(1)
+		go func(index int, hostID string) {
+			defer wg.Done()
+			runs[index], errs[index] = r.runToolValuesOn(ctx, id, hostID, batchID, params, out, errOut)
+		}(index, hostID)
+	}
+	wg.Wait()
+	return &BatchRun{BatchID: batchID, Runs: runs}, errors.Join(errs...)
+}
+
+func (r *Runner) runToolValuesOn(ctx context.Context, id, hostID, batchID string, params map[string]interface{}, out, errOut io.Writer) (*RunRecord, error) {
 	tool, err := r.Registry.Tool(id)
+	if err != nil {
+		return nil, err
+	}
+	host, err := r.remoteHost(hostID)
 	if err != nil {
 		return nil, err
 	}
@@ -74,11 +146,14 @@ func (r *Runner) RunToolValues(ctx context.Context, id string, params map[string
 		return nil, err
 	}
 	record := newRecord("tool", id, config.RedactSensitive(finalValues, sensitivePaths))
+	record.BatchID = batchID
+	record.HostID = host.ID
+	record.HostName = host.Name
 	runDir, err := r.prepareRun(record.ID)
 	if err != nil {
 		return record, err
 	}
-	err = r.executeTool(ctx, tool, finalValues, finalParams, runDir, out, errOut)
+	err = r.executeTool(ctx, tool, finalValues, finalParams, runDir, hostID, out, errOut)
 	finishRecord(record, err)
 	if saveErr := r.saveRecord(runDir, record); saveErr != nil && err == nil {
 		err = saveErr
@@ -87,7 +162,68 @@ func (r *Runner) RunToolValues(ctx context.Context, id string, params map[string
 }
 
 func (r *Runner) StartToolValues(ctx context.Context, id string, params map[string]interface{}, out, errOut io.Writer) (*RunRecord, error) {
+	return r.StartToolValuesOn(ctx, id, "", params, out, errOut)
+}
+
+func (r *Runner) StartToolValuesOn(ctx context.Context, id, hostID string, params map[string]interface{}, out, errOut io.Writer) (*RunRecord, error) {
+	return r.startToolValuesOn(ctx, id, hostID, "", params, out, errOut)
+}
+
+func (r *Runner) StartToolValuesOnTargets(ctx context.Context, id string, hostIDs []string, params map[string]interface{}, out, errOut io.Writer) (*BatchRun, error) {
+	unique, batchID, err := r.prepareBatchTargets(id, hostIDs)
+	if err != nil {
+		return nil, err
+	}
+	batch := &BatchRun{BatchID: batchID, Runs: make([]*RunRecord, 0, len(unique)), Cancels: make(map[string]context.CancelFunc, len(unique))}
+	for _, hostID := range unique {
+		runCtx, cancel := context.WithCancel(ctx)
+		record, err := r.startToolValuesOn(runCtx, id, hostID, batchID, params, out, errOut)
+		if err != nil {
+			cancel()
+			for _, started := range batch.Cancels {
+				started()
+			}
+			return batch, err
+		}
+		batch.Runs = append(batch.Runs, record)
+		batch.Cancels[record.ID] = cancel
+	}
+	return batch, nil
+}
+
+// prepareBatchTargets 先校验工具和全部操作机，避免批量执行时部分主机已启动才发现目标无效。
+func (r *Runner) prepareBatchTargets(id string, hostIDs []string) ([]string, string, error) {
+	if _, err := r.Registry.Tool(id); err != nil {
+		return nil, "", err
+	}
+	seen := make(map[string]struct{}, len(hostIDs))
+	unique := make([]string, 0, len(hostIDs))
+	for _, raw := range hostIDs {
+		hostID := strings.TrimSpace(raw)
+		if hostID == "" {
+			return nil, "", fmt.Errorf("执行目标不能为空")
+		}
+		if _, ok := seen[hostID]; ok {
+			continue
+		}
+		seen[hostID] = struct{}{}
+		if _, err := r.remoteHost(hostID); err != nil {
+			return nil, "", err
+		}
+		unique = append(unique, hostID)
+	}
+	if len(unique) == 0 {
+		return nil, "", fmt.Errorf("未指定执行目标")
+	}
+	return unique, newBatchID(), nil
+}
+
+func (r *Runner) startToolValuesOn(ctx context.Context, id, hostID, batchID string, params map[string]interface{}, out, errOut io.Writer) (*RunRecord, error) {
 	tool, err := r.Registry.Tool(id)
+	if err != nil {
+		return nil, err
+	}
+	host, err := r.remoteHost(hostID)
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +232,9 @@ func (r *Runner) StartToolValues(ctx context.Context, id string, params map[stri
 		return nil, err
 	}
 	record := newRecord("tool", id, config.RedactSensitive(finalValues, sensitivePaths))
+	record.BatchID = batchID
+	record.HostID = host.ID
+	record.HostName = host.Name
 	runDir, err := r.prepareRun(record.ID)
 	if err != nil {
 		return record, err
@@ -105,11 +244,21 @@ func (r *Runner) StartToolValues(ctx context.Context, id string, params map[stri
 	}
 	response := *record
 	go func() {
-		runErr := r.executeTool(ctx, tool, finalValues, finalParams, runDir, out, errOut)
+		runErr := r.executeTool(ctx, tool, finalValues, finalParams, runDir, hostID, out, errOut)
 		finishRecord(record, runErr)
 		_ = r.saveRecord(runDir, record)
 	}()
 	return &response, nil
+}
+
+func (r *Runner) remoteHost(hostID string) (RemoteHost, error) {
+	if strings.TrimSpace(hostID) == "" {
+		return RemoteHost{}, nil
+	}
+	if r.remote == nil {
+		return RemoteHost{}, fmt.Errorf("当前运行器未配置远程执行能力")
+	}
+	return r.remote.DescribeHost(hostID)
 }
 
 func (r *Runner) RunWorkflow(ctx context.Context, id string, params map[string]string, out, errOut io.Writer) (*RunRecord, error) {
@@ -416,10 +565,17 @@ func (r *Runner) executeWorkflowNodes(ctx context.Context, wf *config.WorkflowCo
 			continue
 		}
 		if nodeType == config.WorkflowNodeTypeLoop {
-			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Tool: loopToolID(node, nodeByID), Status: "running", StartedAt: time.Now(), LoopTarget: node.Loop.Target, LoopIterations: node.Loop.MaxIterations}
+			loopHostID := loopNodeHostID(node, nodeByID)
+			host, hostErr := r.remoteHost(loopHostID)
+			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Tool: loopToolID(node, nodeByID), HostID: host.ID, HostName: host.Name, Status: "running", StartedAt: time.Now(), LoopTarget: node.Loop.Target, LoopIterations: node.Loop.MaxIterations}
 			stepIndex := appendStepRecord(record, stepRecord)
 			_ = r.saveRecord(runDir, record)
-			loopErr := r.executeLoop(ctx, node, nodeByID, finalParams, workflowContext, runDir, out, errOut)
+			var loopErr error
+			if hostErr != nil {
+				loopErr = hostErr
+			} else {
+				loopErr = r.executeLoop(ctx, node, nodeByID, finalParams, workflowContext, runDir, loopHostID, out, errOut)
+			}
 			stepRecord.EndedAt = time.Now()
 			if loopErr != nil {
 				if errors.Is(loopErr, context.Canceled) {
@@ -442,8 +598,12 @@ func (r *Runner) executeWorkflowNodes(ctx context.Context, wf *config.WorkflowCo
 			continue
 		}
 		stepParams := resolveStepParams(finalParams, workflowContext, node.Params)
+		host, hostErr := r.remoteHost(node.Host)
 		tool, toolErr := r.Registry.Tool(node.Tool)
-		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Tool: node.Tool, Status: "running", StartedAt: time.Now()}
+		if hostErr != nil {
+			toolErr = hostErr
+		}
+		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Tool: node.Tool, HostID: host.ID, HostName: host.Name, Status: "running", StartedAt: time.Now()}
 		stepRunDir := filepath.Join(runDir, node.ID)
 		stepIndex := appendStepRecord(record, stepRecord)
 		_ = r.saveRecord(runDir, record)
@@ -453,7 +613,7 @@ func (r *Runner) executeWorkflowNodes(ctx context.Context, wf *config.WorkflowCo
 				toolErr = resolveErr
 			} else {
 				stepParams = stepFlat
-				toolErr = r.executeTool(ctx, tool, stepValues, stepFlat, stepRunDir, out, errOut)
+				toolErr = r.executeTool(ctx, tool, stepValues, stepFlat, stepRunDir, node.Host, out, errOut)
 			}
 		}
 		stepRecord.EndedAt = time.Now()
@@ -716,7 +876,7 @@ func anyValue(values []string, match func(string) bool) bool {
 	}
 	return false
 }
-func (r *Runner) executeLoop(ctx context.Context, node config.WorkflowNode, nodes map[string]config.WorkflowNode, finalParams, workflowContext map[string]string, runDir string, out, errOut io.Writer) error {
+func (r *Runner) executeLoop(ctx context.Context, node config.WorkflowNode, nodes map[string]config.WorkflowNode, finalParams, workflowContext map[string]string, runDir, hostID string, out, errOut io.Writer) error {
 	toolID := loopToolID(node, nodes)
 	tool, err := r.Registry.Tool(toolID)
 	if err != nil {
@@ -739,7 +899,7 @@ func (r *Runner) executeLoop(ctx context.Context, node config.WorkflowNode, node
 			return fmt.Errorf("循环节点 %s 第 %d 次解析工具 %s 配置失败: %w", node.ID, iteration, toolID, resolveErr)
 		}
 		stepParams = stepFlat
-		if err := r.executeTool(ctx, tool, stepValues, stepFlat, stepRunDir, out, errOut); err != nil {
+		if err := r.executeTool(ctx, tool, stepValues, stepFlat, stepRunDir, hostID, out, errOut); err != nil {
 			return fmt.Errorf("循环节点 %s 第 %d 次执行工具 %s 失败: %w", node.ID, iteration, toolID, err)
 		}
 		addStepContext(workflowContext, fmt.Sprintf("%s.%d", node.ID, iteration), stepParams, stepRunDir, tool.Config.Outputs)
@@ -764,6 +924,16 @@ func loopToolID(node config.WorkflowNode, nodes map[string]config.WorkflowNode) 
 	}
 	if node.Loop.Target != "" {
 		return nodes[node.Loop.Target].Tool
+	}
+	return ""
+}
+
+func loopNodeHostID(node config.WorkflowNode, nodes map[string]config.WorkflowNode) string {
+	if node.Host != "" {
+		return node.Host
+	}
+	if node.Loop.Tool == "" && node.Loop.Target != "" {
+		return nodes[node.Loop.Target].Host
 	}
 	return ""
 }
@@ -1427,7 +1597,7 @@ func readLoopText(runDir, nodeID, fileName string, maxIterations int) string {
 	return strings.Join(parts, "\n")
 }
 
-func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values map[string]interface{}, params map[string]string, runDir string, out, errOut io.Writer) error {
+func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values map[string]interface{}, params map[string]string, runDir, hostID string, out, errOut io.Writer) error {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return err
 	}
@@ -1442,21 +1612,9 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 	entry := resolveEntry(tool.Dir, tool.Config.Execution.Entry)
 	workdir := resolveWorkdir(tool.Dir, tool.Config.Execution.Workdir)
 	extraEnv := encodeEnv(params)
-	if paramFile != "" {
-		extraEnv = append(extraEnv, "OPS_PARAM_FILE="+paramFile)
-	}
 	globalEnvPath := config.GlobalEnvPath(r.Registry.BaseDir)
-	if absPath, err := filepath.Abs(globalEnvPath); err == nil {
-		extraEnv = append(extraEnv, "OPS_GLOBAL_ENV_FILE="+absPath)
-	}
 	for k, v := range tool.Config.Env {
 		extraEnv = append(extraEnv, fmt.Sprintf("%s=%s", k, v))
-	}
-	cmd := buildCommand(execCtx, entry, *tool.Config, params, paramFile, workdir, extraEnv)
-	configureCommandCancellation(cmd)
-	if !usesWSLBash(entry) {
-		cmd.Dir = workdir
-		cmd.Env = append(os.Environ(), extraEnv...)
 	}
 
 	stdoutFile, err := os.Create(filepath.Join(runDir, "stdout.log"))
@@ -1469,13 +1627,57 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 		return err
 	}
 	defer stderrFile.Close()
-	cmd.Stdout = io.MultiWriter(stdoutFile, out)
-	cmd.Stderr = io.MultiWriter(stderrFile, errOut)
-	if err := cmd.Run(); err != nil {
-		if execCtx.Err() != nil {
-			return execCtx.Err()
+	stdoutWriter := io.MultiWriter(stdoutFile, out)
+	stderrWriter := io.MultiWriter(stderrFile, errOut)
+
+	if strings.TrimSpace(hostID) != "" {
+		if r.remote == nil {
+			return fmt.Errorf("当前运行器未配置远程执行能力")
 		}
-		return fmt.Errorf("执行工具 %s 失败: %w", tool.Config.ID, err)
+		paramName := ""
+		if paramFile != "" {
+			paramName = filepath.Base(paramFile)
+		}
+		request := RemoteToolRequest{
+			HostID:        hostID,
+			ToolID:        tool.Config.ID,
+			ToolDir:       tool.Dir,
+			Entry:         entry,
+			Workdir:       workdir,
+			Args:          commandArgs(*tool.Config, params, ""),
+			Env:           extraEnv,
+			ParamFile:     paramFile,
+			ParamName:     paramName,
+			GlobalEnvFile: globalEnvPath,
+		}
+		if err := r.remote.RunTool(execCtx, request, stdoutWriter, stderrWriter); err != nil {
+			if execCtx.Err() != nil {
+				return execCtx.Err()
+			}
+			return fmt.Errorf("执行工具 %s 失败: %w", tool.Config.ID, err)
+		}
+	} else {
+		localEnv := append([]string{}, extraEnv...)
+		if paramFile != "" {
+			localEnv = append(localEnv, "OPS_PARAM_FILE="+paramFile)
+		}
+		if absPath, err := filepath.Abs(globalEnvPath); err == nil {
+			localEnv = append(localEnv, "OPS_GLOBAL_ENV_FILE="+absPath)
+		}
+		cmd := buildCommand(execCtx, entry, *tool.Config, params, paramFile, workdir, localEnv)
+		configureCommandCancellation(cmd)
+		if !usesWSLBash(entry) {
+			cmd.Dir = workdir
+			cmd.Env = append(os.Environ(), localEnv...)
+		}
+		cmd.Stdout = stdoutWriter
+		cmd.Stderr = stderrWriter
+		if err := cmd.Run(); err != nil {
+			if execCtx.Err() != nil {
+				return execCtx.Err()
+			}
+			return fmt.Errorf("执行工具 %s 失败: %w", tool.Config.ID, err)
+		}
 	}
 	if err := validateToolOutputsFromStdout(tool.Config.ID, readTextFile(filepath.Join(runDir, "stdout.log")), tool.Config.Outputs); err != nil {
 		return err
@@ -1890,9 +2092,20 @@ func (r *Runner) saveRecord(dir string, record *RunRecord) error {
 	return lastErr
 }
 
+var idSequence atomic.Uint64
+
+// 批量执行会在同一纳秒内创建多条记录，追加自增序号避免运行目录重名。
+func newID(kind string) string {
+	return fmt.Sprintf("%s-%d-%d", kind, time.Now().UnixNano(), idSequence.Add(1))
+}
+
+func newBatchID() string {
+	return newID("batch")
+}
+
 func newRecord(kind, target string, params map[string]interface{}) *RunRecord {
 	flat := config.FlattenValues(params)
-	return &RunRecord{ID: fmt.Sprintf("%s-%d", kind, time.Now().UnixNano()), Kind: kind, Target: target, Status: "running", StartedAt: time.Now(), Params: flat, Config: config.CopyValues(params)}
+	return &RunRecord{ID: newID(kind), Kind: kind, Target: target, Status: "running", StartedAt: time.Now(), Params: flat, Config: config.CopyValues(params)}
 }
 
 func finishRecord(record *RunRecord, err error) {

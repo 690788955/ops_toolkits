@@ -15,6 +15,7 @@ type RootConfig struct {
 	Menu              MenuConfig             `yaml:"menu" json:"menu"`
 	Registry          RegistryConfig         `yaml:"registry" json:"registry"`
 	Plugins           PluginsConfig          `yaml:"plugins" json:"plugins"`
+	Market            MarketConfig           `yaml:"market" json:"market"`
 	HostConfigFiles   HostConfigFilesConfig  `yaml:"host_config_files" json:"host_config_files"`
 	UI                UIConfig               `yaml:"ui" json:"ui"`
 	ConfigDefaults    map[string]interface{} `yaml:"config_defaults" json:"config_defaults"`
@@ -60,6 +61,16 @@ type PluginsConfig struct {
 	Strict          bool     `yaml:"strict" json:"strict"`
 	Disabled        []string `yaml:"disabled" json:"disabled"`
 	AllowedCommands []string `yaml:"allowed_commands" json:"allowed_commands"`
+}
+
+type MarketConfig struct {
+	Sources []MarketSource `yaml:"sources" json:"sources"`
+}
+
+type MarketSource struct {
+	ID   string `yaml:"id" json:"id"`
+	Name string `yaml:"name" json:"name"`
+	URL  string `yaml:"url" json:"url"`
 }
 
 type UIConfig struct {
@@ -200,6 +211,7 @@ type WorkflowNode struct {
 	Type      string                 `yaml:"type" json:"type"`
 	Name      string                 `yaml:"name" json:"name"`
 	Tool      string                 `yaml:"tool" json:"tool"`
+	Host      string                 `yaml:"host,omitempty" json:"host,omitempty"`
 	Condition WorkflowCondition      `yaml:"condition" json:"condition"`
 	Loop      WorkflowLoop           `yaml:"loop" json:"loop"`
 	Upload    WorkflowUpload         `yaml:"upload" json:"upload"`

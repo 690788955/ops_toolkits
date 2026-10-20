@@ -315,6 +315,7 @@ export function buildWorkflowDraft(
           type: node.data.controlType,
           name: node.data.name || node.id,
         };
+        if (node.data.host) draftNode.host = node.data.host;
         if (node.data.controlType === "loop")
           draftNode.loop = normalizeLoopConfig(node.data.loop || defaultLoop());
         if (node.data.controlType === "upload")
@@ -332,6 +333,7 @@ export function buildWorkflowDraft(
         type: "tool",
         name: node.data.name || node.id,
         tool: node.data.tool,
+        ...(node.data.host ? { host: node.data.host } : {}),
         params: node.data.params || {},
         on_failure: node.data.on_failure || "stop",
       };

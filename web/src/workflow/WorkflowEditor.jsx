@@ -12,7 +12,7 @@ import FileUploadInput from '../FileUploadInput.jsx'
 const MAX_PLATFORM_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
 const REMEMBERED_WORKFLOW_PREFIX = 'ops.workflowEditor.selectedWorkflow'
 
-export default function WorkflowEditor({catalog, activeCategory, setResult, refreshCatalog, resultPanel = null}) {
+export default function WorkflowEditor({catalog, activeCategory, hosts = [], setResult, refreshCatalog, resultPanel = null}) {
   const [workflow, setWorkflow] = useState(emptyWorkflow(activeCategory))
   const sidebarScopedCategory = activeCategory || ''
   const workflowOptions = useMemo(() => {
@@ -130,8 +130,9 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
     isEditingCanvas ? openDownstreamNodePicker : null,
     isEditingCanvas,
     isActiveRunRunning ? null : rerunWorkflowNode,
-    activeRunID
-  ), [nodes, canvasRunState, catalog.tools, isEditingCanvas, isActiveRunRunning, activeRunID, rerunWorkflowNode])
+    activeRunID,
+    hosts
+  ), [nodes, canvasRunState, catalog.tools, isEditingCanvas, isActiveRunRunning, activeRunID, rerunWorkflowNode, hosts])
   const displayEdges = useMemo(() => buildDisplayEdges(edges, displayNodes, canvasRunState), [edges, displayNodes, canvasRunState])
   const currentDraftSignature = useMemo(
     () => workflowDraftSignature(workflow, nodes, edges, activeCategory, workflowParamsText),
@@ -641,6 +642,12 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
   function updateSelectedNodeName(nextName) {
     clearCanvasRunOverlay()
     setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, name: nextName}} : node))
+    setEditorValidation(null)
+  }
+
+  function updateSelectedNodeHost(nextHost) {
+    clearCanvasRunOverlay()
+    setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, host: nextHost}} : node))
     setEditorValidation(null)
   }
 
@@ -1601,6 +1608,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
           <NodeConfigEditor
             node={selectedNode}
             tool={selectedTool}
+            hosts={hosts}
             sources={selectedNodeSources}
             paramsText={nodeParamsText}
             setParamsText={setNodeParamsText}
@@ -1609,6 +1617,7 @@ export default function WorkflowEditor({catalog, activeCategory, setResult, refr
             onLoopChange={updateSelectedNodeLoop}
             onUploadChange={updateSelectedNodeUpload}
             onExtractConfigChange={updateSelectedNodeExtractConfig}
+            onHostChange={updateSelectedNodeHost}
             loopTool={selectedLoopTool}
             nodes={nodes}
             tools={toolOptions}
@@ -2448,17 +2457,22 @@ function hasConfiguredParamValue(value) {
   return String(value).trim() !== ''
 }
 
-export function buildDisplayNodes(nodes, runState, tools = [], onAddDownstream = null, canRemove = true, onRerun = null, activeRunID = '') {
+export function buildDisplayNodes(nodes, runState, tools = [], onAddDownstream = null, canRemove = true, onRerun = null, activeRunID = '', hosts = []) {
   const overlayNodes = runState?.nodes || {}
   const toolMap = new Map((tools || []).map(tool => [tool.id, tool]))
+  const hostMap = new Map((hosts || []).map(host => [host.id, host]))
   return (nodes || []).map(node => {
     const tool = node.type === 'toolNode' ? toolMap.get(node.data?.tool) : null
     const nodeRun = overlayNodes[node.id] || null
+    const hostID = node.data?.host || ''
+    const host = hostID ? hostMap.get(hostID) : null
+    const hostLabel = hostID ? `操作机 ${host?.name || hostID}${host?.enabled === false ? '（已停用）' : ''}` : ''
     return {
       ...node,
       data: {
         ...node.data,
         run: nodeRun,
+        hostLabel,
         onRemove: canRemove ? node.data?.onRemove : null,
         onRerun: onRerun && activeRunID ? onRerun : null,
         rerunDisabled: runState?.status === 'running',
@@ -2714,6 +2728,7 @@ export function workflowNodeToFlowNode(node, index, onRemove, workflowNodes = []
     const flowNode = newControlFlowNode(control, node.id, {x: 80 + index * 220, y: 120 + (index % 3) * 90}, onRemove)
     flowNode.data.name = node.name || node.id
     if (nodeType === 'loop') {
+      flowNode.data.host = node.host || ''
       const loop = normalizeLoopConfig(node.loop || defaultLoop())
       if (!loop.tool && node.loop?.target) {
         const target = (workflowNodes || []).find(item => item.id === node.loop.target)
@@ -2734,6 +2749,7 @@ export function workflowNodeToFlowNode(node, index, onRemove, workflowNodes = []
     data: {
       tool: node.tool,
       name: node.name || node.id,
+      host: node.host || '',
       params: node.params || {},
       on_failure: node.on_failure || 'stop',
       onRemove

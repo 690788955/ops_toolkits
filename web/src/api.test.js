@@ -1,8 +1,9 @@
 import {afterEach, describe, expect, it, vi} from 'vitest'
-import {fetchJSON, postJSON, postPluginZip, postRunUploadNode, postRunUploadNodeChunked} from './api.js'
+import {downloadUserWorkflowExport, fetchJSON, fetchMarket, postJSON, postMarketInstall, postPluginZip, postRunUploadNode, postRunUploadNodeChunked} from './api.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 describe('api helpers', () => {
@@ -31,6 +32,24 @@ describe('api helpers', () => {
     })
   })
 
+  it('fetches market catalog with optional cache refresh', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ok: true, json: async () => ({data: {sources: []}})})))
+
+    await expect(fetchMarket()).resolves.toEqual({data: {sources: []}})
+    await fetchMarket(true)
+    expect(fetch.mock.calls.map(call => call[0])).toEqual(['/api/market', '/api/market?refresh=1'])
+  })
+
+  it('posts market install requests', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ok: true, json: async () => ({status: 'installed'})})))
+
+    await expect(postMarketInstall({source_id: 'internal', plugin_id: 'demo.sample', version: '1.0.0', replace: false})).resolves.toEqual({status: 'installed'})
+    const [url, options] = fetch.mock.calls[0]
+    expect(url).toBe('/api/market/install')
+    expect(options.method).toBe('POST')
+    expect(JSON.parse(options.body)).toEqual({source_id: 'internal', plugin_id: 'demo.sample', version: '1.0.0', replace: false})
+  })
+
   it('uploads plugin zips through the replace endpoint when requested', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ok: true, json: async () => ({status: 'uploaded'})})))
 
@@ -40,6 +59,26 @@ describe('api helpers', () => {
     expect(options.method).toBe('POST')
     expect(options.credentials).toBe('same-origin')
     expect(options.body).toBeInstanceOf(FormData)
+  })
+
+  it('downloads selected user workflows with optional dependency plugins', async () => {
+    const blob = new Blob(['zip'])
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      headers: {get: () => 'attachment; filename="user-workflows-bundle.zip"'},
+      blob: async () => blob
+    })))
+    const createObjectURL = vi.fn(() => 'blob:test')
+    vi.stubGlobal('URL', {createObjectURL, revokeObjectURL: vi.fn()})
+    const link = {href: '', download: '', click: vi.fn(), remove: vi.fn()}
+    vi.stubGlobal('document', {createElement: () => link, body: {appendChild: vi.fn()}})
+    vi.stubGlobal('window', {setTimeout: vi.fn()})
+
+    await expect(downloadUserWorkflowExport(['demo.one', 'demo.two'], true)).resolves.toBe('user-workflows-bundle.zip')
+    expect(fetch.mock.calls[0][0]).toBe('/api/plugins/user-workflows.zip?workflow=demo.one&workflow=demo.two&include_dependencies=1')
+    expect(createObjectURL).toHaveBeenCalledWith(blob)
+    expect(link.download).toBe('user-workflows-bundle.zip')
+    expect(link.click).toHaveBeenCalled()
   })
 
   it('uploads files to a waiting workflow upload node', async () => {

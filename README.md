@@ -70,6 +70,7 @@ GOTOOLCHAIN=local go build -o bin/opsctl.exe ./cmd/opsctl
 | `opsctl start` / `opsctl menu` | 启动交互式菜单 |
 | `opsctl serve` | 启动 HTTP API 和 Web UI |
 | `opsctl package build` | 生成交付包和 zip 文件 |
+| `opsctl market index` | 生成插件市场索引 `index.json` 和插件包 |
 
 通用参数：
 
@@ -120,9 +121,18 @@ plugins:
     - plugins
   strict: false
   disabled: []
+
+market:
+  sources:
+    - id: local
+      name: 本地插件市场
+      url: market
+    - id: internal
+      name: 内网插件市场
+      url: http://plugins.internal/ops-market/index.json
 ```
 
-`paths.tools` 和 `paths.workflows` 显式为空，表示不再使用旧的独立 `tools/`、`workflows/` 目录。工具和工作流通过插件贡献。
+`paths.tools` 和 `paths.workflows` 显式为空，表示不再使用旧的独立 `tools/`、`workflows/` 目录。工具和工作流通过插件贡献。`market.sources` 可选，用于在 Web 插件管理中浏览和安装市场插件；`url` 支持本地目录和 HTTP/HTTPS 地址，留空时默认使用项目根目录下的 `market/`。
 
 ## 插件接入
 
@@ -215,6 +225,79 @@ tools:
 ```
 
 `access: read` 只允许查看并拒绝保存；`access: read_write` 还需要当前进程具备 OS 写权限才允许保存。`create: false` 不自动创建缺失文件；`create: true` 仅在父目录可写时允许创建。白名单只支持目录前缀，不支持单文件白名单。
+
+## 插件市场
+
+插件市场由一个索引和若干插件 ZIP 包组成，可以放在本地目录，也可以发布到静态文件服务。Web UI 的“插件管理 → 插件市场”页签可以浏览市场、搜索插件，并一键安装或更新。
+
+### 生成市场内容
+
+```bash
+./bin/opsctl.exe market index
+```
+
+默认输出到项目根目录的 `market/`，可用 `--output` 指定其他目录、`--name` 指定市场名称：
+
+```text
+market/
+  index.json
+  packages/
+    vendor.backup-1.0.0.zip
+```
+
+`index.json` 中的插件包地址使用相对路径，并把 `sha256` 和 `size` 一并写入索引。生成过程会重新校验 `plugins/` 下的所有插件；存在加载失败或校验不通过的插件时命令会失败。插件包使用固定时间戳，相同插件内容可生成稳定 ZIP。本地 `user.workflows` 插件不会发布到市场，并会输出跳过提示；如需共享其中的工作流，请先导出用户工作流 ZIP 后作为独立插件发布。
+
+### 本地市场
+
+`opsctl market index` 默认输出到项目根目录的 `market/`，该目录可直接作为本地市场使用。未配置 `market.sources` 时，Web 端默认读取 `<项目根目录>/market/index.json`，无需启动额外的静态文件服务：
+
+```yaml
+market:
+  sources: []
+```
+
+也可以在设置页或 `configs/ops.yaml` 中显式指定本地目录、`index.json` 文件路径或 `file://` URL：
+
+```yaml
+market:
+  sources:
+    - id: local
+      name: 本地插件市场
+      url: market
+```
+
+### 远程市场
+
+把 `market/` 目录整体发布到内网静态文件服务（Nginx、对象存储或任意 HTTP 文件服务），然后配置索引地址：
+
+```yaml
+market:
+  sources:
+    - id: internal
+      name: 内网插件市场
+      url: http://plugins.internal/ops-market/index.json
+```
+
+配置支持多个市场源，Web 端可切换来源。`url` 可以是本地目录、`index.json` 文件路径、`file://` URL，或 `http` / `https` 地址。远程插件包必须与索引同源；本地插件包必须位于市场目录内。无论本地还是远程，安装前都会校验包大小和 `sha256`。
+
+### 安装行为
+
+- 安装前 Web 端会提示插件会写入本地插件目录并执行本地脚本，需要确认来源可信。
+- 同一插件在索引中可以有多个版本；未指定版本时选择最高版本，安装接口也支持显式指定 `version`。
+- 已安装且市场版本更高的插件显示“更新”；更新会用新版本整体替换插件目录，要求市场版本高于本地版本。
+- 已安装同版本显示“已安装”，本地版本更高显示“本地较新”，禁用的插件显示“已禁用”且不能直接更新。
+- 插件 `compatibility.opsctl` 声明了 `opsctl` 版本约束时，不满足约束的插件不允许安装。支持 `>=`、`>`、`<=`、`<`、`=`、`==`，空格或逗号分隔表示同时满足，`*` / `any` 表示不限制。
+- 安装复用插件 ZIP 上传链路：校验清单、路径、脚本与工作流，校验通过后重载注册表。
+- 远程市场索引默认缓存 60 秒；点击“刷新”或执行安装会强制重新拉取索引。本地市场每次直接读取磁盘，重新生成索引后立即生效。
+- 索引最大 2 MB，单个插件包最大 20 MB；索引缺少合法 `sha256` 时拒绝安装，下载后会强制校验摘要和大小。
+
+### 导出用户工作流
+
+在“插件管理 → 已安装”中点击“导出用户工作流”，可以勾选要导出的工作流：
+
+- 导出的 ZIP 以 `user.workflows` 插件根目录组织，只包含所选工作流及其 `config/workflows/<id>` 配置目录，可直接上传安装。
+- 勾选“同时导出引用的插件”后，工作流工具依赖的已安装插件会以独立 ZIP 放入 `dependencies/`，并生成 `export-manifest.json` 和 `README.md`；依赖插件需要单独上传安装。
+- 如果工作流引用了当前环境未安装的工具，导出清单会在 `missing_tools` 中列出。
 
 ## Web 前端
 

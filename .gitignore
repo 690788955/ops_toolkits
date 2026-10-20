@@ -5,6 +5,8 @@ web/node_modules/
 graphify-out/
 .claude/worktrees/
 /workflows/
+/market/
+/configs/ssh_hosts.yaml
 .ace-tool/
 .agents/
 .codex/

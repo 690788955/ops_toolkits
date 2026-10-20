@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -683,6 +684,145 @@ func TestUserWorkflowPluginExportAPI(t *testing.T) {
 	if !strings.Contains(entries["user.workflows/plugin.yaml"], "path: workflows/demo.exported.yaml") || !strings.Contains(entries["user.workflows/workflows/demo.exported.yaml"], "导出流程") {
 		t.Fatalf("导出 ZIP 未保留插件清单或工作流内容: %#v", entries)
 	}
+}
+
+func TestUserWorkflowPluginExportSelectsWorkflowsAndConfig(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	for _, workflow := range []struct{ id, name string }{
+		{"demo.exported", "导出流程"},
+		{"demo.other", "其他流程"},
+	} {
+		body := `{"workflow":{"id":"` + workflow.id + `","name":"` + workflow.name + `","category":"demo","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/workflows/"+workflow.id+"/save", strings.NewReader(body)))
+		if res.Code != http.StatusOK {
+			t.Fatalf("save %s status = %d, body = %s", workflow.id, res.Code, res.Body.String())
+		}
+	}
+	exportedConfig := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "config", "workflows", "demo.exported")
+	otherConfig := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "config", "workflows", "demo.other")
+	for _, item := range []struct{ dir, name string }{
+		{exportedConfig, "app.conf"},
+		{otherConfig, "other.conf"},
+	} {
+		if err := os.MkdirAll(item.dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(item.dir, item.name), []byte("enabled=true\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/plugins/user-workflows.zip?workflow=demo.exported", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	entries := readZipEntries(t, res.Body.Bytes())
+	if _, ok := entries["user.workflows/workflows/demo.exported.yaml"]; !ok {
+		t.Fatalf("导出 ZIP 缺少所选工作流: %v", entries)
+	}
+	if _, ok := entries["user.workflows/config/workflows/demo.exported/app.conf"]; !ok {
+		t.Fatalf("导出 ZIP 缺少所选工作流配置: %v", entries)
+	}
+	if _, ok := entries["user.workflows/workflows/demo.other.yaml"]; ok {
+		t.Fatalf("导出 ZIP 不应包含未选择的工作流: %v", entries)
+	}
+	if _, ok := entries["user.workflows/config/workflows/demo.other/other.conf"]; ok {
+		t.Fatalf("导出 ZIP 不应包含未选择工作流的配置: %v", entries)
+	}
+	manifest := string(entries["user.workflows/plugin.yaml"])
+	if !strings.Contains(manifest, "path: workflows/demo.exported.yaml") || strings.Contains(manifest, "demo.other") {
+		t.Fatalf("导出清单未按选择过滤: %s", manifest)
+	}
+	if _, ok := entries["export-manifest.json"]; ok {
+		t.Fatalf("未勾选依赖插件时不应生成导出清单: %v", entries)
+	}
+
+	missingRes := httptest.NewRecorder()
+	handler.ServeHTTP(missingRes, httptest.NewRequest(http.MethodGet, "/api/plugins/user-workflows.zip?workflow=demo.missing", nil))
+	if missingRes.Code != http.StatusBadRequest || !strings.Contains(missingRes.Body.String(), "demo.missing") {
+		t.Fatalf("未知工作流应返回 400，status = %d, body = %s", missingRes.Code, missingRes.Body.String())
+	}
+}
+
+func TestUserWorkflowPluginExportIncludesDependencies(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	uploadRes := httptest.NewRecorder()
+	handler.ServeHTTP(uploadRes, pluginUploadRequest(t, pluginZip(t, "vendor.dep", "1.0.0", false), false))
+	if uploadRes.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", uploadRes.Code, uploadRes.Body.String())
+	}
+	saveBody := `{"workflow":{"id":"demo.dependent","name":"依赖流程","category":"demo","nodes":[{"id":"first","tool":"vendor.dep.tool"}],"edges":[]}}`
+	saveRes := httptest.NewRecorder()
+	handler.ServeHTTP(saveRes, httptest.NewRequest(http.MethodPost, "/api/workflows/demo.dependent/save", strings.NewReader(saveBody)))
+	if saveRes.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", saveRes.Code, saveRes.Body.String())
+	}
+
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/plugins/user-workflows.zip?workflow=demo.dependent&include_dependencies=1", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	entries := readZipEntries(t, res.Body.Bytes())
+	dependencyZip, ok := entries["dependencies/vendor.dep.zip"]
+	if !ok {
+		t.Fatalf("导出 ZIP 缺少依赖插件: %v", entries)
+	}
+	dependencyEntries := readZipEntries(t, dependencyZip)
+	if _, ok := dependencyEntries["vendor.dep/plugin.yaml"]; !ok {
+		t.Fatalf("依赖插件 ZIP 缺少插件清单: %v", dependencyEntries)
+	}
+	exportManifest := string(entries["export-manifest.json"])
+	if !strings.Contains(exportManifest, `"id": "vendor.dep"`) || !strings.Contains(exportManifest, `"package": "dependencies/vendor.dep.zip"`) {
+		t.Fatalf("导出清单未记录依赖插件: %s", exportManifest)
+	}
+	if _, ok := entries["README.md"]; !ok {
+		t.Fatalf("导出 ZIP 缺少安装说明: %v", entries)
+	}
+
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	var catalog struct {
+		Data catalogResponse `json:"data"`
+	}
+	if err := json.Unmarshal(catalogRes.Body.Bytes(), &catalog); err != nil {
+		t.Fatalf("解析 catalog 失败: %v", err)
+	}
+	found := false
+	for _, workflow := range catalog.Data.Workflows {
+		if workflow.ID == "demo.dependent" {
+			found = len(workflow.Dependencies) == 1 && workflow.Dependencies[0].ID == "vendor.dep"
+		}
+	}
+	if !found {
+		t.Fatalf("catalog 未包含用户工作流的依赖插件: %#v", catalog.Data.Workflows)
+	}
+}
+
+func readZipEntries(t *testing.T, data []byte) map[string][]byte {
+	t.Helper()
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("无法读取 zip: %v", err)
+	}
+	entries := map[string][]byte{}
+	for _, file := range reader.File {
+		handle, err := file.Open()
+		if err != nil {
+			t.Fatalf("无法打开 zip entry %s: %v", file.Name, err)
+		}
+		content, err := io.ReadAll(handle)
+		_ = handle.Close()
+		if err != nil {
+			t.Fatalf("无法读取 zip entry %s: %v", file.Name, err)
+		}
+		entries[file.Name] = content
+	}
+	return entries
 }
 
 func TestWorkflowSaveAPIRejectsMismatchedID(t *testing.T) {
@@ -2225,6 +2365,151 @@ func TestWorkflowRunAPIRequiresToolConfirm(t *testing.T) {
 	}
 	if !strings.Contains(res.Body.String(), "需要确认") {
 		t.Fatalf("响应缺少工具确认提示: %s", res.Body.String())
+	}
+}
+
+func TestToolRunAPIRejectsInvalidTarget(t *testing.T) {
+	reg := testRegistry(t)
+	writeTestSSHHosts(t, reg.BaseDir)
+	handler := NewHandler(reg)
+	cases := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "missing", target: "missing", want: "操作机不存在"},
+		{name: "disabled", target: "ops-off", want: "已停用"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"params":{},"target":%q}`, tc.target)
+			req := httptest.NewRequest(http.MethodPost, "/api/tools/demo.hello/run?async=true", strings.NewReader(body))
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+			}
+			if !strings.Contains(res.Body.String(), tc.want) {
+				t.Fatalf("response missing %q: %s", tc.want, res.Body.String())
+			}
+		})
+	}
+}
+
+func TestToolRunAPIRejectsInvalidBatchTarget(t *testing.T) {
+	reg := testRegistry(t)
+	writeTestSSHHosts(t, reg.BaseDir)
+	handler := NewHandler(reg)
+	cases := []struct {
+		name    string
+		targets string
+		want    string
+	}{
+		{name: "missing", targets: `["ops-live","missing"]`, want: "操作机不存在"},
+		{name: "disabled", targets: `["ops-live","ops-off"]`, want: "已停用"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"params":{},"targets":%s}`, tc.targets)
+			req := httptest.NewRequest(http.MethodPost, "/api/tools/demo.hello/run?async=true", strings.NewReader(body))
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+			}
+			if !strings.Contains(res.Body.String(), tc.want) {
+				t.Fatalf("response missing %q: %s", tc.want, res.Body.String())
+			}
+		})
+	}
+}
+
+func TestRunSummaryAPISkipsLogs(t *testing.T) {
+	reg := testRegistry(t)
+	runDir := filepath.Join(reg.BaseDir, "runs", "logs", "run-summary")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result := `{"id":"run-summary","kind":"tool","target":"demo.hello","batch_id":"batch-1","host_id":"ops-live","host_name":"Ops Live","status":"succeeded"}`
+	if err := os.WriteFile(filepath.Join(runDir, "result.json"), []byte(result), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "stdout.log"), []byte("日志内容不应出现在摘要中\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/runs/run-summary?summary=1", nil)
+	res := httptest.NewRecorder()
+	NewHandler(reg).ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, `"status":"succeeded"`) || !strings.Contains(body, `"batch_id":"batch-1"`) {
+		t.Fatalf("摘要缺少运行状态: %s", body)
+	}
+	if strings.Contains(body, "日志内容不应出现在摘要中") || strings.Contains(body, `"logs"`) {
+		t.Fatalf("摘要不应包含日志内容: %s", body)
+	}
+}
+
+func TestWorkflowRunAPIRejectsInvalidNodeTarget(t *testing.T) {
+	reg := testRegistry(t)
+	writeTestSSHHosts(t, reg.BaseDir)
+	handler := NewHandler(reg)
+	cases := []struct {
+		name string
+		host string
+		want string
+	}{
+		{name: "missing", host: "missing", want: "操作机不存在"},
+		{name: "disabled", host: "ops-off", want: "已停用"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"params":{},"workflow":{"id":"demo.targets","name":"目标校验","nodes":[{"id":"first","tool":"demo.hello","host":%q}],"edges":[]}}`, tc.host)
+			req := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.targets/run?async=true", strings.NewReader(body))
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+			}
+			if !strings.Contains(res.Body.String(), "工作流节点 first 的执行目标无效") || !strings.Contains(res.Body.String(), tc.want) {
+				t.Fatalf("response missing node target error %q: %s", tc.want, res.Body.String())
+			}
+		})
+	}
+}
+
+func writeTestSSHHosts(t *testing.T, baseDir string) {
+	t.Helper()
+	configDir := filepath.Join(baseDir, "configs")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := `interval_seconds: 60
+timeout_seconds: 8
+hosts:
+  - id: ops-live
+    name: Ops Live
+    address: 127.0.0.1
+    port: 22
+    user: root
+    auth: password
+    password: secret
+    enabled: true
+  - id: ops-off
+    name: Ops Off
+    address: 127.0.0.1
+    port: 22
+    user: root
+    auth: password
+    password: secret
+    enabled: false
+`
+	if err := os.WriteFile(filepath.Join(configDir, "ssh_hosts.yaml"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

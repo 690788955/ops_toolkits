@@ -23,6 +23,8 @@ plugins:
   disabled: []
   allowed_commands:
     - docker
+market:
+  sources: []
 host_config_files:
   allowed_dirs: []
 ui:

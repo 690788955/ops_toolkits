@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1242,6 +1244,321 @@ func TestWSLBashScriptConvertsPathsAndExportsEnv(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("wslBashScript() = %q, missing %q", got, want)
 		}
+	}
+}
+
+type fakeRemoteExecutor struct {
+	mu       sync.Mutex
+	hosts    map[string]RemoteHost
+	requests []RemoteToolRequest
+	started  chan string
+	release  chan struct{}
+	stdout   string
+	stderr   string
+	err      error
+}
+
+func (f *fakeRemoteExecutor) DescribeHost(hostID string) (RemoteHost, error) {
+	host, ok := f.hosts[hostID]
+	if !ok {
+		return RemoteHost{}, fmt.Errorf("操作机不存在: %s", hostID)
+	}
+	return host, nil
+}
+
+func (f *fakeRemoteExecutor) RunTool(ctx context.Context, req RemoteToolRequest, stdout, stderr io.Writer) error {
+	f.mu.Lock()
+	f.requests = append(f.requests, req)
+	f.mu.Unlock()
+	if f.started != nil {
+		f.started <- req.HostID
+	}
+	if f.release != nil {
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if f.stdout != "" {
+		if _, err := io.WriteString(stdout, f.stdout); err != nil {
+			return err
+		}
+	}
+	if f.stderr != "" {
+		if _, err := io.WriteString(stderr, f.stderr); err != nil {
+			return err
+		}
+	}
+	return f.err
+}
+
+func TestRunToolValuesOnExecutesOnRemoteHost(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := writeTool(t, dir, "remote", "#!/usr/bin/env bash\nexit 0\n")
+	cfg := toolConfig("demo.remote")
+	cfg.Parameters = []config.Parameter{{Name: "name"}}
+	cfg.PassMode = config.PassMode{Env: true, ParamFile: true, FileName: "params.yaml"}
+	cfg.Env = map[string]string{"TOOL_ENV": "tool-value"}
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.remote": {Entry: config.ToolEntry{ID: "demo.remote", Category: "demo"}, Config: cfg, Dir: toolDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	remote := &fakeRemoteExecutor{
+		hosts:  map[string]RemoteHost{"ops-1": {ID: "ops-1", Name: "Ops 01"}},
+		stdout: "remote-output\n",
+		stderr: "remote-warning\n",
+	}
+	r := New(reg)
+	r.SetRemoteExecutor(remote)
+
+	record, err := r.RunToolValuesOn(context.Background(), "demo.remote", "ops-1", map[string]interface{}{"name": "demo"}, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunToolValuesOn error: %v", err)
+	}
+	if record.Status != "succeeded" || record.HostID != "ops-1" || record.HostName != "Ops 01" {
+		t.Fatalf("record = %#v", record)
+	}
+	if len(remote.requests) != 1 {
+		t.Fatalf("remote requests = %d, want 1", len(remote.requests))
+	}
+	request := remote.requests[0]
+	paramFile := filepath.Join(r.RunsDir, record.ID, "params.yaml")
+	if request.HostID != "ops-1" || request.ToolID != "demo.remote" || request.ToolDir != toolDir {
+		t.Fatalf("request target = %#v", request)
+	}
+	if request.Entry != filepath.Join(toolDir, "bin", "run.sh") || request.Workdir != toolDir {
+		t.Fatalf("request entry/workdir = %#v", request)
+	}
+	if request.ParamFile != paramFile || request.ParamName != "params.yaml" {
+		t.Fatalf("request param file = %#v", request)
+	}
+	if request.GlobalEnvFile != config.GlobalEnvPath(dir) {
+		t.Fatalf("request global env = %q", request.GlobalEnvFile)
+	}
+	envText := strings.Join(request.Env, "\n")
+	for _, want := range []string{"OPS_PARAM_NAME=demo", "TOOL_ENV=tool-value"} {
+		if !strings.Contains(envText, want) {
+			t.Fatalf("request env missing %q: %v", want, request.Env)
+		}
+	}
+	if !strings.Contains(readFile(t, paramFile), "name: demo") {
+		t.Fatalf("param file content = %q", readFile(t, paramFile))
+	}
+	if got := readFile(t, filepath.Join(r.RunsDir, record.ID, "stdout.log")); got != "remote-output\n" {
+		t.Fatalf("stdout log = %q", got)
+	}
+	if got := readFile(t, filepath.Join(r.RunsDir, record.ID, "stderr.log")); got != "remote-warning\n" {
+		t.Fatalf("stderr log = %q", got)
+	}
+}
+
+func TestRunToolValuesOnTargetsRunsHostsConcurrently(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := writeTool(t, dir, "batch", "#!/usr/bin/env bash\nexit 0\n")
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.batch": {Entry: config.ToolEntry{ID: "demo.batch", Category: "demo"}, Config: toolConfig("demo.batch"), Dir: toolDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	remote := &fakeRemoteExecutor{
+		hosts: map[string]RemoteHost{
+			"ops-1": {ID: "ops-1", Name: "Ops 01"},
+			"ops-2": {ID: "ops-2", Name: "Ops 02"},
+		},
+		started: started,
+		release: release,
+		stdout:  "batch-output\n",
+	}
+	r := New(reg)
+	r.SetRemoteExecutor(remote)
+
+	done := make(chan struct{})
+	var batch *BatchRun
+	var runErr error
+	go func() {
+		defer close(done)
+		batch, runErr = r.RunToolValuesOnTargets(context.Background(), "demo.batch", []string{"ops-1", "ops-2", "ops-1"}, nil, nilWriter{}, nilWriter{})
+	}()
+	for index := 0; index < 2; index++ {
+		select {
+		case <-started:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("批量执行未并发启动，仅收到 %d 个启动事件", index)
+		}
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("批量执行未在预期时间内结束")
+	}
+	if runErr != nil {
+		t.Fatalf("RunToolValuesOnTargets error: %v", runErr)
+	}
+	if batch == nil || batch.BatchID == "" || len(batch.Runs) != 2 {
+		t.Fatalf("batch = %#v", batch)
+	}
+	hosts := map[string]bool{}
+	for _, record := range batch.Runs {
+		if record.BatchID != batch.BatchID {
+			t.Fatalf("record batch ID = %q, want %q", record.BatchID, batch.BatchID)
+		}
+		if record.Status != "succeeded" {
+			t.Fatalf("record status = %q, error = %q", record.Status, record.Error)
+		}
+		hosts[record.HostID] = true
+	}
+	if !hosts["ops-1"] || !hosts["ops-2"] || len(hosts) != 2 {
+		t.Fatalf("batch hosts = %v", hosts)
+	}
+	remote.mu.Lock()
+	requestCount := len(remote.requests)
+	remote.mu.Unlock()
+	if requestCount != 2 {
+		t.Fatalf("remote requests = %d, want 2", requestCount)
+	}
+}
+
+func TestRunWorkflowRoutesNodesToRemoteHosts(t *testing.T) {
+	dir := t.TempDir()
+	firstDir := writeTool(t, dir, "first", "#!/usr/bin/env bash\necho local-first\n")
+	secondDir := writeTool(t, dir, "second", "#!/usr/bin/env bash\necho local-second\n")
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.first":  {Entry: config.ToolEntry{ID: "demo.first", Category: "demo"}, Config: toolConfig("demo.first"), Dir: firstDir},
+			"demo.second": {Entry: config.ToolEntry{ID: "demo.second", Category: "demo"}, Config: toolConfig("demo.second"), Dir: secondDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID: "demo.remote-flow",
+		Nodes: []config.WorkflowNode{
+			{ID: "first", Tool: "demo.first", Host: "ops-1"},
+			{ID: "second", Tool: "demo.second", Host: "ops-2"},
+		},
+		Edges: []config.WorkflowEdge{{From: "first", To: "second"}},
+	}
+	reg.Workflows[wf.ID] = &registry.Workflow{Entry: config.WorkflowRef{ID: wf.ID}, Config: wf}
+	remote := &fakeRemoteExecutor{
+		hosts: map[string]RemoteHost{
+			"ops-1": {ID: "ops-1", Name: "Ops 01"},
+			"ops-2": {ID: "ops-2", Name: "Ops 02"},
+		},
+		stdout: "remote-done\n",
+	}
+	r := New(reg)
+	r.SetRemoteExecutor(remote)
+
+	record, err := r.RunWorkflow(context.Background(), wf.ID, nil, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflow error: %v", err)
+	}
+	if record.Status != "succeeded" || len(remote.requests) != 2 {
+		t.Fatalf("record = %#v, requests = %#v", record, remote.requests)
+	}
+	if remote.requests[0].HostID != "ops-1" || remote.requests[1].HostID != "ops-2" {
+		t.Fatalf("request hosts = %q, %q", remote.requests[0].HostID, remote.requests[1].HostID)
+	}
+	steps := map[string]StepRecord{}
+	for _, step := range record.Steps {
+		steps[step.ID] = step
+	}
+	if steps["first"].HostID != "ops-1" || steps["first"].HostName != "Ops 01" || steps["second"].HostID != "ops-2" {
+		t.Fatalf("steps = %#v", steps)
+	}
+	for _, nodeID := range []string{"first", "second"} {
+		if got := readFile(t, filepath.Join(r.RunsDir, record.ID, nodeID, "stdout.log")); !strings.Contains(got, "remote-done") {
+			t.Fatalf("%s stdout log = %q", nodeID, got)
+		}
+	}
+}
+
+func TestRunWorkflowLoopUsesNodeHost(t *testing.T) {
+	dir := t.TempDir()
+	loopDir := writeTool(t, dir, "loop", "#!/usr/bin/env bash\necho local-loop\n")
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.loop": {Entry: config.ToolEntry{ID: "demo.loop", Category: "demo"}, Config: toolConfig("demo.loop"), Dir: loopDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID: "demo.loop-remote",
+		Nodes: []config.WorkflowNode{
+			{ID: "repeat", Type: config.WorkflowNodeTypeLoop, Host: "ops-1", Loop: config.WorkflowLoop{Tool: "demo.loop", MaxIterations: 2}},
+		},
+	}
+	reg.Workflows[wf.ID] = &registry.Workflow{Entry: config.WorkflowRef{ID: wf.ID}, Config: wf}
+	remote := &fakeRemoteExecutor{
+		hosts:  map[string]RemoteHost{"ops-1": {ID: "ops-1", Name: "Ops 01"}},
+		stdout: "remote-iteration\n",
+	}
+	r := New(reg)
+	r.SetRemoteExecutor(remote)
+
+	record, err := r.RunWorkflow(context.Background(), wf.ID, nil, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunWorkflow error: %v", err)
+	}
+	if record.Status != "succeeded" || len(remote.requests) != 2 {
+		t.Fatalf("record = %#v, requests = %#v", record, remote.requests)
+	}
+	for _, request := range remote.requests {
+		if request.HostID != "ops-1" {
+			t.Fatalf("loop request host = %q", request.HostID)
+		}
+	}
+	if len(record.Steps) != 1 || record.Steps[0].HostID != "ops-1" || record.Steps[0].HostName != "Ops 01" {
+		t.Fatalf("steps = %#v", record.Steps)
+	}
+	if got := readFile(t, filepath.Join(r.RunsDir, record.ID, "repeat", "stdout.log")); strings.Count(got, "remote-iteration") != 2 {
+		t.Fatalf("loop stdout log = %q", got)
+	}
+}
+
+func TestRunWorkflowFailsWhenNodeHostMissing(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := writeTool(t, dir, "target", "#!/usr/bin/env bash\necho local\n")
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.target": {Entry: config.ToolEntry{ID: "demo.target", Category: "demo"}, Config: toolConfig("demo.target"), Dir: toolDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	wf := &config.WorkflowConfig{
+		ID:    "demo.missing-host",
+		Nodes: []config.WorkflowNode{{ID: "run", Tool: "demo.target", Host: "missing"}},
+	}
+	reg.Workflows[wf.ID] = &registry.Workflow{Entry: config.WorkflowRef{ID: wf.ID}, Config: wf}
+	remote := &fakeRemoteExecutor{hosts: map[string]RemoteHost{}}
+	r := New(reg)
+	r.SetRemoteExecutor(remote)
+
+	record, err := r.RunWorkflow(context.Background(), wf.ID, nil, nilWriter{}, nilWriter{})
+	if err == nil || !strings.Contains(err.Error(), "操作机不存在") {
+		t.Fatalf("RunWorkflow error = %v", err)
+	}
+	if record.Status != "failed" || len(record.Steps) != 1 || record.Steps[0].Status != "failed" {
+		t.Fatalf("record = %#v", record)
+	}
+	if record.Steps[0].HostID != "" || len(remote.requests) != 0 {
+		t.Fatalf("missing host should not execute remotely: %#v", remote.requests)
 	}
 }
 

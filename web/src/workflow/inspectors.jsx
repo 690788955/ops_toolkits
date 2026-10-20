@@ -1,5 +1,6 @@
 import React, {useState} from 'react'
 import FileUploadInput from '../FileUploadInput.jsx'
+import {sshHostStatusLabel} from '../SshHostsModal.jsx'
 import {conditionOperators, controlNodeHelp, controlNodeTitle} from './catalog.js'
 import {
   defaultExtractConfig as modelDefaultExtractConfig,
@@ -33,30 +34,53 @@ function NodeConfigModal({node, kindLabel, children, onClose, onSave}) {
   )
 }
 
-function NodeConfigEditor({node, tool, loopTool, tools, nodes, sources, paramsText, setParamsText, onNameChange, onConditionChange, onLoopChange, onUploadChange, onExtractConfigChange, onParamChange, onLoopParamChange, onApplyParams}) {
+function NodeConfigEditor({node, tool, loopTool, tools, nodes, hosts = [], sources, paramsText, setParamsText, onNameChange, onConditionChange, onLoopChange, onUploadChange, onExtractConfigChange, onParamChange, onLoopParamChange, onApplyParams, onHostChange}) {
   if (!node) return null
   return (
     <div className="form nodeConfigEditor">
       {node.type === 'conditionNode' ? (
         <ConditionEditor node={node} sources={sources} onNameChange={onNameChange} onChange={onConditionChange} />
       ) : node.type === 'controlNode' ? (
-        <ControlNodeInspector node={node} tools={tools} nodes={nodes} loopTool={loopTool} sources={sources} onNameChange={onNameChange} onLoopChange={onLoopChange} onUploadChange={onUploadChange} onExtractConfigChange={onExtractConfigChange} onLoopParamChange={onLoopParamChange} />
+        <ControlNodeInspector node={node} tools={tools} nodes={nodes} hosts={hosts} loopTool={loopTool} sources={sources} onNameChange={onNameChange} onLoopChange={onLoopChange} onUploadChange={onUploadChange} onExtractConfigChange={onExtractConfigChange} onLoopParamChange={onLoopParamChange} onHostChange={onHostChange} />
       ) : (
         <ToolNodeConfigEditor
           node={node}
           tool={tool}
+          hosts={hosts}
           sources={sources}
           paramsText={paramsText}
           setParamsText={setParamsText}
           onParamChange={onParamChange}
           onApplyParams={onApplyParams}
+          onHostChange={onHostChange}
         />
       )}
     </div>
   )
 }
 
-function ToolNodeConfigEditor({node, tool, sources, paramsText, setParamsText, onParamChange, onApplyParams}) {
+function HostTargetEditor({node, hosts = [], onChange}) {
+  const hostID = node.data.host || ''
+  const selectedHost = (hosts || []).find(host => host.id === hostID) || null
+  return (
+    <label>
+      <span>执行目标</span>
+      <select value={hostID} onChange={event => onChange(event.target.value)}>
+        <option value="">本机执行</option>
+        {(hosts || []).map(host => (
+          <option key={host.id} value={host.id} disabled={!host.enabled}>
+            {host.name || host.id} · {host.user}@{host.address}:{host.port}（{sshHostStatusLabel(host.status)}{host.enabled ? '' : '，已停用'}）
+          </option>
+        ))}
+      </select>
+      {hostID && !selectedHost && <small className="targetWarning">所选操作机已不存在，请重新选择。</small>}
+      {selectedHost && selectedHost.status !== 'online' && <small className="targetWarning">操作机当前{sshHostStatusLabel(selectedHost.status)}，运行时将实时建立连接。</small>}
+      <small>选择操作机后，工具会随执行包通过 SSH 下发并在目标机运行；留空则在本机执行。</small>
+    </label>
+  )
+}
+
+function ToolNodeConfigEditor({node, tool, hosts, sources, paramsText, setParamsText, onParamChange, onApplyParams, onHostChange}) {
   return (
     <>
       <label>
@@ -67,6 +91,7 @@ function ToolNodeConfigEditor({node, tool, sources, paramsText, setParamsText, o
         <span>工具标识</span>
         <input value={node.data.tool} disabled />
       </label>
+      <HostTargetEditor node={node} hosts={hosts} onChange={onHostChange} />
       <ParamMappingEditor tool={tool} params={node.data.params || {}} sources={sources} onChange={onParamChange} />
       <ToolOutputsView tool={tool} />
       <details className="advancedParams">
@@ -179,7 +204,7 @@ function ConditionEditor({node, sources, onNameChange, onChange}) {
   )
 }
 
-function ControlNodeInspector({node, tools, nodes, loopTool, sources, onNameChange, onLoopChange, onUploadChange, onExtractConfigChange, onLoopParamChange}) {
+function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onNameChange, onLoopChange, onUploadChange, onExtractConfigChange, onLoopParamChange, onHostChange}) {
   const isLoop = node.data.controlType === 'loop'
   const loop = normalizeLoopConfig(node.data.loop || modelDefaultLoop())
   const isUpload = node.data.controlType === 'upload'
@@ -223,6 +248,7 @@ function ControlNodeInspector({node, tools, nodes, loopTool, sources, onNameChan
             <span>最大循环次数</span>
             <input type="number" min="1" max="20" value={loop.max_iterations || 1} onChange={event => updateLoop({max_iterations: event.target.value})} />
           </label>
+          <HostTargetEditor node={node} hosts={hosts} onChange={onHostChange} />
           <ParamMappingEditor tool={loopTool} params={loop.params || {}} sources={sources} onChange={onLoopParamChange} emptyMessage="请先选择循环工具，再配置该工具的输入参数。" />
           <div className="empty small">循环节点会重复执行上方选择的工具，不需要在画布上额外添加目标工具节点；普通连线仍保持 DAG。</div>
         </>

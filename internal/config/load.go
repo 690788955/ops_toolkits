@@ -217,6 +217,7 @@ func normalizeRoot(cfg *RootConfig) {
 	if len(cfg.Plugins.Paths) == 0 {
 		cfg.Plugins.Paths = []string{"plugins"}
 	}
+	normalizeMarket(&cfg.Market)
 	if cfg.Paths.Runs == "" {
 		cfg.Paths.Runs = "runs"
 	}
@@ -228,6 +229,30 @@ func normalizeRoot(cfg *RootConfig) {
 	}
 	if cfg.Server.Port == 0 && cfg.HTTP.Addr == "" {
 		cfg.Server.Port = 8080
+	}
+}
+
+func normalizeMarket(cfg *MarketConfig) {
+	if cfg == nil {
+		return
+	}
+	seen := map[string]bool{}
+	for i := range cfg.Sources {
+		source := &cfg.Sources[i]
+		source.ID = strings.TrimSpace(source.ID)
+		source.Name = strings.TrimSpace(source.Name)
+		source.URL = strings.TrimSpace(source.URL)
+		if source.ID == "" {
+			source.ID = fmt.Sprintf("source-%d", i+1)
+		}
+		base := source.ID
+		for suffix := 2; seen[source.ID]; suffix++ {
+			source.ID = fmt.Sprintf("%s-%d", base, suffix)
+		}
+		if source.Name == "" {
+			source.Name = source.ID
+		}
+		seen[source.ID] = true
 	}
 }
 

@@ -49,7 +49,7 @@ func NewRootCommand() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&opts.configVersion, "config-version", "", "配置版本名称")
 	cmd.SetHelpCommand(generatedHelpCommand(opts, "help"))
 
-	cmd.AddCommand(listCommand(opts), validateCommand(opts), runCommand(opts), runsCommand(opts), doctorCommand(opts), helpAutoCommand(opts), startCommand(opts), menuCommand(opts), serveCommand(opts), newCommand(opts), packageCommand(opts))
+	cmd.AddCommand(listCommand(opts), validateCommand(opts), runCommand(opts), runsCommand(opts), doctorCommand(opts), helpAutoCommand(opts), startCommand(opts), menuCommand(opts), serveCommand(opts), newCommand(opts), packageCommand(opts), marketCommand(opts))
 	return cmd
 }
 

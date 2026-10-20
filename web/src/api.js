@@ -7,6 +7,10 @@ export function fetchRunDetail(id) {
   return fetchJSON(`/api/runs/${id}`)
 }
 
+export function fetchRunSummary(id) {
+  return fetchJSON(`/api/runs/${encodeURIComponent(id)}?summary=1`)
+}
+
 export function fetchUIPreferences() {
   return fetchJSON('/api/ui/preferences')
 }
@@ -36,6 +40,14 @@ export async function deleteJSON(path) {
   return readJSONResponse(res)
 }
 
+export function fetchMarket(refresh = false) {
+  return fetchJSON(`/api/market${refresh ? '?refresh=1' : ''}`)
+}
+
+export function postMarketInstall(payload) {
+  return postJSON('/api/market/install', payload)
+}
+
 export async function postPluginZip(file, replace) {
   const form = new FormData()
   form.append('file', file)
@@ -45,6 +57,43 @@ export async function postPluginZip(file, replace) {
     body: form
   })
   return readJSONResponse(res)
+}
+
+export async function downloadUserWorkflowExport(workflowIDs, includeDependencies) {
+  const query = new URLSearchParams()
+  for (const id of workflowIDs || []) {
+    if (id) query.append('workflow', id)
+  }
+  if (includeDependencies) query.set('include_dependencies', '1')
+  const res = await fetch(`/api/plugins/user-workflows.zip?${query.toString()}`, {credentials: 'same-origin'})
+  if (!res.ok) {
+    let body = {}
+    try {
+      body = await res.json()
+    } catch {
+      body = {error: res.statusText || '导出失败'}
+    }
+    const err = new Error(body.error || res.statusText || '导出失败')
+    err.status = res.status
+    err.body = body
+    throw err
+  }
+  const filename = responseFilename(res) || (includeDependencies ? 'user-workflows-bundle.zip' : 'user.workflows.zip')
+  const url = URL.createObjectURL(await res.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  return filename
+}
+
+function responseFilename(res) {
+  const disposition = res.headers.get('Content-Disposition') || ''
+  const match = /filename="?([^";]+)"?/i.exec(disposition)
+  return match ? match[1] : ''
 }
 
 function appendUploadFiles(form, file) {
