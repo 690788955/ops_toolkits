@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
-	"shell_ops/internal/config"
 	"shell_ops/internal/market"
+	"shell_ops/internal/marketsource"
+	"shell_ops/internal/nexus"
 	"shell_ops/internal/plugin"
 	"shell_ops/internal/registry"
 )
@@ -67,33 +70,49 @@ func marketCatalogHandler(state *serverState) http.HandlerFunc {
 		installed := installedMarketPlugins(reg)
 		refresh := req.URL.Query().Get("refresh")
 		force := refresh == "1" || strings.EqualFold(refresh, "true")
-		sourceConfigs := configuredMarketSources(reg)
+		sourceConfigs, err := loadMarketSources(reg)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+			return
+		}
 		sources := make([]marketSourceView, 0, len(sourceConfigs))
-		for index, source := range sourceConfigs {
+		for _, source := range sourceConfigs {
+			if !source.IsEnabled() {
+				continue
+			}
 			view := marketSourceView{
 				ID:      source.ID,
 				Name:    source.Name,
 				URL:     source.URL,
+				Type:    source.Type,
 				Status:  "ok",
 				Plugins: []marketPluginView{},
 			}
-			if view.ID == "" {
-				view.ID = fmt.Sprintf("source-%d", index+1)
-			}
-			if view.Name == "" {
-				view.Name = view.ID
-			}
-			resolved, err := market.ResolveSource(source.URL, reg.BaseDir)
-			if err != nil {
-				view.Status = "error"
-				view.Error = err.Error()
-				sources = append(sources, view)
-				continue
-			}
-			view.Type = string(resolved.Kind)
-			view.Location = resolved.Location
 			ctx, cancel := context.WithTimeout(req.Context(), 20*time.Second)
-			indexData, fetchedAt, err := state.market.Fetch(ctx, source.URL, force)
+			var indexData *market.Index
+			var fetchedAt time.Time
+			if source.Type == marketsource.TypeNexus {
+				cfg := nexusConfigForMarketSource(source)
+				view.Location = cfg.IndexURL()
+				if cfg.Ready() {
+					indexData, _, err = nexus.NewClient(cfg).FetchIndex(ctx)
+					if err == nil {
+						fetchedAt = time.Now().UTC()
+					}
+				} else {
+					err = fmt.Errorf("Nexus 来源未配置完整")
+				}
+			} else {
+				var resolved market.Source
+				resolved, err = market.ResolveSource(source.URL, reg.BaseDir)
+				if err == nil {
+					view.Location = resolved.Location
+					err = ensureLocalMarketIndex(state, reg, source, resolved)
+					if err == nil {
+						indexData, fetchedAt, err = state.market.Fetch(ctx, source.URL, force, marketCredentials(source))
+					}
+				}
+			}
 			cancel()
 			if err != nil {
 				view.Status = "error"
@@ -101,7 +120,9 @@ func marketCatalogHandler(state *serverState) http.HandlerFunc {
 				sources = append(sources, view)
 				continue
 			}
-			view.FetchedAt = fetchedAt.UTC().Format(time.RFC3339)
+			if !fetchedAt.IsZero() {
+				view.FetchedAt = fetchedAt.UTC().Format(time.RFC3339)
+			}
 			view.Plugins = marketPluginViews(indexData, installed, view.ID, view.Name, reg.Root.App.Version)
 			sources = append(sources, view)
 		}
@@ -128,17 +149,30 @@ func marketInstallHandler(state *serverState) http.HandlerFunc {
 			return
 		}
 		reg := state.registry()
-		source, err := findMarketSource(configuredMarketSources(reg), payload.SourceID)
+		sourceConfigs, err := loadMarketSources(reg)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+			return
+		}
+		source, err := findMarketSource(sourceConfigs, payload.SourceID)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 			return
 		}
-		if _, err := market.ResolveSource(source.URL, reg.BaseDir); err != nil {
-			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
-			return
-		}
 		fetchCtx, cancelFetch := context.WithTimeout(req.Context(), 20*time.Second)
-		indexData, _, err := state.market.Fetch(fetchCtx, source.URL, true)
+		var indexData *market.Index
+		if source.Type == marketsource.TypeNexus {
+			indexData, _, err = nexus.NewClient(nexusConfigForMarketSource(source)).FetchIndex(fetchCtx)
+		} else {
+			resolved, resolveErr := market.ResolveSource(source.URL, reg.BaseDir)
+			if resolveErr != nil {
+				err = resolveErr
+			} else if ensureErr := ensureLocalMarketIndex(state, reg, source, resolved); ensureErr != nil {
+				err = ensureErr
+			} else {
+				indexData, _, err = state.market.Fetch(fetchCtx, source.URL, true, marketCredentials(source))
+			}
+		}
 		cancelFetch()
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, response{Error: err.Error()})
@@ -175,7 +209,7 @@ func marketInstallHandler(state *serverState) http.HandlerFunc {
 			return
 		}
 		downloadCtx, cancelDownload := context.WithTimeout(req.Context(), 2*time.Minute)
-		data, err := state.market.Download(downloadCtx, source.URL, entry.Package)
+		data, err := downloadMarketPackage(downloadCtx, state, source, entry.Package)
 		cancelDownload()
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, response{Error: err.Error()})
@@ -192,6 +226,36 @@ func marketInstallHandler(state *serverState) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, response{Status: result.Status, Data: result})
 	}
+}
+
+func ensureLocalMarketIndex(state *serverState, reg *registry.Registry, source marketsource.Source, resolved market.Source) error {
+	if resolved.Kind != market.SourceLocal || filepath.Base(resolved.Location) != "index.json" {
+		return nil
+	}
+	state.marketBuildMu.Lock()
+	defer state.marketBuildMu.Unlock()
+	if _, err := os.Stat(resolved.Location); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("读取本地市场索引失败: %w", err)
+	}
+	if !pathWithinDir(reg.BaseDir, resolved.LocalDir) {
+		return nil
+	}
+	name := strings.TrimSpace(source.Name)
+	if name == "" {
+		name = marketsource.DefaultLocalName
+	}
+	if _, err := market.BuildIndex(market.BuildOptions{
+		BaseDir:    reg.BaseDir,
+		Plugins:    reg.Root.Plugins,
+		OutputDir:  resolved.LocalDir,
+		Name:       name,
+		AllowEmpty: true,
+	}); err != nil {
+		return fmt.Errorf("生成本地市场索引失败: %w", err)
+	}
+	return nil
 }
 
 func installedMarketPlugins(reg *registry.Registry) map[string]installedMarketPlugin {
@@ -262,32 +326,47 @@ func marketInstallStatus(installed, disabled bool, marketVersion, installedVersi
 	}
 }
 
-func configuredMarketSources(reg *registry.Registry) []config.MarketSource {
-	if reg == nil || reg.Root == nil {
-		return nil
-	}
-	if len(reg.Root.Market.Sources) > 0 {
-		return reg.Root.Market.Sources
-	}
-	return []config.MarketSource{{ID: "local", Name: "本地插件市场", URL: "market"}}
-}
-
-func findMarketSource(sources []config.MarketSource, id string) (config.MarketSource, error) {
+func findMarketSource(sources []marketsource.Source, id string) (marketsource.Source, error) {
 	if len(sources) == 0 {
-		return config.MarketSource{}, fmt.Errorf("未配置插件市场源")
+		return marketsource.Source{}, fmt.Errorf("未配置插件市场源")
 	}
 	if id == "" {
 		if len(sources) == 1 {
+			if !sources[0].IsEnabled() {
+				return marketsource.Source{}, fmt.Errorf("插件市场源 %s 已禁用", sources[0].ID)
+			}
 			return sources[0], nil
 		}
-		return config.MarketSource{}, fmt.Errorf("配置了多个市场源，请指定 source_id")
+		return marketsource.Source{}, fmt.Errorf("配置了多个市场源，请指定 source_id")
 	}
 	for _, source := range sources {
 		if source.ID == id {
+			if !source.IsEnabled() {
+				return marketsource.Source{}, fmt.Errorf("插件市场源 %s 已禁用", id)
+			}
 			return source, nil
 		}
 	}
-	return config.MarketSource{}, fmt.Errorf("未找到市场源 %s", id)
+	return marketsource.Source{}, fmt.Errorf("未找到市场源 %s", id)
+}
+
+func downloadMarketPackage(ctx context.Context, state *serverState, source marketsource.Source, pkg market.Package) ([]byte, error) {
+	if source.Type != marketsource.TypeNexus {
+		return state.market.Download(ctx, source.URL, pkg, marketCredentials(source))
+	}
+	cfg := nexusConfigForMarketSource(source)
+	assetPath, err := nexus.ResolveAssetPath(cfg.IndexPath, pkg.URL)
+	if err != nil {
+		return nil, err
+	}
+	data, err := nexus.NewClient(cfg).DownloadPackage(ctx, assetPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := market.VerifyPackage(data, pkg); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func findMarketPlugin(index *market.Index, id, version string) (market.Plugin, error) {

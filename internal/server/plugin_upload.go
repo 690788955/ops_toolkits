@@ -1248,7 +1248,7 @@ func zipPluginDir(pluginDir string) ([]byte, error) {
 		return nil, fmt.Errorf("插件目录名不安全")
 	}
 	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
+	builder := newPluginArchiveBuilder(&buf)
 	err := filepath.WalkDir(pluginDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -1260,11 +1260,6 @@ func zipPluginDir(pluginDir string) ([]byte, error) {
 		if rel == "." {
 			return nil
 		}
-		entryName := filepath.ToSlash(filepath.Join(rootName, rel))
-		checkName := strings.TrimSuffix(entryName, "/")
-		if checkName == "" || strings.HasPrefix(entryName, "/") || filepath.IsAbs(entryName) || hasUnsafeZipPathSegment(checkName) {
-			return fmt.Errorf("插件包含不安全路径: %s", rel)
-		}
 		info, err := d.Info()
 		if err != nil {
 			return err
@@ -1275,32 +1270,78 @@ func zipPluginDir(pluginDir string) ([]byte, error) {
 		if info.IsDir() {
 			return nil
 		}
-		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		header, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return err
-		}
-		header.Name = entryName
-		header.Method = zip.Deflate
-		writer, err := zw.CreateHeader(header)
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(writer, file)
-		return err
+		return builder.addFile(filepath.ToSlash(filepath.Join(rootName, rel)), path, info)
 	})
 	if err != nil {
-		_ = zw.Close()
 		return nil, err
 	}
-	if err := zw.Close(); err != nil {
+	if err := builder.close(); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+type pluginArchiveBuilder struct {
+	writer *zip.Writer
+	names  map[string]bool
+}
+
+func newPluginArchiveBuilder(output io.Writer) *pluginArchiveBuilder {
+	return &pluginArchiveBuilder{writer: zip.NewWriter(output), names: map[string]bool{}}
+}
+
+func (b *pluginArchiveBuilder) reserve(name string) error {
+	name = filepath.ToSlash(name)
+	checkName := strings.TrimSuffix(name, "/")
+	if checkName == "" || strings.HasPrefix(name, "/") || filepath.IsAbs(name) || hasUnsafeZipPathSegment(checkName) {
+		return fmt.Errorf("插件包含不安全路径: %s", name)
+	}
+	if b.names[name] {
+		return fmt.Errorf("插件包包含重复文件: %s", name)
+	}
+	b.names[name] = true
+	return nil
+}
+
+func (b *pluginArchiveBuilder) addFile(name, path string, info os.FileInfo) error {
+	if err := b.reserve(name); err != nil {
+		return err
+	}
+	header, err := zip.FileInfoHeader(info)
+	if err != nil {
+		return err
+	}
+	header.Name = filepath.ToSlash(name)
+	header.Method = zip.Deflate
+	writer, err := b.writer.CreateHeader(header)
+	if err != nil {
+		return err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = io.Copy(writer, file)
+	return err
+}
+
+func (b *pluginArchiveBuilder) addData(name string, data []byte, mode os.FileMode) error {
+	if err := b.reserve(name); err != nil {
+		return err
+	}
+	header := &zip.FileHeader{Name: filepath.ToSlash(name), Method: zip.Deflate}
+	header.SetMode(mode)
+	writer, err := b.writer.CreateHeader(header)
+	if err != nil {
+		return err
+	}
+	_, err = writer.Write(data)
+	return err
+}
+
+func (b *pluginArchiveBuilder) close() error {
+	return b.writer.Close()
 }
 
 func compareVersions(left, right string) int {

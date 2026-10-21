@@ -222,6 +222,18 @@ func resolveLocalSource(value, baseDir string) (Source, error) {
 	return Source{Kind: SourceLocal, Location: abs, LocalDir: filepath.Dir(abs)}, nil
 }
 
+type Credentials struct {
+	Username string
+	Password string
+}
+
+func (c *Credentials) apply(req *http.Request) {
+	if c == nil || strings.TrimSpace(c.Username) == "" {
+		return
+	}
+	req.SetBasicAuth(c.Username, c.Password)
+}
+
 type Client struct {
 	HTTPClient *http.Client
 	BaseDir    string
@@ -244,7 +256,7 @@ func NewClient() *Client {
 	}
 }
 
-func (c *Client) Fetch(ctx context.Context, sourceURL string, force bool) (*Index, time.Time, error) {
+func (c *Client) Fetch(ctx context.Context, sourceURL string, force bool, creds ...*Credentials) (*Index, time.Time, error) {
 	source, err := ResolveSource(sourceURL, c.baseDir())
 	if err != nil {
 		return nil, time.Time{}, err
@@ -252,19 +264,27 @@ func (c *Client) Fetch(ctx context.Context, sourceURL string, force bool) (*Inde
 	if source.Kind == SourceLocal {
 		return fetchLocalIndex(source)
 	}
+	var auth *Credentials
+	if len(creds) > 0 {
+		auth = creds[0]
+	}
+	cacheKey := source.Location
+	if auth != nil && strings.TrimSpace(auth.Username) != "" {
+		cacheKey += "\x00" + auth.Username
+	}
 	ttl := c.CacheTTL
 	if ttl <= 0 {
 		ttl = DefaultCacheTTL
 	}
 	if !force {
 		c.mu.Lock()
-		entry, ok := c.cache[source.Location]
+		entry, ok := c.cache[cacheKey]
 		c.mu.Unlock()
 		if ok && time.Since(entry.FetchedAt) < ttl {
 			return entry.Index, entry.FetchedAt, nil
 		}
 	}
-	index, fetchedAt, err := fetchIndex(ctx, c.httpClient(), source.Location)
+	index, fetchedAt, err := fetchIndex(ctx, c.httpClient(), source.Location, auth)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
@@ -272,7 +292,7 @@ func (c *Client) Fetch(ctx context.Context, sourceURL string, force bool) (*Inde
 	if c.cache == nil {
 		c.cache = map[string]cachedIndex{}
 	}
-	c.cache[source.Location] = cachedIndex{Index: index, FetchedAt: fetchedAt}
+	c.cache[cacheKey] = cachedIndex{Index: index, FetchedAt: fetchedAt}
 	c.mu.Unlock()
 	return index, fetchedAt, nil
 }
@@ -284,7 +304,16 @@ func (c *Client) baseDir() string {
 	return c.BaseDir
 }
 
-func (c *Client) Download(ctx context.Context, indexURL string, pkg Package) ([]byte, error) {
+func (c *Client) ClearCache() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.cache = map[string]cachedIndex{}
+	c.mu.Unlock()
+}
+
+func (c *Client) Download(ctx context.Context, indexURL string, pkg Package, creds ...*Credentials) ([]byte, error) {
 	source, err := ResolveSource(indexURL, c.baseDir())
 	if err != nil {
 		return nil, err
@@ -299,6 +328,9 @@ func (c *Client) Download(ctx context.Context, indexURL string, pkg Package) ([]
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resolved.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+	if len(creds) > 0 {
+		creds[0].apply(req)
 	}
 	req.Header.Set("Accept", "application/zip, application/octet-stream")
 	resp, err := c.httpClient().Do(req)
@@ -322,7 +354,7 @@ func (c *Client) Download(ctx context.Context, indexURL string, pkg Package) ([]
 	if int64(len(data)) > MaxPackageBytes {
 		return nil, fmt.Errorf("插件包超过 %d MB 限制", MaxPackageBytes>>20)
 	}
-	if err := verifyPackage(data, pkg); err != nil {
+	if err := VerifyPackage(data, pkg); err != nil {
 		return nil, err
 	}
 	return data, nil
@@ -391,7 +423,7 @@ func readLocalPackage(source Source, pkg Package) ([]byte, error) {
 	if exceeded {
 		return nil, fmt.Errorf("插件包超过 %d MB 限制", MaxPackageBytes>>20)
 	}
-	if err := verifyPackage(data, pkg); err != nil {
+	if err := VerifyPackage(data, pkg); err != nil {
 		return nil, err
 	}
 	return data, nil
@@ -420,7 +452,7 @@ func readLocalFile(path string, limit int64) ([]byte, bool, error) {
 	return data, false, nil
 }
 
-func verifyPackage(data []byte, pkg Package) error {
+func VerifyPackage(data []byte, pkg Package) error {
 	if pkg.Size > 0 && int64(len(data)) != pkg.Size {
 		return fmt.Errorf("插件包大小不匹配: 期望 %d 字节，实际 %d 字节", pkg.Size, len(data))
 	}
@@ -447,11 +479,12 @@ func (c *Client) httpClient() *http.Client {
 	return &http.Client{Timeout: httpTimeout}
 }
 
-func fetchIndex(ctx context.Context, client *http.Client, sourceURL string) (*Index, time.Time, error) {
+func fetchIndex(ctx context.Context, client *http.Client, sourceURL string, creds *Credentials) (*Index, time.Time, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
+	creds.apply(req)
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {

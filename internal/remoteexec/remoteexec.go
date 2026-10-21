@@ -59,7 +59,11 @@ func (e *Executor) RunTool(ctx context.Context, req runner.RemoteToolRequest, st
 		_ = bundle.Close()
 		_ = os.Remove(bundle.Name())
 	}()
-	result, err := e.ssh.StreamExec(ctx, req.HostID, remoteCommand(), bundle, stdout, stderr)
+	host, err := e.ssh.HostByID(req.HostID)
+	if err != nil {
+		return err
+	}
+	result, err := e.ssh.StreamExec(ctx, req.HostID, remoteCommand(host.BundleBaseDir), bundle, stdout, stderr)
 	if err != nil {
 		return err
 	}
@@ -69,9 +73,15 @@ func (e *Executor) RunTool(ctx context.Context, req runner.RemoteToolRequest, st
 	return nil
 }
 
-func remoteCommand() string {
+func remoteCommand(bundleBaseDir string) string {
 	// 外层包装只使用 POSIX 语法，目标机即使没有 GNU Bash 也能解包并启动。
-	script := `d=$(mktemp -d "${TMPDIR:-/tmp}/opsctl.XXXXXX") || exit 1
+	base := `"${TMPDIR:-/tmp}"`
+	if baseDir := strings.TrimSpace(bundleBaseDir); baseDir != "" {
+		base = shellQuote(baseDir)
+	}
+	script := `base=` + base + `
+mkdir -p "$base" || exit 1
+d=$(mktemp -d "$base/opsctl.XXXXXX") || exit 1
 trap 'rm -rf "$d"' EXIT
 tar -xzf - -C "$d" || exit 1
 /bin/sh "$d/run.sh"`
@@ -186,6 +196,13 @@ func renderRunScript(req runner.RemoteToolRequest, workdir, entry string, entryI
 	builder.WriteString("set -e\n")
 	builder.WriteString("BASE=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n")
 	builder.WriteString("cd " + workdir + "\n")
+	for _, item := range req.GlobalEnv {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok || !isEnvName(key) {
+			continue
+		}
+		builder.WriteString("export " + key + "=" + shellQuote(value) + "\n")
+	}
 	for _, item := range req.Env {
 		key, value, ok := strings.Cut(item, "=")
 		if !ok || !isEnvName(key) {

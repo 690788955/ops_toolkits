@@ -127,6 +127,68 @@ func TestMarketCatalogUsesDefaultLocalSource(t *testing.T) {
 	}
 }
 
+func TestMarketCatalogBuildsMissingLocalMarket(t *testing.T) {
+	reg := testRegistry(t)
+	installTestPlugin(t, reg.BaseDir, "vendor.autolocal", "1.0.0")
+
+	res := httptest.NewRecorder()
+	marketCatalogHandler(newServerState(reg))(res, httptest.NewRequest(http.MethodGet, "/api/market", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Data marketCatalogResponse `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Data.Sources) != 1 {
+		t.Fatalf("市场源数量 = %d, want 1", len(body.Data.Sources))
+	}
+	source := body.Data.Sources[0]
+	if source.Status != "ok" || source.Error != "" {
+		t.Fatalf("市场源状态 = %q, error = %q", source.Status, source.Error)
+	}
+	if len(source.Plugins) != 1 || source.Plugins[0].ID != "vendor.autolocal" {
+		t.Fatalf("自动生成的插件 = %+v", source.Plugins)
+	}
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "market", "index.json")); err != nil {
+		t.Fatalf("本地市场索引未生成: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "market", "packages", "vendor.autolocal-1.0.0.zip")); err != nil {
+		t.Fatalf("本地市场插件包未生成: %v", err)
+	}
+}
+
+func TestMarketCatalogBuildsEmptyLocalMarket(t *testing.T) {
+	reg := testRegistry(t)
+	res := httptest.NewRecorder()
+	marketCatalogHandler(newServerState(reg))(res, httptest.NewRequest(http.MethodGet, "/api/market", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Data marketCatalogResponse `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Data.Sources) != 1 || body.Data.Sources[0].Status != "ok" || len(body.Data.Sources[0].Plugins) != 0 {
+		t.Fatalf("空本地市场 = %+v", body.Data.Sources)
+	}
+	data, err := os.ReadFile(filepath.Join(reg.BaseDir, "market", "index.json"))
+	if err != nil {
+		t.Fatalf("空本地市场索引未生成: %v", err)
+	}
+	var index market.Index
+	if err := json.Unmarshal(data, &index); err != nil {
+		t.Fatal(err)
+	}
+	if index.SchemaVersion != market.SchemaVersion || len(index.Plugins) != 0 {
+		t.Fatalf("空本地市场索引 = %+v", index)
+	}
+}
+
 func TestMarketInstallUsesDefaultLocalSource(t *testing.T) {
 	zipData := pluginZip(t, "vendor.localinstall", "1.0.0", false)
 	reg := testRegistry(t)

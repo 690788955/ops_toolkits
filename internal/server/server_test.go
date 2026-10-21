@@ -539,6 +539,136 @@ func TestWorkflowSaveAPI(t *testing.T) {
 	}
 }
 
+func TestWorkflowSaveAssignsOwnerPluginAndExportsWithPlugin(t *testing.T) {
+	baseReg := testRegistry(t)
+	installDemoToolPlugin(t, baseReg.BaseDir)
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	handler := NewHandler(reg)
+	save := func(owner string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := `{"workflow":{"id":"demo.owned","name":"插件工作流","category":"demo","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]},"owner_plugin_id":"` + owner + `"}`
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/workflows/demo.owned/save", strings.NewReader(body)))
+		return res
+	}
+
+	res := save("demo")
+	if res.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", res.Code, res.Body.String())
+	}
+	pluginWorkflowPath := filepath.Join(reg.BaseDir, "plugins", "demo", "workflows", "demo.owned.yaml")
+	if _, err := os.Stat(pluginWorkflowPath); err != nil {
+		t.Fatalf("工作流未保存到归属插件目录: %v", err)
+	}
+	manifestPath := filepath.Join(reg.BaseDir, "plugins", "demo", "plugin.yaml")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(manifest), "path: workflows/demo.owned.yaml") {
+		t.Fatalf("插件清单未声明工作流: %s", manifest)
+	}
+	if got := reg.Workflows["demo.owned"]; got == nil || got.Source.PluginID != "demo" {
+		t.Fatalf("工作流未归属插件: %#v", got)
+	}
+
+	reloaded, err := registry.Load(reg.BaseDir)
+	if err != nil {
+		t.Fatalf("重新加载注册表失败: %v", err)
+	}
+	if got := reloaded.Workflows["demo.owned"]; got == nil || got.Source.PluginID != "demo" {
+		t.Fatalf("重启后工作流未随插件加载: %#v", got)
+	}
+
+	exportRes := httptest.NewRecorder()
+	handler.ServeHTTP(exportRes, httptest.NewRequest(http.MethodGet, "/api/plugins/demo.zip", nil))
+	if exportRes.Code != http.StatusOK {
+		t.Fatalf("export status = %d, body = %s", exportRes.Code, exportRes.Body.String())
+	}
+	entries := zipEntries(t, exportRes.Body.Bytes())
+	if !entries["demo/workflows/demo.owned.yaml"] {
+		t.Fatalf("插件 ZIP 未自动携带工作流，entries=%v", entries)
+	}
+	exportManifest := string(zipEntryData(t, exportRes.Body.Bytes(), "demo/plugin.yaml"))
+	if !strings.Contains(exportManifest, "path: workflows/demo.owned.yaml") {
+		t.Fatalf("导出插件清单未声明工作流: %s", exportManifest)
+	}
+
+	res = save("user.workflows")
+	if res.Code != http.StatusOK {
+		t.Fatalf("move status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if _, err := os.Stat(pluginWorkflowPath); !os.IsNotExist(err) {
+		t.Fatalf("迁移归属后插件内工作流未删除: %v", err)
+	}
+	userWorkflowPath := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "workflows", "demo.owned.yaml")
+	if _, err := os.Stat(userWorkflowPath); err != nil {
+		t.Fatalf("迁移后未找到用户工作流: %v", err)
+	}
+	manifest, err = os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(manifest), "workflows/demo.owned.yaml") {
+		t.Fatalf("迁移归属后插件清单仍声明工作流: %s", manifest)
+	}
+	if got := reg.Workflows["demo.owned"]; got == nil || got.Source.PluginID != "user.workflows" {
+		t.Fatalf("迁移后工作流归属不正确: %#v", got)
+	}
+
+	bad := httptest.NewRecorder()
+	handler.ServeHTTP(bad, httptest.NewRequest(http.MethodPost, "/api/workflows/demo.owned/save", strings.NewReader(`{"workflow":{"id":"demo.owned","name":"插件工作流","category":"demo","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]},"owner_plugin_id":"missing.plugin"}`)))
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("unknown owner status = %d, want 400, body = %s", bad.Code, bad.Body.String())
+	}
+}
+
+func TestWorkflowDeleteRemovesPluginContribution(t *testing.T) {
+	baseReg := testRegistry(t)
+	installDemoToolPlugin(t, baseReg.BaseDir)
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	handler := NewHandler(reg)
+	saveReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.owned/save", strings.NewReader(`{"workflow":{"id":"demo.owned","name":"插件工作流","category":"demo","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]},"owner_plugin_id":"demo"}`))
+	saveRes := httptest.NewRecorder()
+	handler.ServeHTTP(saveRes, saveReq)
+	if saveRes.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", saveRes.Code, saveRes.Body.String())
+	}
+	workflowPath := filepath.Join(reg.BaseDir, "plugins", "demo", "workflows", "demo.owned.yaml")
+
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodDelete, "/api/workflows/demo.owned", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, body = %s", res.Code, res.Body.String())
+	}
+	if _, err := os.Stat(workflowPath); !os.IsNotExist(err) {
+		t.Fatalf("删除后工作流文件仍存在: %v", err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(reg.BaseDir, "plugins", "demo", "plugin.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(manifest), "workflows/demo.owned.yaml") {
+		t.Fatalf("删除后插件清单仍声明工作流: %s", manifest)
+	}
+	if reg.Workflows["demo.owned"] != nil {
+		t.Fatalf("删除后注册表仍包含工作流")
+	}
+	reloaded, err := registry.Load(reg.BaseDir)
+	if err != nil {
+		t.Fatalf("重新加载注册表失败: %v", err)
+	}
+	if reloaded.Workflows["demo.owned"] != nil {
+		t.Fatalf("删除后重启仍加载到工作流")
+	}
+}
+
 func TestUserWorkflowPluginManifestRemovesDeletedWorkflowEntries(t *testing.T) {
 	reg := testRegistry(t)
 	workflowDir := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "workflows")

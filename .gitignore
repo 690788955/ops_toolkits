@@ -11,6 +11,8 @@ graphify-out/
 /workflows/
 /market/
 /configs/ssh_hosts.yaml
+/configs/nexus.yaml
+/configs/market_sources.yaml
 .ace-tool/
 .agents/
 .codex/

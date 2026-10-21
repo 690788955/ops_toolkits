@@ -31,6 +31,9 @@ type Runner struct {
 
 const workflowUploadResultFile = "upload-result.json"
 
+// LocalTargetID 让批量执行可以把本机作为与操作机并列的目标。
+const LocalTargetID = "__local__"
+
 type RemoteHost struct {
 	ID   string
 	Name string
@@ -47,6 +50,7 @@ type RemoteToolRequest struct {
 	ParamFile     string
 	ParamName     string
 	GlobalEnvFile string
+	GlobalEnv     []string
 }
 
 type RemoteExecutor interface {
@@ -137,7 +141,7 @@ func (r *Runner) runToolValuesOn(ctx context.Context, id, hostID, batchID string
 	if err != nil {
 		return nil, err
 	}
-	host, err := r.remoteHost(hostID)
+	host, executionHostID, err := r.resolveTargetHost(hostID)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +157,7 @@ func (r *Runner) runToolValuesOn(ctx context.Context, id, hostID, batchID string
 	if err != nil {
 		return record, err
 	}
-	err = r.executeTool(ctx, tool, finalValues, finalParams, runDir, hostID, out, errOut)
+	err = r.executeTool(ctx, tool, finalValues, finalParams, runDir, executionHostID, out, errOut)
 	finishRecord(record, err)
 	if saveErr := r.saveRecord(runDir, record); saveErr != nil && err == nil {
 		err = saveErr
@@ -207,8 +211,10 @@ func (r *Runner) prepareBatchTargets(id string, hostIDs []string) ([]string, str
 			continue
 		}
 		seen[hostID] = struct{}{}
-		if _, err := r.remoteHost(hostID); err != nil {
-			return nil, "", err
+		if hostID != LocalTargetID {
+			if _, err := r.remoteHost(hostID); err != nil {
+				return nil, "", err
+			}
 		}
 		unique = append(unique, hostID)
 	}
@@ -223,7 +229,7 @@ func (r *Runner) startToolValuesOn(ctx context.Context, id, hostID, batchID stri
 	if err != nil {
 		return nil, err
 	}
-	host, err := r.remoteHost(hostID)
+	host, executionHostID, err := r.resolveTargetHost(hostID)
 	if err != nil {
 		return nil, err
 	}
@@ -244,11 +250,19 @@ func (r *Runner) startToolValuesOn(ctx context.Context, id, hostID, batchID stri
 	}
 	response := *record
 	go func() {
-		runErr := r.executeTool(ctx, tool, finalValues, finalParams, runDir, hostID, out, errOut)
+		runErr := r.executeTool(ctx, tool, finalValues, finalParams, runDir, executionHostID, out, errOut)
 		finishRecord(record, runErr)
 		_ = r.saveRecord(runDir, record)
 	}()
 	return &response, nil
+}
+
+func (r *Runner) resolveTargetHost(hostID string) (RemoteHost, string, error) {
+	if strings.TrimSpace(hostID) == LocalTargetID {
+		return RemoteHost{ID: LocalTargetID, Name: "本机"}, "", nil
+	}
+	host, err := r.remoteHost(hostID)
+	return host, hostID, err
 }
 
 func (r *Runner) remoteHost(hostID string) (RemoteHost, error) {
@@ -1613,6 +1627,7 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 	workdir := resolveWorkdir(tool.Dir, tool.Config.Execution.Workdir)
 	extraEnv := encodeEnv(params)
 	globalEnvPath := config.GlobalEnvPath(r.Registry.BaseDir)
+	globalEnv := encodeGlobalEnv(r.Registry.GlobalEnv)
 	for k, v := range tool.Config.Env {
 		extraEnv = append(extraEnv, fmt.Sprintf("%s=%s", k, v))
 	}
@@ -1649,6 +1664,7 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 			ParamFile:     paramFile,
 			ParamName:     paramName,
 			GlobalEnvFile: globalEnvPath,
+			GlobalEnv:     globalEnv,
 		}
 		if err := r.remote.RunTool(execCtx, request, stdoutWriter, stderrWriter); err != nil {
 			if execCtx.Err() != nil {
@@ -1657,7 +1673,8 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 			return fmt.Errorf("执行工具 %s 失败: %w", tool.Config.ID, err)
 		}
 	} else {
-		localEnv := append([]string{}, extraEnv...)
+		localEnv := append([]string{}, globalEnv...)
+		localEnv = append(localEnv, extraEnv...)
 		if paramFile != "" {
 			localEnv = append(localEnv, "OPS_PARAM_FILE="+paramFile)
 		}
@@ -1874,6 +1891,22 @@ func encodeEnv(params map[string]string) []string {
 	for k, v := range params {
 		name := "OPS_PARAM_" + strings.ToUpper(strings.ReplaceAll(k, "-", "_"))
 		out = append(out, fmt.Sprintf("%s=%s", name, v))
+	}
+	return out
+}
+
+func encodeGlobalEnv(values config.Values) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, fmt.Sprintf("%s=%v", key, values[key]))
 	}
 	return out
 }

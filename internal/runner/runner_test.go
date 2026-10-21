@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -821,7 +822,7 @@ func TestRunWorkflowExtractConfigNodeMountsDirectoryFiles(t *testing.T) {
 }
 
 func TestRunWorkflowExtractConfigNodeMountsDirectoryFileFromLocalSourceDir(t *testing.T) {
-	dir := filepath.Join("F:/ccb/ops_toolkits", fmt.Sprintf(".test-extract-dir-%d", time.Now().UnixNano()))
+	dir := filepath.Join(t.TempDir(), "ops_toolkits")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -840,8 +841,7 @@ func TestRunWorkflowExtractConfigNodeMountsDirectoryFileFromLocalSourceDir(t *te
 	if err := os.WriteFile(sourcePath, []byte("hosts-data\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sourceDirAlias := filepath.ToSlash(sourceDir)
-	sourceDirAlias = strings.Replace(sourceDirAlias, "F:/", "/mnt/f/", 1)
+	sourceDirAlias := workflowTestAlias(sourceDir, "/mnt/")
 	wf := &config.WorkflowConfig{
 		ID: "demo.extract.dir.local",
 		Nodes: []config.WorkflowNode{
@@ -899,7 +899,7 @@ func TestRunWorkflowExtractConfigNodeMountsDirectoryFileFromLocalSourceDir(t *te
 }
 
 func TestRunWorkflowExtractConfigNodeAcceptsAbsoluteStyleSourcePath(t *testing.T) {
-	dir := filepath.Join("F:/ccb/ops_toolkits", fmt.Sprintf(".test-extract-%d", time.Now().UnixNano()))
+	dir := filepath.Join(t.TempDir(), "ops_toolkits")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -917,8 +917,7 @@ func TestRunWorkflowExtractConfigNodeAcceptsAbsoluteStyleSourcePath(t *testing.T
 	if err := os.WriteFile(sourcePath, []byte("hosts-data\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sourceAlias := filepath.ToSlash(sourcePath)
-	sourceAlias = strings.Replace(sourceAlias, "F:/", "/f/", 1)
+	sourceAlias := workflowTestAlias(sourcePath, "/")
 	wf := &config.WorkflowConfig{
 		ID: "demo.extract.abs",
 		Nodes: []config.WorkflowNode{
@@ -971,6 +970,15 @@ func TestRunWorkflowExtractConfigNodeAcceptsAbsoluteStyleSourcePath(t *testing.T
 	if entry.Path != "runs/uploads/upload-1/ver5.1.2.SP5_HDCB_EVERSK_rel_260528.1_arm64/everisk-deployment/hosts-everisk-deploy" {
 		t.Fatalf("config entry = %#v", entry)
 	}
+}
+
+func workflowTestAlias(path, prefix string) string {
+	path = filepath.ToSlash(path)
+	volume := filepath.VolumeName(path)
+	if len(volume) != 2 || volume[1] != ':' {
+		return path
+	}
+	return prefix + strings.ToLower(volume[:1]) + strings.TrimPrefix(path, volume)
 }
 
 func TestRunWorkflowUploadNodeFailsWithoutUploadResult(t *testing.T) {
@@ -1426,6 +1434,106 @@ func TestRunToolValuesOnTargetsRunsHostsConcurrently(t *testing.T) {
 	remote.mu.Unlock()
 	if requestCount != 2 {
 		t.Fatalf("remote requests = %d, want 2", requestCount)
+	}
+}
+
+func TestRunToolValuesOnPassesGlobalEnvToRemoteHost(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := writeTool(t, dir, "remote-env", "#!/usr/bin/env bash\nexit 0\n")
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.remote-env": {Entry: config.ToolEntry{ID: "demo.remote-env", Category: "demo"}, Config: toolConfig("demo.remote-env"), Dir: toolDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+		GlobalEnv: config.Values{"WORD": "你好", "REGION": "cn"},
+	}
+	remote := &fakeRemoteExecutor{hosts: map[string]RemoteHost{"ops-1": {ID: "ops-1", Name: "Ops 01"}}}
+	r := New(reg)
+	r.SetRemoteExecutor(remote)
+
+	if _, err := r.RunToolValuesOn(context.Background(), "demo.remote-env", "ops-1", nil, nilWriter{}, nilWriter{}); err != nil {
+		t.Fatalf("RunToolValuesOn error: %v", err)
+	}
+	if len(remote.requests) != 1 {
+		t.Fatalf("remote requests = %d, want 1", len(remote.requests))
+	}
+	got := strings.Join(remote.requests[0].GlobalEnv, "\n")
+	if got != "REGION=cn\nWORD=你好" {
+		t.Fatalf("request global env = %q", got)
+	}
+}
+
+func TestStartToolValuesInjectsGlobalEnvIntoLocalProcess(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash 不可用，跳过本地执行校验")
+	}
+	dir := t.TempDir()
+	toolDir := writeTool(t, dir, "local-env", "#!/usr/bin/env bash\necho \"word=$WORD\"\n")
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.local-env": {Entry: config.ToolEntry{ID: "demo.local-env", Category: "demo"}, Config: toolConfig("demo.local-env"), Dir: toolDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+		GlobalEnv: config.Values{"WORD": "你好"},
+	}
+	stdout := &strings.Builder{}
+	if _, err := New(reg).RunToolValues(context.Background(), "demo.local-env", nil, stdout, nilWriter{}); err != nil {
+		t.Fatalf("RunToolValues error: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "word=你好") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunToolValuesOnTargetsIncludesLocalTarget(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := writeTool(t, dir, "batch-local", "#!/usr/bin/env bash\necho local-target-output\n")
+	reg := &registry.Registry{
+		BaseDir: dir,
+		Root:    &config.RootConfig{Paths: config.PathsConfig{Logs: "runs/logs"}},
+		Tools: map[string]*registry.Tool{
+			"demo.batch-local": {Entry: config.ToolEntry{ID: "demo.batch-local", Category: "demo"}, Config: toolConfig("demo.batch-local"), Dir: toolDir},
+		},
+		Workflows: map[string]*registry.Workflow{},
+	}
+	remote := &fakeRemoteExecutor{
+		hosts:  map[string]RemoteHost{"ops-1": {ID: "ops-1", Name: "Ops 01"}},
+		stdout: "remote-output\n",
+	}
+	r := New(reg)
+	r.SetRemoteExecutor(remote)
+
+	batch, err := r.RunToolValuesOnTargets(context.Background(), "demo.batch-local", []string{LocalTargetID, "ops-1"}, nil, nilWriter{}, nilWriter{})
+	if err != nil {
+		t.Fatalf("RunToolValuesOnTargets error: %v", err)
+	}
+	if batch == nil || len(batch.Runs) != 2 {
+		t.Fatalf("batch = %#v", batch)
+	}
+	var localRecord *RunRecord
+	for _, record := range batch.Runs {
+		if record.HostID == LocalTargetID {
+			localRecord = record
+		}
+	}
+	if localRecord == nil {
+		t.Fatalf("local record missing: %#v", batch.Runs)
+	}
+	if localRecord.HostName != "本机" || localRecord.Status != "succeeded" {
+		t.Fatalf("local record = %#v", localRecord)
+	}
+	if got := readFile(t, filepath.Join(r.RunsDir, localRecord.ID, "stdout.log")); got != "local-target-output\n" {
+		t.Fatalf("local stdout = %q", got)
+	}
+	remote.mu.Lock()
+	requestCount := len(remote.requests)
+	remote.mu.Unlock()
+	if requestCount != 1 {
+		t.Fatalf("remote requests = %d, want 1", requestCount)
 	}
 }
 

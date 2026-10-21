@@ -117,6 +117,54 @@ func TestManagerCreateUpdateDelete(t *testing.T) {
 	}
 }
 
+func TestManagerBundleBaseDirValidationAndNormalization(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	view, err := manager.Create(HostInput{
+		Address:       "10.0.0.10",
+		User:          "root",
+		Auth:          AuthKey,
+		BundleBaseDir: " /data/ops/../opsctl/ ",
+	})
+	if err != nil {
+		t.Fatalf("create host with bundle base dir: %v", err)
+	}
+	if view.BundleBaseDir != "/data/opsctl" {
+		t.Fatalf("bundle base dir = %q, want /data/opsctl", view.BundleBaseDir)
+	}
+
+	marshaled, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(marshaled), `"bundle_base_dir":"/data/opsctl"`) {
+		t.Fatalf("view should expose bundle_base_dir: %s", marshaled)
+	}
+
+	for _, invalid := range []string{"data/opsctl", `C:\opsctl`, "/", "/data/\nopsctl"} {
+		if _, err := manager.Create(HostInput{
+			Address:       "10.0.0.11",
+			User:          "root",
+			Auth:          AuthKey,
+			BundleBaseDir: invalid,
+		}); err == nil {
+			t.Fatalf("expected bundle base dir %q to be rejected", invalid)
+		}
+	}
+
+	updated, err := manager.Update(view.ID, HostInput{
+		Address:       "10.0.0.10",
+		User:          "root",
+		Auth:          AuthKey,
+		BundleBaseDir: "",
+	})
+	if err != nil {
+		t.Fatalf("clear bundle base dir: %v", err)
+	}
+	if updated.BundleBaseDir != "" {
+		t.Fatalf("bundle base dir = %q, want empty", updated.BundleBaseDir)
+	}
+}
+
 func TestManagerValidation(t *testing.T) {
 	manager := NewManager(t.TempDir())
 	if _, err := manager.Create(HostInput{Address: "10.0.0.10", User: "root", Auth: AuthPassword}); err == nil {

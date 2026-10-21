@@ -384,10 +384,13 @@ zip -r plugin.mycompany.mytool.zip plugin.mycompany.mytool/
 
 ### Q: 如何访问全局环境配置？
 
-A: 框架会设置 `OPS_GLOBAL_ENV_FILE` 环境变量，指向 `configs/global-env.conf`：
+A: 全局变量会直接导出到工具进程环境（本地执行和远程执行都生效），同时框架会设置 `OPS_GLOBAL_ENV_FILE` 环境变量，指向 `configs/global-env.conf`：
 
 ```bash
-# Shell 脚本可以直接 source
+# 变量已经可以直接使用
+echo "$DB_HOST"
+
+# 也可以按需加载完整配置文件
 source "$OPS_GLOBAL_ENV_FILE"
 
 # 或手动解析

@@ -3,13 +3,14 @@ import { createRoot } from 'react-dom/client'
 import '@xyflow/react/dist/style.css'
 import './styles.css'
 import * as yaml from 'js-yaml'
-import {deleteJSON, downloadUserWorkflowExport, fetchJSON, fetchMarket, fetchRunDetail, fetchRunSummary, postJSON, postMarketInstall, postPluginZip, putJSON} from './api.js'
+import {deleteJSON, downloadUserWorkflowExport, fetchJSON, fetchMarket, fetchMarketSources, fetchRunDetail, fetchRunSummary, postJSON, postMarketInstall, postPluginZip, putJSON} from './api.js'
 import {buildTextDiff, countTextMatches, replaceTextDraft} from './configDiff.js'
 import {buildConfigItemCollections} from './configItems.js'
 import {filterEntries, readableAPIError, summarizeAPIResponse, tagsForEntries} from './utils.js'
 import FileUploadInput from './FileUploadInput.jsx'
 import {normalizeLogFontSize} from './logUtils.js'
 import SshHostsModal, {sshHostStatusLabel, summarizeSshHosts} from './SshHostsModal.jsx'
+import {MarketSourcesModal} from './MarketSourcesPanel.jsx'
 
 const WorkflowEditor = React.lazy(() => import('./workflow/WorkflowEditor.jsx'))
 const LiveRunTerminal = React.lazy(() => import('./LiveRunTerminal.jsx'))
@@ -26,7 +27,7 @@ function App() {
   const [activeTag, setActiveTag] = useState('')
   const [result, setResult] = useState({message: '等待执行...'})
   const [pluginModalOpen, setPluginModalOpen] = useState(false)
-  const [pluginUploadState, setPluginUploadState] = useState({message: '请选择插件 ZIP 包。'})
+  const [pluginUploadState, setPluginUploadState] = useState({message: ''})
   const [configSelectedPlugin, setConfigSelectedPlugin] = useState(null)
   const [configSelectedWorkflow, setConfigSelectedWorkflow] = useState(null)
   const [platformSettingsOpen, setPlatformSettingsOpen] = useState(false)
@@ -35,6 +36,7 @@ function App() {
   const [sshData, setSshData] = useState(null)
   const [sshError, setSshError] = useState('')
   const [runHosts, setRunHosts] = useState([])
+  const [runLocal, setRunLocal] = useState(true)
   const [resultExpanded, setResultExpanded] = useState(false)
   const runVersionRef = useRef(0)
 
@@ -127,10 +129,11 @@ function App() {
     return filterEntries(toolEntries, searchText, activeTag)
   }, [toolEntries, searchText, activeTag])
 
-  const workflowCount = useMemo(() => {
-    const workflows = catalog?.workflows || []
-    return activeCategory ? workflows.filter(item => item.category === activeCategory).length : workflows.length
-  }, [catalog, activeCategory])
+  const workflowCount = useMemo(() => (catalog?.workflows || []).length, [catalog])
+  const visibleWorkflowCount = useMemo(() => {
+    if (!activeCategory) return workflowCount
+    return (catalog?.workflows || []).filter(item => item.category === activeCategory).length
+  }, [catalog, activeCategory, workflowCount])
 
   const configCount = useMemo(() => {
     const {toolConfigItems, workflowConfigItems} = buildConfigItemCollections(catalog, activeCategory)
@@ -146,6 +149,7 @@ function App() {
   function selectEntry(entry) {
     setSelected({...entry, kind: 'tool'})
     setRunHosts([])
+    setRunLocal(true)
     const next = {}
     ;(entry.parameters || []).forEach(param => {
       next[param.name] = param.default === undefined || param.default === null ? '' : String(param.default)
@@ -156,6 +160,10 @@ function App() {
 
   async function runSelected() {
     if (!selected) return
+    if (!runLocal && runHosts.length === 0) {
+      setResult({message: '请至少选择一个执行目标：本机或操作机。'})
+      return
+    }
     const missingRequired = (selected.parameters || [])
       .filter(param => param.required && !hasConfiguredParamValue(params?.[param.name]))
       .map(param => param.description || param.name)
@@ -169,7 +177,7 @@ function App() {
     const runVersion = runVersionRef.current
     setResult({message: '执行中...'})
     try {
-      const body = await postJSON(`/api/tools/${selected.id}/run?async=true`, {params, confirm: Boolean(needsConfirm), targets: runHosts.length > 0 ? runHosts : undefined})
+      const body = await postJSON(`/api/tools/${selected.id}/run?async=true`, {params, confirm: Boolean(needsConfirm), include_local: runLocal, targets: runHosts.length > 0 ? runHosts : undefined})
       if (body.data?.runs?.length) {
         const batch = {batchID: body.data.batch_id, runs: body.data.runs}
         setResult({batch, message: '执行中...'})
@@ -271,8 +279,8 @@ function App() {
             className={activeCategory === '' ? 'category active' : 'category'}
             onClick={() => { setActiveCategory(''); setSelected(null); setActiveTag(''); resetResult() }}
           >
-            <span>全局工作流</span>
-            <small>跨分类选择所有可见工具和工作流</small>
+            <span>全局工具</span>
+            <small>跨分类选择所有可见工具</small>
           </button>
           {(catalog.categories || []).map(item => {
             const disabled = Boolean(item.disabled)
@@ -295,28 +303,41 @@ function App() {
           <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z" /></svg>
           <span>插件管理</span>
         </button>
+        <div className="sidebarFooter" role="group" aria-label="平台快捷操作">
+          <button className="sidebarAction sshStatusButton" type="button" title={sshButtonTitle} aria-label="操作机" onClick={() => setSshModalOpen(true)}>
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-6v2h3v2H7v-2h3v-2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm0 2v9h16V6H4Z" /></svg>
+            <span>操作机</span>
+            <span className="sshStatus">
+              <span className={`sshDot ${sshError ? 'offline' : sshSummary.state}`} aria-hidden="true" />
+              <span className="sshStatusCount">{sshSummary.total > 0 ? `${sshSummary.online}/${sshSummary.total}` : '未配置'}</span>
+            </span>
+          </button>
+          <button className="sidebarAction" type="button" title="工具和插件脚本可引用的全局变量" aria-label="全局变量" onClick={() => setGlobalEnvOpen(true)}>
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M9.4 16.6 4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4Zm5.2 0 4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4Z" /></svg>
+            <span>全局变量</span>
+          </button>
+          <button className="sidebarAction" type="button" title="平台、界面和服务设置" aria-label="平台设置" onClick={() => setPlatformSettingsOpen(true)}>
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19.4 13a7.6 7.6 0 0 0 .1-1 7.6 7.6 0 0 0-.1-1l2.1-1.6a.5.5 0 0 0 .1-.7l-2-3.4a.5.5 0 0 0-.6-.2l-2.5 1a7.6 7.6 0 0 0-1.7-1l-.4-2.6a.5.5 0 0 0-.5-.4h-4a.5.5 0 0 0-.5.4l-.4 2.6a7.6 7.6 0 0 0-1.7 1l-2.5-1a.5.5 0 0 0-.6.2l-2 3.4a.5.5 0 0 0 .1.7L4.5 11a7.6 7.6 0 0 0-.1 1 7.6 7.6 0 0 0 .1 1l-2.1 1.6a.5.5 0 0 0-.1.7l2 3.4a.5.5 0 0 0 .6.2l2.5-1a7.6 7.6 0 0 0 1.7 1l.4 2.6a.5.5 0 0 0 .5.4h4a.5.5 0 0 0 .5-.4l.4-2.6a7.6 7.6 0 0 0 1.7-1l2.5 1a.5.5 0 0 0 .6-.2l2-3.4a.5.5 0 0 0-.1-.7L19.4 13ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z" /></svg>
+            <span>平台设置</span>
+          </button>
+        </div>
       </aside>
 
       <main className="content">
         <header className="topbar">
           <div>
-            <h2>{category?.name || '全局工作流'}</h2>
-            <p>{category?.description || '跨分类选择工具或维护工作流'}</p>
-          </div>
-          <div className="topbarActions">
-            <button className="settingsButton sshStatusButton" type="button" title={sshButtonTitle} aria-label="操作机" onClick={() => setSshModalOpen(true)}>
-              <span className={`sshDot ${sshError ? 'offline' : sshSummary.state}`} aria-hidden="true" />
-              <span>操作机</span>
-              <span className="sshStatusCount">{sshSummary.total > 0 ? `${sshSummary.online}/${sshSummary.total}` : '未配置'}</span>
-            </button>
-            <button className="settingsButton" type="button" title="工具和插件脚本可引用的全局变量" aria-label="全局变量" onClick={() => setGlobalEnvOpen(true)}>全局变量</button>
-            <button className="settingsButton" type="button" title="平台、界面和服务设置" aria-label="平台设置" onClick={() => setPlatformSettingsOpen(true)}>平台设置</button>
+            <h2>{activeTab === 'workflows' ? '工作流管理' : category?.name || '全局工具'}</h2>
+            <p>{activeTab === 'workflows'
+              ? activeCategory
+                ? `当前分类 ${category?.name || activeCategory}，${visibleWorkflowCount} 个工作流可加载；画布仍可跨分类组合工具`
+                : `统一管理全部 ${workflowCount} 个工作流，可跨分类组合工具`
+              : category?.description || '跨分类选择所有可见工具'}</p>
           </div>
         </header>
 
         <div className="tabs">
           <button className={activeTab === 'tools' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('tools'); setSelected(null); setActiveTag(''); resetResult() }}>工具 <span className="tabCount">{toolEntries.length}</span></button>
-          <button className={activeTab === 'workflows' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('workflows'); setSelected(null); setActiveTag(''); resetResult() }}>工作流 <span className="tabCount">{workflowCount}</span></button>
+          <button className={activeTab === 'workflows' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('workflows'); setSelected(null); setActiveTag(''); resetResult() }}>工作流管理 <span className="tabCount">{visibleWorkflowCount}</span></button>
           {hasConfigTab && <button className={activeTab === 'config' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('config'); setSelected(null); setActiveTag(''); setConfigSelectedPlugin(null); setConfigSelectedWorkflow(null); resetResult() }}>配置 <span className="tabCount">{configCount}</span></button>}
           <button className={activeTab === 'runs' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('runs'); setSelected(null); setActiveTag(''); resetResult() }}>运行记录</button>
         </div>
@@ -358,7 +379,7 @@ function App() {
             refreshCatalog={refreshCatalog}
           />
         ) : activeTab !== 'workflows' ? (
-          <RunPanel entries={entries} totalEntries={toolEntries.length} selected={selected} params={params} setParams={setParams} selectEntry={selectEntry} runSelected={runSelected} searchText={searchText} setSearchText={setSearchText} activeTag={activeTag} setActiveTag={setActiveTag} availableTags={availableTags} hosts={sshData?.hosts || []} runHosts={runHosts} setRunHosts={setRunHosts} isRunning={result?.run?.status === 'running' || (result?.batch?.runs || []).some(run => run.status === 'running')} />
+          <RunPanel entries={entries} totalEntries={toolEntries.length} selected={selected} params={params} setParams={setParams} selectEntry={selectEntry} runSelected={runSelected} searchText={searchText} setSearchText={setSearchText} activeTag={activeTag} setActiveTag={setActiveTag} availableTags={availableTags} hosts={sshData?.hosts || []} runHosts={runHosts} setRunHosts={setRunHosts} runLocal={runLocal} setRunLocal={setRunLocal} isRunning={result?.run?.status === 'running' || (result?.batch?.runs || []).some(run => run.status === 'running')} />
         ) : null}
 
         {activeTab === 'tools' && (
@@ -780,10 +801,25 @@ function GridViewIcon() {
   )
 }
 
+function FolderIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M2.3 4.4c0-.7.6-1.2 1.2-1.2h2.7l1.3 1.4h5c.7 0 1.2.6 1.2 1.2v5.8c0 .7-.6 1.2-1.2 1.2H3.5c-.7 0-1.2-.6-1.2-1.2V4.4z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function GearIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path fillRule="evenodd" clipRule="evenodd" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" />
+    </svg>
+  )
+}
+
 function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onChanged}) {
   const [tab, setTab] = useState('installed')
-  const [file, setFile] = useState(null)
-  const [uploading, setUploading] = useState(false)
+  const [uploadOpen, setUploadOpen] = useState(false)
   const [pluginActionID, setPluginActionID] = useState('')
   const [target, setTarget] = useState('windows/amd64')
   const [market, setMarket] = useState(null)
@@ -791,37 +827,24 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
   const [marketError, setMarketError] = useState('')
   const [marketSearch, setMarketSearch] = useState('')
   const [marketSourceID, setMarketSourceID] = useState('')
+  const [sourceManagerOpen, setSourceManagerOpen] = useState(false)
   const [installedView, setInstalledView] = useState('list')
   const [marketView, setMarketView] = useState('list')
   const [installingKey, setInstallingKey] = useState('')
   const [exportOpen, setExportOpen] = useState(false)
-  const [exportSelection, setExportSelection] = useState([])
-  const [includeExportPlugins, setIncludeExportPlugins] = useState(true)
-  const [exporting, setExporting] = useState(false)
   const plugins = useMemo(() => [...(catalog?.plugins || [])].sort((left, right) => String(left.id || '').localeCompare(String(right.id || ''), 'zh-CN')), [catalog])
   const userWorkflows = useMemo(() => {
     return [...(catalog?.workflows || [])]
       .filter(item => item.source?.plugin_id === 'user.workflows')
       .sort((left, right) => String(left.name || left.id).localeCompare(String(right.name || right.id), 'zh-CN'))
   }, [catalog])
-  const selectedWorkflows = useMemo(() => userWorkflows.filter(item => exportSelection.includes(item.id)), [userWorkflows, exportSelection])
-  const exportDependencies = useMemo(() => {
-    const map = new Map()
-    for (const workflow of selectedWorkflows) {
-      for (const dependency of workflow.dependencies || []) {
-        map.set(dependency.id, dependency)
-      }
-    }
-    return [...map.values()].sort((left, right) => String(left.id).localeCompare(String(right.id), 'zh-CN'))
-  }, [selectedWorkflows])
-  const exportMissingTools = useMemo(() => {
-    const tools = new Set()
-    for (const workflow of selectedWorkflows) {
-      for (const tool of workflow.missing_tools || []) tools.add(tool)
-    }
-    return [...tools].sort((left, right) => left.localeCompare(right, 'zh-CN'))
-  }, [selectedWorkflows])
+  const workflowCountForPlugin = pluginID => (catalog?.workflows || []).filter(item => item.source?.plugin_id === pluginID).length
   const marketSources = market?.sources || []
+  useEffect(() => {
+    if (marketSourceID && !marketSources.some(source => source.id === marketSourceID)) {
+      setMarketSourceID('')
+    }
+  }, [marketSources, marketSourceID])
   const marketItems = useMemo(() => {
     const items = []
     for (const source of marketSources) {
@@ -866,29 +889,6 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
   ]
   const runtimeBase = item => `/api/plugins/${encodeURIComponent(item.id)}/runtime`
 
-  async function uploadPlugin(replace = false) {
-    if (!file) {
-      setState({message: '请先选择插件 ZIP 包。'})
-      return
-    }
-    setUploading(true)
-    setState({message: replace ? '正在更新插件...' : '正在上传插件...'})
-    try {
-      const body = await postPluginZip(file, replace)
-      setState({message: `插件${body.status === 'updated' ? '更新' : '上传'}成功。`, response: body})
-      await onUploaded(body)
-    } catch (err) {
-      const detail = err.body?.data
-      if (err.status === 409 && detail?.existing) {
-        setState({message: `插件已存在，是否更新？当前版本：${detail.existing_version || '-'}，上传版本：${detail.version || '-'}`, duplicate: true, response: err.body})
-      } else {
-        setState({message: String(err), response: err.body})
-      }
-    } finally {
-      setUploading(false)
-    }
-  }
-
   async function loadMarket(refresh = false) {
     setMarketLoading(true)
     setMarketError('')
@@ -922,34 +922,6 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
       setState({message: readableAPIError(err, `${action}插件失败。`), response: err.body})
     } finally {
       setInstallingKey('')
-    }
-  }
-
-  function toggleExportPanel() {
-    if (!exportOpen) setExportSelection(userWorkflows.map(item => item.id))
-    setExportOpen(!exportOpen)
-  }
-
-  function toggleExportWorkflow(workflowID) {
-    setExportSelection(current => current.includes(workflowID) ? current.filter(id => id !== workflowID) : [...current, workflowID])
-  }
-
-  async function exportUserWorkflows() {
-    const ids = selectedWorkflows.map(item => item.id)
-    if (ids.length === 0) {
-      setState({message: '请至少选择一个用户工作流。'})
-      return
-    }
-    setExporting(true)
-    setState({message: `正在导出 ${ids.length} 个用户工作流...`})
-    try {
-      const filename = await downloadUserWorkflowExport(ids, includeExportPlugins)
-      const pluginText = includeExportPlugins && exportDependencies.length > 0 ? `及 ${exportDependencies.length} 个依赖插件` : ''
-      setState({message: `已导出 ${ids.length} 个用户工作流${pluginText}：${filename}`})
-    } catch (err) {
-      setState({message: readableAPIError(err, '导出用户工作流失败。'), response: err.body})
-    } finally {
-      setExporting(false)
     }
   }
 
@@ -1004,7 +976,7 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
       <div className="pluginItemActions">
         {!item.disabled && (
           <div className="pluginExportLinks">
-            <a className="secondary" href={`/api/plugins/${encodeURIComponent(item.id)}.zip`}>插件 ZIP</a>
+            <a className="secondary" href={`/api/plugins/${encodeURIComponent(item.id)}.zip`} title="插件 ZIP 会自动包含归属于该插件的工作流">插件 ZIP{workflowCountForPlugin(item.id) > 0 ? `（含 ${workflowCountForPlugin(item.id)} 个工作流）` : ''}</a>
             <a className="secondary" href={`${runtimeBase(item)}.zip?goos=${encodeURIComponent(goos)}&goarch=${encodeURIComponent(goarch)}`}>运行包 ZIP</a>
           </div>
         )}
@@ -1083,70 +1055,14 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
           <button className="modalClose" onClick={onClose}>×</button>
         </div>
         <div className="pluginManagerTabs" role="tablist" aria-label="插件管理页签">
-          <button type="button" role="tab" aria-selected={tab === 'installed'} className={tab === 'installed' ? 'active' : ''} onClick={() => setTab('installed')}>已安装</button>
+          <button type="button" role="tab" aria-selected={tab === 'installed'} className={tab === 'installed' ? 'active' : ''} onClick={() => { setTab('installed'); setSourceManagerOpen(false) }}>已安装</button>
           <button type="button" role="tab" aria-selected={tab === 'market'} className={tab === 'market' ? 'active' : ''} onClick={() => setTab('market')}>插件市场</button>
         </div>
         {tab === 'installed' ? (
         <div className="pluginModalActions">
           <section className="pluginQuickActions">
-            <a className="primary downloadTemplate" href="/api/dev/toolkit.zip">下载插件模板</a>
-            <button type="button" className="secondary downloadTemplate" onClick={toggleExportPanel}>{exportOpen ? '收起导出选择' : '导出用户工作流'}</button>
-          </section>
-          {exportOpen && (
-            <section className="workflowExportPanel">
-              <div className="workflowExportHeader">
-                <div>
-                  <strong>选择要导出的工作流</strong>
-                  <span>导出的 ZIP 可直接作为 user.workflows 插件安装。</span>
-                </div>
-                <div className="workflowExportHeaderActions">
-                  <button type="button" className="secondary" disabled={userWorkflows.length === 0} onClick={() => setExportSelection(userWorkflows.map(item => item.id))}>全选</button>
-                  <button type="button" className="secondary" disabled={selectedWorkflows.length === 0} onClick={() => setExportSelection([])}>清空</button>
-                </div>
-              </div>
-              <div className="workflowExportList">
-                {userWorkflows.map(item => (
-                  <label className={exportSelection.includes(item.id) ? 'workflowExportItem selected' : 'workflowExportItem'} key={item.id}>
-                    <input type="checkbox" checked={exportSelection.includes(item.id)} onChange={() => toggleExportWorkflow(item.id)} />
-                    <span>
-                      <strong>{item.name || item.id}</strong>
-                      <small>{item.id}{item.category ? ` · ${item.category}` : ''}</small>
-                      {(item.dependencies || []).length > 0 && <small className="workflowExportDeps">依赖：{item.dependencies.map(dep => dep.name || dep.id).join('、')}</small>}
-                      {(item.missing_tools || []).length > 0 && <small className="workflowExportWarning">缺少工具：{item.missing_tools.join('、')}</small>}
-                    </span>
-                  </label>
-                ))}
-                {userWorkflows.length === 0 && <div className="empty small">当前没有用户工作流。</div>}
-              </div>
-              <label className="workflowExportDependencyToggle">
-                <input type="checkbox" checked={includeExportPlugins} onChange={event => setIncludeExportPlugins(event.target.checked)} />
-                <span>同时导出引用的插件{exportDependencies.length > 0 ? `（${exportDependencies.length} 个）` : ''}</span>
-              </label>
-              {includeExportPlugins && exportDependencies.length > 0 && (
-                <div className="workflowExportDependencyList">
-                  {exportDependencies.map(dependency => (
-                    <span className="marketTag" key={dependency.id}>{dependency.name || dependency.id}@{dependency.version || '-'}{dependency.disabled ? '（已禁用）' : ''}</span>
-                  ))}
-                </div>
-              )}
-              {includeExportPlugins && exportMissingTools.length > 0 && (
-                <small className="workflowExportWarning">以下工具没有找到对应插件：{exportMissingTools.join('、')}</small>
-              )}
-              <div className="workflowExportFooter">
-                <button type="button" className="primary" disabled={selectedWorkflows.length === 0 || exporting} onClick={exportUserWorkflows}>{exporting ? '正在导出...' : `导出 ${selectedWorkflows.length} 个工作流`}</button>
-                <small>依赖插件会以 ZIP 形式放在导出包的 dependencies/ 目录中，需要单独上传安装。</small>
-              </div>
-            </section>
-          )}
-          <section className="pluginUploadBox">
-            <label>
-              <span>安装插件 ZIP</span>
-              <input type="file" accept=".zip,application/zip" onChange={event => { setFile(event.target.files?.[0] || null); setState({message: '已选择插件 ZIP，点击上传开始安装。'}) }} />
-            </label>
-            <div className="buttonRow">
-              <button className="primary" disabled={!file || uploading} onClick={() => uploadPlugin(false)}>上传</button>
-              {state.duplicate && <button className="secondary" disabled={uploading} onClick={() => uploadPlugin(true)}>确认更新</button>}
-            </div>
+            <button type="button" className="primary" onClick={() => setUploadOpen(true)}>安装插件</button>
+            <button type="button" className="secondary" onClick={() => setExportOpen(true)}>导出用户工作流</button>
           </section>
           <section className="pluginInstalledListSection">
             <div className="pluginInstalledHeader">
@@ -1194,7 +1110,7 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
                 {marketSources.length > 1 && (
                   <select value={marketSourceID} onChange={event => setMarketSourceID(event.target.value)}>
                     <option value="">全部来源</option>
-                    {marketSources.map(source => <option key={source.id} value={source.id}>{source.name || source.id}{source.type === 'local' ? '（本地）' : source.type === 'remote' ? '（远程）' : ''}</option>)}
+                    {marketSources.map(source => <option key={source.id} value={source.id}>{source.name || source.id}{source.type === 'local' ? '（本地）' : source.type === 'remote' ? '（远程）' : source.type === 'nexus' ? '（Nexus）' : ''}</option>)}
                   </select>
                 )}
                 <div className="viewSwitch" role="group" aria-label="插件市场视图">
@@ -1208,13 +1124,16 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
                   </button>
                 </div>
                 <button className="secondary" type="button" disabled={marketLoading} onClick={() => loadMarket(true)}>{marketLoading ? '刷新中...' : '刷新'}</button>
+                <button className="secondary iconButton" type="button" title="市场来源配置" aria-label="市场来源配置" onClick={() => setSourceManagerOpen(true)}>
+                  <GearIcon />
+                </button>
               </div>
             </div>
             <small className="marketHint">插件会写入本机插件目录，并在执行时运行本地脚本，安装前请确认来源可信。</small>
             {marketSources.length === 1 && (
               <small className="marketHint">
                 当前来源：{marketSources[0].name || marketSources[0].id}
-                {marketSources[0].type === 'local' ? `（本地目录：${marketSources[0].location || marketSources[0].url}）` : ''}
+                {marketSources[0].type === 'local' ? `（本地目录：${marketSources[0].location || marketSources[0].url}）` : marketSources[0].type === 'nexus' ? '（Nexus 仓库）' : ''}
               </small>
             )}
             {marketError && <div className="marketSourceError">{marketError}</div>}
@@ -1224,7 +1143,7 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
               </div>
             ))}
             {!marketLoading && marketSources.length === 0 && !marketError && (
-              <div className="empty small">未找到可用的插件市场源。请运行 opsctl market index 生成默认的 market/ 本地市场，或在平台设置中配置远程市场地址。</div>
+              <div className="empty small">未找到可用的插件市场源。点击右上角齿轮按钮新增本地目录、远程索引或 Nexus 仓库。</div>
             )}
             {marketLoading && marketItems.length === 0 && <div className="empty small">正在加载插件市场...</div>}
             {marketView === 'list' ? (
@@ -1239,7 +1158,279 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
             {!marketLoading && marketSources.some(source => source.status === 'ok') && marketRows.length === 0 && <div className="empty small">没有匹配的插件。</div>}
           </div>
         )}
-        <pre className="modalResult">{state.response ? JSON.stringify(state.response, null, 2) : state.message}</pre>
+        {sourceManagerOpen && (
+          <MarketSourcesModal
+            onClose={() => setSourceManagerOpen(false)}
+            onChanged={() => {
+              setMarket(null)
+              setMarketError('')
+              loadMarket(true)
+            }}
+          />
+        )}
+        {uploadOpen && (
+          <PluginUploadModal
+            onClose={() => setUploadOpen(false)}
+            onUploaded={onUploaded}
+          />
+        )}
+        {exportOpen && (
+          <WorkflowExportModal
+            workflows={userWorkflows}
+            categories={catalog?.categories || []}
+            onClose={() => setExportOpen(false)}
+          />
+        )}
+        {(state.response || state.message) && (
+          <pre className="modalResult">{state.response ? JSON.stringify(state.response, null, 2) : state.message}</pre>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function PluginUploadModal({onClose, onUploaded}) {
+  const [file, setFile] = useState(null)
+  const [uploading, setUploading] = useState(false)
+  const [message, setMessage] = useState('')
+  const [messageError, setMessageError] = useState(false)
+  const [duplicate, setDuplicate] = useState(null)
+
+  function selectFile(nextFile) {
+    setFile(nextFile)
+    setDuplicate(null)
+    setMessageError(false)
+    setMessage(nextFile ? `已选择 ${nextFile.name}，点击上传开始安装。` : '')
+  }
+
+  async function upload(replace = false) {
+    if (!file) {
+      setMessage('请先选择插件 ZIP 包。')
+      setMessageError(true)
+      return
+    }
+    setUploading(true)
+    setMessageError(false)
+    setMessage(replace ? '正在更新插件...' : '正在安装插件...')
+    try {
+      const body = await postPluginZip(file, replace)
+      setMessage(`插件${body.status === 'updated' ? '更新' : '安装'}成功。`)
+      setDuplicate(null)
+      await onUploaded(body)
+    } catch (err) {
+      const detail = err.body?.data
+      if (err.status === 409 && detail?.existing) {
+        setMessage(`插件已存在，是否覆盖更新？当前版本：${detail.existing_version || '-'}，上传版本：${detail.version || '-'}`)
+        setDuplicate(detail)
+      } else {
+        setMessage(readableAPIError(err, '安装插件失败。'))
+        setMessageError(true)
+      }
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  return (
+    <div className="modalBackdrop modalBackdropNested" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
+      <div className="modal pluginOperationModal" role="dialog" aria-modal="true" aria-labelledby="plugin-upload-title">
+        <div className="modalHeader">
+          <div>
+            <h3 id="plugin-upload-title">安装插件</h3>
+            <p>上传插件 ZIP 包，安装到本机插件目录。安装后如需更新同 ID 插件，可再次上传并确认更新。</p>
+          </div>
+          <button className="modalClose" type="button" onClick={onClose} aria-label="关闭">×</button>
+        </div>
+        <div className="pluginUploadForm">
+          <label>
+            <span>插件 ZIP 包</span>
+            <input type="file" accept=".zip,application/zip" onChange={event => selectFile(event.target.files?.[0] || null)} />
+          </label>
+          {message && <div className={messageError ? 'pluginOperationMessage error' : 'pluginOperationMessage'}>{message}</div>}
+          <div className="buttonRow">
+            <button className="primary" type="button" disabled={!file || uploading} onClick={() => upload(false)}>{uploading ? '正在处理...' : '上传'}</button>
+            {duplicate && <button className="secondary" type="button" disabled={uploading} onClick={() => upload(true)}>确认更新</button>}
+            <a className="secondary downloadTemplate" href="/api/dev/toolkit.zip">下载插件模板</a>
+            <button className="secondary" type="button" onClick={onClose}>关闭</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function WorkflowExportModal({workflows, categories = [], onClose}) {
+  const [selection, setSelection] = useState(() => workflows.map(item => item.id))
+  const [includePlugins, setIncludePlugins] = useState(true)
+  const [exporting, setExporting] = useState(false)
+  const [message, setMessage] = useState('')
+  const [messageError, setMessageError] = useState(false)
+  const [activeCategory, setActiveCategory] = useState('')
+  const [search, setSearch] = useState('')
+  const selectedWorkflows = useMemo(() => workflows.filter(item => selection.includes(item.id)), [workflows, selection])
+  const categoryLabels = useMemo(() => new Map(categories.map(item => [item.id, item.name || item.id])), [categories])
+  const categoryGroups = useMemo(() => {
+    const map = new Map()
+    for (const workflow of workflows) {
+      const category = String(workflow.category || '').trim()
+      const key = category || '__uncategorized__'
+      const group = map.get(key)
+      if (group) group.count += 1
+      else map.set(key, {id: key, label: workflowCategoryDisplayName(category, categoryLabels), count: 1})
+    }
+    return [...map.values()].sort((left, right) => {
+      if (left.id === '__uncategorized__') return 1
+      if (right.id === '__uncategorized__') return -1
+      return left.label.localeCompare(right.label, 'zh-CN')
+    })
+  }, [workflows, categoryLabels])
+  const visibleWorkflows = useMemo(() => {
+    const keyword = search.trim().toLowerCase()
+    return workflows.filter(item => {
+      if (activeCategory) {
+        const category = String(item.category || '').trim() || '__uncategorized__'
+        if (category !== activeCategory) return false
+      }
+      if (!keyword) return true
+      const category = String(item.category || '').trim()
+      const categoryLabel = workflowCategoryDisplayName(category, categoryLabels)
+      return [item.name || '', item.id || '', category, categoryLabel].join(' ').toLowerCase().includes(keyword)
+    })
+  }, [workflows, activeCategory, search, categoryLabels])
+  const activeCategoryLabel = activeCategory ? (categoryGroups.find(group => group.id === activeCategory)?.label || '分类') : '全部工作流'
+  const visibleSelectedCount = visibleWorkflows.filter(item => selection.includes(item.id)).length
+  const dependencies = useMemo(() => {
+    const map = new Map()
+    for (const workflow of selectedWorkflows) {
+      for (const dependency of workflow.dependencies || []) {
+        map.set(dependency.id, dependency)
+      }
+    }
+    return [...map.values()].sort((left, right) => String(left.id).localeCompare(String(right.id), 'zh-CN'))
+  }, [selectedWorkflows])
+  const missingTools = useMemo(() => {
+    const tools = new Set()
+    for (const workflow of selectedWorkflows) {
+      for (const tool of workflow.missing_tools || []) tools.add(tool)
+    }
+    return [...tools].sort((left, right) => left.localeCompare(right, 'zh-CN'))
+  }, [selectedWorkflows])
+
+  function toggleWorkflow(workflowID) {
+    setSelection(current => current.includes(workflowID) ? current.filter(id => id !== workflowID) : [...current, workflowID])
+  }
+
+  function selectVisibleWorkflows() {
+    setSelection(current => [...new Set([...current, ...visibleWorkflows.map(item => item.id)])])
+  }
+
+  async function exportWorkflows() {
+    const ids = selectedWorkflows.map(item => item.id)
+    if (ids.length === 0) {
+      setMessage('请至少选择一个用户工作流。')
+      setMessageError(true)
+      return
+    }
+    setExporting(true)
+    setMessageError(false)
+    setMessage(`正在导出 ${ids.length} 个用户工作流...`)
+    try {
+      const filename = await downloadUserWorkflowExport(ids, includePlugins)
+      const pluginText = includePlugins && dependencies.length > 0 ? `及 ${dependencies.length} 个依赖插件` : ''
+      setMessage(`已导出 ${ids.length} 个用户工作流${pluginText}：${filename}`)
+    } catch (err) {
+      setMessage(readableAPIError(err, '导出用户工作流失败。'))
+      setMessageError(true)
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  return (
+    <div className="modalBackdrop modalBackdropNested" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
+      <div className="modal pluginOperationModal workflowExportModal" role="dialog" aria-modal="true" aria-labelledby="workflow-export-title">
+        <div className="modalHeader">
+          <div>
+            <h3 id="workflow-export-title">导出用户工作流</h3>
+            <p>选择要导出的用户工作流，导出的 ZIP 可直接作为 user.workflows 插件安装。</p>
+          </div>
+          <button className="modalClose" type="button" onClick={onClose} aria-label="关闭">×</button>
+        </div>
+        <div className="workflowExportPanel">
+          <div className="workflowExportHeader">
+            <div>
+              <strong>选择要导出的工作流</strong>
+              <span>共 {workflows.length} 个用户工作流，已选择 {selectedWorkflows.length} 个；可跨分类勾选。</span>
+            </div>
+            <div className="workflowExportHeaderActions">
+              <button type="button" className="secondary" disabled={visibleWorkflows.length === 0} onClick={selectVisibleWorkflows}>全选当前</button>
+              <button type="button" className="secondary" disabled={selectedWorkflows.length === 0} onClick={() => setSelection([])}>清空</button>
+            </div>
+          </div>
+          <div className="workflowExportLayout">
+            <nav className="workflowExportTree" aria-label="工作流目录">
+              <strong>目录</strong>
+              <button type="button" className={activeCategory ? '' : 'active'} onClick={() => setActiveCategory('')}>
+                <FolderIcon />
+                <span className="workflowExportTreeLabel">全部工作流</span>
+                <span className="workflowExportTreeCount">{workflows.length}</span>
+              </button>
+              {categoryGroups.length > 0 && (
+                <div className="workflowExportTreeChildren">
+                  {categoryGroups.map(group => (
+                    <button type="button" key={group.id} className={activeCategory === group.id ? 'treeChild active' : 'treeChild'} onClick={() => setActiveCategory(group.id)}>
+                      <FolderIcon />
+                      <span className="workflowExportTreeLabel">{group.label}</span>
+                      <span className="workflowExportTreeCount">{group.count}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </nav>
+            <div className="workflowExportBrowser">
+              <div className="workflowExportBrowserHeader">
+                <div>
+                  <strong>{activeCategoryLabel}</strong>
+                  <span>{visibleWorkflows.length} 个工作流 · 已选 {visibleSelectedCount} 个</span>
+                </div>
+                <input className="workflowExportSearch" type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="搜索名称、ID、分类..." aria-label="搜索工作流" />
+              </div>
+              <div className="workflowExportList">
+                {visibleWorkflows.map(item => (
+                  <label className={selection.includes(item.id) ? 'workflowExportItem selected' : 'workflowExportItem'} key={item.id}>
+                    <input type="checkbox" checked={selection.includes(item.id)} onChange={() => toggleWorkflow(item.id)} />
+                    <span>
+                      <strong>{item.name || item.id}</strong>
+                      <small>{item.id}{item.category ? ` · ${workflowCategoryDisplayName(String(item.category).trim(), categoryLabels)}` : ''}</small>
+                      {(item.dependencies || []).length > 0 && <small className="workflowExportDeps">依赖：{item.dependencies.map(dep => dep.name || dep.id).join('、')}</small>}
+                      {(item.missing_tools || []).length > 0 && <small className="workflowExportWarning">缺少工具：{item.missing_tools.join('、')}</small>}
+                    </span>
+                  </label>
+                ))}
+                {visibleWorkflows.length === 0 && <div className="empty small">{workflows.length === 0 ? '当前没有用户工作流。' : '当前条件下没有匹配的工作流。'}</div>}
+              </div>
+            </div>
+          </div>
+          <label className="workflowExportDependencyToggle">
+            <input type="checkbox" checked={includePlugins} onChange={event => setIncludePlugins(event.target.checked)} />
+            <span>同时导出引用的插件{dependencies.length > 0 ? `（${dependencies.length} 个）` : ''}</span>
+          </label>
+          {includePlugins && dependencies.length > 0 && (
+            <div className="workflowExportDependencyList">
+              {dependencies.map(dependency => (
+                <span className="marketTag" key={dependency.id}>{dependency.name || dependency.id}@{dependency.version || '-'}{dependency.disabled ? '（已禁用）' : ''}</span>
+              ))}
+            </div>
+          )}
+          {includePlugins && missingTools.length > 0 && (
+            <small className="workflowExportWarning">以下工具没有找到对应插件：{missingTools.join('、')}</small>
+          )}
+          {message && <div className={messageError ? 'pluginOperationMessage error' : 'pluginOperationMessage'}>{message}</div>}
+          <div className="workflowExportFooter">
+            <button type="button" className="primary" disabled={selectedWorkflows.length === 0 || exporting} onClick={exportWorkflows}>{exporting ? '正在导出...' : `导出 ${selectedWorkflows.length} 个工作流`}</button>
+            <small>依赖插件会以 ZIP 形式放在导出包的 dependencies/ 目录中，需要单独上传安装。</small>
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -1269,7 +1460,7 @@ function GlobalEnvModal({onClose, onSaved}) {
         <div className="modalHeader">
           <div>
             <h3 id="global-env-title">全局变量</h3>
-            <p>配置工具和插件脚本运行时可引用的全局变量，脚本可通过 $OPS_GLOBAL_ENV_FILE 读取。</p>
+            <p>配置工具和插件脚本运行时可引用的全局变量。变量会直接导出到工具进程环境（本地与远程执行都生效），脚本也可通过 $OPS_GLOBAL_ENV_FILE 读取完整文件。</p>
           </div>
           <button className="modalClose" type="button" onClick={onClose} aria-label="关闭">×</button>
         </div>
@@ -1289,6 +1480,10 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
   const [cleanupKeep, setCleanupKeep] = useState(20)
   const [cleanupRunning, setCleanupRunning] = useState(false)
   const [cleanupMessage, setCleanupMessage] = useState('点击“预览清理”查看会被清理的旧运行记录。')
+  const [marketSources, setMarketSources] = useState([])
+  const [marketSourcesLoading, setMarketSourcesLoading] = useState(false)
+  const [marketSourcesError, setMarketSourcesError] = useState('')
+  const [marketSourcesOpen, setMarketSourcesOpen] = useState(false)
   const [formData, setFormData] = useState({
     appName: '',
     appDescription: '',
@@ -1299,7 +1494,6 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
     pluginsPaths: 'plugins',
     pluginsStrict: false,
     pluginsAllowedCommands: '',
-    marketSources: '',
     pathsRuns: 'runs',
     pathsLogs: 'runs/logs',
     uiLogFontSize: 14,
@@ -1331,7 +1525,6 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
             pluginsPaths: (config.plugins?.paths || ['plugins']).join(', '),
             pluginsStrict: config.plugins?.strict || false,
             pluginsAllowedCommands: (config.plugins?.allowed_commands || []).join('\n'),
-            marketSources: marketSourcesText(config.market?.sources),
             pathsRuns: config.paths?.runs || 'runs',
             pathsLogs: config.paths?.logs || 'runs/logs',
             uiLogFontSize: normalizeLogFontSize(config.ui?.log_font_size),
@@ -1352,32 +1545,29 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
     return () => { cancelled = true }
   }, [])
 
+  useEffect(() => {
+    loadMarketSources()
+  }, [])
+
+  async function loadMarketSources() {
+    setMarketSourcesLoading(true)
+    setMarketSourcesError('')
+    try {
+      const body = await fetchMarketSources()
+      setMarketSources(body.data?.sources || [])
+    } catch (err) {
+      setMarketSourcesError(readableAPIError(err, '读取市场来源失败。'))
+    } finally {
+      setMarketSourcesLoading(false)
+    }
+  }
+
   function updateFormField(field, value) {
     setFormData(prev => ({...prev, [field]: value}))
   }
 
   function formLines(value) {
     return value.split('\n').map(item => item.trim()).filter(Boolean)
-  }
-
-  function marketSourcesText(sources) {
-    return (sources || []).map(source => {
-      const id = String(source.id || '').trim()
-      const name = String(source.name || '').trim()
-      const url = String(source.url || '').trim()
-      if (!id && !name) return url
-      return [id, name, url].join(' | ')
-    }).filter(Boolean).join('\n')
-  }
-
-  function parseMarketSources(value) {
-    return formLines(value).map(line => {
-      const parts = line.split('|').map(part => part.trim())
-      if (parts.length >= 3) {
-        return {id: parts[0], name: parts[1], url: parts.slice(2).join('|').trim()}
-      }
-      return {url: line}
-    }).filter(source => source.url)
   }
 
   function buildConfigFromForm(sourceContent) {
@@ -1408,10 +1598,6 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
         paths: formData.pluginsPaths.split(',').map(p => p.trim()).filter(Boolean),
         strict: formData.pluginsStrict,
         allowed_commands: formLines(formData.pluginsAllowedCommands)
-      },
-      market: {
-        ...(base.market || {}),
-        sources: parseMarketSources(formData.marketSources)
       },
       paths: {
         ...(base.paths || {}),
@@ -1449,7 +1635,6 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
         pluginsPaths: (config.plugins?.paths || ['plugins']).join(', '),
         pluginsStrict: config.plugins?.strict || false,
         pluginsAllowedCommands: (config.plugins?.allowed_commands || []).join('\n'),
-        marketSources: marketSourcesText(config.market?.sources),
         pathsRuns: config.paths?.runs || 'runs',
         pathsLogs: config.paths?.logs || 'runs/logs',
         uiLogFontSize: normalizeLogFontSize(config.ui?.log_font_size),
@@ -1569,11 +1754,40 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
 
               <fieldset>
                 <legend>插件市场</legend>
-                <label>
-                  <span>市场源（每行一个，支持本地目录或 HTTP/HTTPS 索引地址）</span>
-                  <textarea className="smallTextarea" value={formData.marketSources} disabled={loading || saving} placeholder="market&#10;https://plugins.internal/ops-market/index.json&#10;internal | 内网插件市场 | https://plugins.internal/ops-market/index.json" onChange={e => updateFormField('marketSources', e.target.value)} />
-                </label>
-                <div className="empty small">格式为“地址”或“ID | 名称 | 地址”。留空时默认使用项目根目录下的 market/ 本地市场；远程地址填写 index.json 的完整 URL。</div>
+                <div className="platformMarketSources">
+                  {marketSourcesLoading ? (
+                    <div className="empty small">正在读取市场来源...</div>
+                  ) : marketSourcesError ? (
+                    <div className="marketSourceError">{marketSourcesError}</div>
+                  ) : marketSources.length === 0 ? (
+                    <div className="empty small">还没有配置市场来源。</div>
+                  ) : (
+                    <div className="platformMarketSourceList">
+                      {marketSources.map(source => (
+                        <div className="platformMarketSourceItem" key={source.id}>
+                          <div className="platformMarketSourceHead">
+                            <strong>{source.name || source.id}</strong>
+                            <span className={`marketSourceType ${source.type}`}>{source.type === 'nexus' ? 'Nexus' : source.type === 'remote' ? '远程市场' : '本地市场'}</span>
+                            {!source.enabled && <span className="marketBadge">已禁用</span>}
+                            <span className={`marketBadge ${source.ready ? 'installed' : ''}`}>{source.ready ? '可用' : '待完善'}</span>
+                          </div>
+                          <small>
+                            {source.url}
+                            {source.type === 'nexus' && source.repository ? ` · ${source.repository}` : ''}
+                            {' · '}
+                            {source.auth_type === 'basic' ? `账号：${source.username || '-'}` : '匿名访问'}
+                          </small>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="buttonRow compactButtonRow">
+                    <button className="secondary" type="button" onClick={() => setMarketSourcesOpen(true)}>管理市场来源</button>
+                  </div>
+                </div>
+                {marketSourcesOpen && (
+                  <MarketSourcesModal onClose={() => setMarketSourcesOpen(false)} onChanged={loadMarketSources} />
+                )}
               </fieldset>
 
               <fieldset>
@@ -1699,7 +1913,7 @@ function GlobalEnvConfigPanel({onBack, onSaved, modalMode = false}) {
           </div>
         )}
         <div className="pluginConfigEditor">
-          <div className="empty small">编辑全局变量配置文件（.env 格式），保存后会重新加载运行时配置。插件脚本可通过 $OPS_GLOBAL_ENV_FILE 环境变量访问此文件。</div>
+          <div className="empty small">编辑全局变量配置文件（.env 格式），保存后会重新加载运行时配置。保存的变量会导出到工具进程环境，插件脚本也可通过 $OPS_GLOBAL_ENV_FILE 环境变量访问此文件。</div>
           <label>
             <span>.env 格式内容</span>
             <textarea value={content} disabled={loading || saving} placeholder="# 数据库配置&#10;DB_HOST=localhost&#10;DB_PORT=5432&#10;&#10;# API 配置&#10;API_BASE_URL=https://api.example.com&#10;&#10;# 环境标识&#10;ENVIRONMENT=dev" onChange={event => setContent(event.target.value)} />
@@ -2459,7 +2673,7 @@ function BatchRunResult({batch}) {
     <div className="batchRun">
       <div className="runSummary">
         <span>批次：{batch.batchID || '-'}</span>
-        <span>共 {runs.length} 台</span>
+        <span>共 {runs.length} 个目标</span>
         {Object.entries(counts).map(([status, count]) => (
           <span key={status} className={`runStatusText ${status}`}>{status} {count}</span>
         ))}
@@ -2479,7 +2693,7 @@ function BatchRunResult({batch}) {
       </div>
       <div className="runSummary">
         <span className={`runStatusText ${activeRun.status || ''}`}>{activeRun.status || '-'}</span>
-        {(activeRun.host_name || activeRun.host_id) && <span>操作机：{activeRun.host_name || activeRun.host_id}</span>}
+        {(activeRun.host_name || activeRun.host_id) && <span>目标：{activeRun.host_name || activeRun.host_id}</span>}
         <span>运行 ID：{activeRun.id || '-'}</span>
         {activeRun.id && <a href={`/api/runs/${encodeURIComponent(activeRun.id)}/support.zip`}>导出支持包</a>}
       </div>
@@ -2496,8 +2710,8 @@ function BatchRunResult({batch}) {
 function batchResultMessage(runs) {
   const succeeded = runs.filter(run => run.status === 'succeeded').length
   const failed = runs.length - succeeded
-  if (failed === 0) return `全部 ${succeeded} 台执行成功。`
-  return `${succeeded} 台成功，${failed} 台未成功。`
+  if (failed === 0) return `全部 ${succeeded} 个目标执行成功。`
+  return `${succeeded} 个成功，${failed} 个未成功。`
 }
 
 function UploadProgressPanel({progress}) {
@@ -2630,18 +2844,69 @@ function TagList({tags}) {
   )
 }
 
-function RunPanel({entries, totalEntries, selected, params, setParams, selectEntry, runSelected, searchText, setSearchText, activeTag, setActiveTag, availableTags, hosts = [], runHosts = [], setRunHosts = () => {}, isRunning = false}) {
+function RunPanel({entries, totalEntries, selected, params, setParams, selectEntry, runSelected, searchText, setSearchText, activeTag, setActiveTag, availableTags, hosts = [], runHosts = [], setRunHosts = () => {}, runLocal = true, setRunLocal = () => {}, isRunning = false}) {
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
+  const [targetPickerOpen, setTargetPickerOpen] = useState(false)
+  const targetPickerRef = useRef(null)
   const paginationEnabled = true
   const totalPages = paginationEnabled ? Math.max(1, Math.ceil(entries.length / pageSize)) : 1
   const safePage = Math.min(currentPage, totalPages)
   const visibleEntries = paginationEnabled ? entries.slice((safePage - 1) * pageSize, safePage * pageSize) : entries
   const selectedHosts = hosts.filter(host => runHosts.includes(host.id))
   const missingHosts = runHosts.filter(id => !hosts.some(host => host.id === id))
+  const enabledHosts = hosts.filter(host => host.enabled)
+  const selectedNames = [...selectedHosts.map(host => host.name || host.id), ...missingHosts]
+  const targetNames = [...(runLocal ? ['本机'] : []), ...selectedNames]
+  const targetSummary = runLocal && runHosts.length === 0
+    ? '本机执行'
+    : runLocal && runHosts.length === 1
+      ? `本机 + 操作机：${selectedNames[0] || runHosts[0]}`
+      : runLocal
+        ? `本机 + ${runHosts.length} 台操作机并行执行`
+        : runHosts.length === 0
+          ? '未选择执行目标'
+          : runHosts.length === 1
+            ? `操作机：${selectedNames[0] || runHosts[0]}`
+            : `${runHosts.length} 台操作机并行执行`
+  const targetDescription = targetNames.length === 0
+    ? '请至少选择一个执行目标'
+    : runLocal && runHosts.length === 0
+      ? '在控制台所在机器运行'
+      : targetNames.join('、')
+  const missingTargets = !runLocal && runHosts.length === 0
+
+  useEffect(() => {
+    setTargetPickerOpen(false)
+  }, [selected?.id])
+
+  useEffect(() => {
+    if (!targetPickerOpen) return
+    function closeOnOutside(event) {
+      if (!targetPickerRef.current?.contains(event.target)) setTargetPickerOpen(false)
+    }
+    function closeOnEscape(event) {
+      if (event.key === 'Escape') setTargetPickerOpen(false)
+    }
+    document.addEventListener('mousedown', closeOnOutside)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutside)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [targetPickerOpen])
 
   function toggleHost(hostID) {
     setRunHosts(previous => previous.includes(hostID) ? previous.filter(id => id !== hostID) : [...previous, hostID])
+  }
+
+  function selectAllHosts() {
+    setRunHosts(enabledHosts.map(host => host.id))
+  }
+
+  function selectLocalOnly() {
+    setRunLocal(true)
+    setRunHosts([])
   }
 
   useEffect(() => {
@@ -2720,23 +2985,59 @@ function RunPanel({entries, totalEntries, selected, params, setParams, selectEnt
             <div className="form">
               <div className="runTargetField">
                 <span>执行目标</span>
-                <div className="runTargetOptions">
-                  <label className={runHosts.length === 0 ? 'runTargetOption active' : 'runTargetOption'}>
-                    <input type="radio" name="run-target" checked={runHosts.length === 0} onChange={() => setRunHosts([])} />
-                    <span className="runTargetName">本机执行</span>
-                  </label>
-                  {hosts.map(host => {
-                    const checked = runHosts.includes(host.id)
-                    return (
-                      <label key={host.id} className={['runTargetOption', checked ? 'active' : '', host.enabled ? '' : 'disabled'].filter(Boolean).join(' ')}>
-                        <input type="checkbox" checked={checked} disabled={!host.enabled} onChange={() => toggleHost(host.id)} />
-                        <span className="runTargetName">{host.name || host.id}</span>
-                        <span className="runTargetMeta">{host.user}@{host.address}:{host.port} · {sshHostStatusLabel(host.status)}{host.enabled ? '' : ' · 已停用'}</span>
+                <div className="runTargetPicker" ref={targetPickerRef}>
+                  <button
+                    type="button"
+                    className={targetPickerOpen ? 'runTargetSelect open' : 'runTargetSelect'}
+                    disabled={isRunning}
+                    aria-haspopup="dialog"
+                    aria-expanded={targetPickerOpen}
+                    onClick={() => setTargetPickerOpen(open => !open)}
+                  >
+                    <span className="runTargetSelectText">
+                      <strong>{targetSummary}</strong>
+                      <small title={targetDescription}>{targetDescription}</small>
+                    </span>
+                    <span className="runTargetSelectCaret" aria-hidden="true">{targetPickerOpen ? '▴' : '▾'}</span>
+                  </button>
+                  {targetPickerOpen && (
+                    <div className="runTargetPopover" role="dialog" aria-label="选择执行目标">
+                      <label className={runLocal ? 'runTargetChoice active' : 'runTargetChoice'}>
+                        <input type="checkbox" checked={runLocal} onChange={() => setRunLocal(value => !value)} />
+                        <strong>本机执行</strong>
+                        <small>在控制台所在机器运行，可与操作机同时选中。</small>
                       </label>
-                    )
-                  })}
+                      <div className="runTargetPopoverHeader">
+                        <span>操作机</span>
+                        <span>{hosts.length} 台</span>
+                      </div>
+                      {hosts.length === 0 ? (
+                        <div className="empty small">还没有配置操作机，可在顶部「操作机」中添加。</div>
+                      ) : (
+                        <div className="runTargetOptionList">
+                          {hosts.map(host => {
+                            const checked = runHosts.includes(host.id)
+                            return (
+                              <label key={host.id} className={['runTargetChoice', checked ? 'active' : '', host.enabled ? '' : 'disabled'].filter(Boolean).join(' ')}>
+                                <input type="checkbox" checked={checked} disabled={!host.enabled} onChange={() => toggleHost(host.id)} />
+                                <strong>{host.name || host.id}</strong>
+                                <small>{host.user}@{host.address}:{host.port} · {sshHostStatusLabel(host.status)}{host.enabled ? '' : ' · 已停用'}</small>
+                              </label>
+                            )
+                          })}
+                        </div>
+                      )}
+                      <div className="runTargetPopoverFooter">
+                        <button type="button" className="secondary" disabled={enabledHosts.length === 0} onClick={selectAllHosts}>全选操作机</button>
+                        <button type="button" className="secondary" disabled={runLocal && runHosts.length === 0} onClick={selectLocalOnly}>仅本机</button>
+                        <button type="button" className="primary" onClick={() => setTargetPickerOpen(false)}>完成</button>
+                      </div>
+                    </div>
+                  )}
                 </div>
-                {runHosts.length > 0 && <small>已选择 {runHosts.length} 台操作机，将并行执行。</small>}
+                {runLocal && runHosts.length > 0 && <small>已选择本机和 {runHosts.length} 台操作机，将并行执行。</small>}
+                {!runLocal && runHosts.length > 0 && <small>已选择 {runHosts.length} 台操作机，将并行执行。</small>}
+                {missingTargets && <small className="targetWarning">请至少选择本机或一台操作机。</small>}
                 {missingHosts.length > 0 && <small className="targetWarning">已选择的操作机不存在：{missingHosts.join('、')}，请重新选择。</small>}
                 {selectedHosts.some(host => host.status !== 'online') && <small className="targetWarning">部分操作机不在线，执行时将实时建立连接。</small>}
                 {selectedHosts.length === 1 && selectedHosts[0].description && <small>{selectedHosts[0].description}</small>}
@@ -2754,7 +3055,7 @@ function RunPanel({entries, totalEntries, selected, params, setParams, selectEnt
                 </label>
               ))}
               {(selected.parameters || []).length === 0 && <div className="empty small">无需参数。</div>}
-              <button className="primary" disabled={isRunning || (selected.parameters || []).some(param => param.required && !hasConfiguredParamValue(params[param.name]))} onClick={runSelected}>{isRunning ? '执行中...' : '开始执行'}</button>
+              <button className="primary" disabled={isRunning || missingTargets || (selected.parameters || []).some(param => param.required && !hasConfiguredParamValue(params[param.name]))} onClick={runSelected}>{isRunning ? '执行中...' : '开始执行'}</button>
             </div>
           </>
         )}
@@ -2777,4 +3078,10 @@ function hasConfiguredParamValue(value) {
   if (Array.isArray(value)) return value.length > 0
   if (typeof value === 'object') return Object.keys(value).length > 0
   return String(value).trim() !== ''
+}
+
+function workflowCategoryDisplayName(category, labels) {
+  if (!category) return '未分类'
+  if (category === 'global') return '全局'
+  return labels.get(category) || category
 }

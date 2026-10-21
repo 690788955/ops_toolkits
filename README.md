@@ -134,6 +134,21 @@ market:
 
 `paths.tools` 和 `paths.workflows` 显式为空，表示不再使用旧的独立 `tools/`、`workflows/` 目录。工具和工作流通过插件贡献。`market.sources` 可选，用于在 Web 插件管理中浏览和安装市场插件；`url` 支持本地目录和 HTTP/HTTPS 地址，留空时默认使用项目根目录下的 `market/`。
 
+### 全局变量 `configs/global-env.conf`
+
+以 `.env` 格式维护工具和插件脚本运行时可引用的全局变量，可在 Web 控制台的“全局变量”中在线编辑，保存后立即生效。
+
+```bash
+DB_HOST=10.0.0.8
+API_TOKEN=xxxxxx
+```
+
+变量会直接导出到工具进程环境，本地执行和远程下发的执行机都生效；同时框架会设置 `OPS_GLOBAL_ENV_FILE` 指向该文件，脚本可按需加载：
+
+```bash
+source "$OPS_GLOBAL_ENV_FILE"
+```
+
 ## 插件接入
 
 外部工具按插件包方式接入。插件目录放在 `plugins/<插件ID>/`，至少包含：
@@ -255,6 +270,8 @@ market/
 market:
   sources: []
 ```
+
+首次打开“插件市场”时，如果默认本地市场的索引不存在，服务会自动根据 `plugins/` 下已安装的插件生成索引和插件包；没有可发布插件时生成空索引。需要重新生成或修改市场名称时仍可运行 `opsctl market index`。
 
 也可以在设置页或 `configs/ops.yaml` 中显式指定本地目录、`index.json` 文件路径或 `file://` URL：
 

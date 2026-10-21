@@ -199,6 +199,49 @@ func TestBuildBundleNormalizesCRLFForRemoteScripts(t *testing.T) {
 	}
 }
 
+func TestBuildBundleExportsGlobalEnvValues(t *testing.T) {
+	dir := t.TempDir()
+	toolDir := filepath.Join(dir, "tool")
+	if err := os.MkdirAll(toolDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(toolDir, "run.sh"), []byte("#!/usr/bin/env bash\necho ok\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := buildBundle(runner.RemoteToolRequest{
+		HostID:  "host-1",
+		ToolID:  "demo.env",
+		ToolDir: toolDir,
+		Entry:   filepath.Join(toolDir, "run.sh"),
+		Workdir: toolDir,
+		Env:     []string{"OPS_PARAM_NAME=demo"},
+		GlobalEnv: []string{
+			"REGION=cn",
+			"WORD=你好",
+			"INVALID-KEY=x",
+			"NO_EQUALS",
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildBundle error: %v", err)
+	}
+	defer func() {
+		_ = bundle.Close()
+		_ = os.Remove(bundle.Name())
+	}()
+	text := string(readBundle(t, bundle)["run.sh"].Data)
+	for _, want := range []string{"export REGION='cn'\n", "export WORD='你好'\n", "export OPS_PARAM_NAME='demo'\n"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("run.sh missing %q:\n%s", want, text)
+		}
+	}
+	for _, unwanted := range []string{"INVALID-KEY", "NO_EQUALS"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("run.sh should filter %q:\n%s", unwanted, text)
+		}
+	}
+}
+
 func TestBuildBundleRunsPOSIXShellEntryWithoutBash(t *testing.T) {
 	dir := t.TempDir()
 	toolDir := filepath.Join(dir, "tool")
@@ -263,6 +306,31 @@ func TestBuildBundleRejectsWindowsPaths(t *testing.T) {
 	withExe.Entry = filepath.Join(toolDir, "run.exe")
 	if _, err := buildBundle(withExe); err == nil || !strings.Contains(err.Error(), "Windows 可执行文件") {
 		t.Fatalf("windows executable error = %v", err)
+	}
+}
+
+func TestRemoteCommandUsesBundleBaseDir(t *testing.T) {
+	fallback := remoteCommand("")
+	for _, want := range []string{
+		`base="${TMPDIR:-/tmp}"`,
+		`mkdir -p "$base" || exit 1`,
+		`d=$(mktemp -d "$base/opsctl.XXXXXX") || exit 1`,
+		`trap '\''rm -rf "$d"'\'' EXIT`,
+	} {
+		if !strings.Contains(fallback, want) {
+			t.Fatalf("default command missing %q:\n%s", want, fallback)
+		}
+	}
+
+	custom := remoteCommand("/data/ops cache")
+	if !strings.Contains(custom, `base='\''/data/ops cache'\''`) {
+		t.Fatalf("command should use configured base dir:\n%s", custom)
+	}
+	if strings.Contains(custom, "TMPDIR") {
+		t.Fatalf("configured base dir should not fall back to TMPDIR:\n%s", custom)
+	}
+	if !strings.Contains(custom, `mkdir -p "$base" || exit 1`) {
+		t.Fatalf("command should create configured base dir:\n%s", custom)
 	}
 }
 

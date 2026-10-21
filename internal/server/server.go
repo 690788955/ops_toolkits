@@ -680,13 +680,15 @@ type runRequest struct {
 	Confirm       bool                                   `json:"confirm"`
 	Target        string                                 `json:"target,omitempty"`
 	Targets       []string                               `json:"targets,omitempty"`
+	IncludeLocal  bool                                   `json:"include_local,omitempty"`
 	Workflow      *config.WorkflowConfig                 `json:"workflow,omitempty"`
 	Uploads       map[string]config.WorkflowUploadResult `json:"uploads,omitempty"`
 	ConfigVersion string                                 `json:"config_version,omitempty"`
 }
 
 type workflowSaveRequest struct {
-	Workflow config.WorkflowConfig `json:"workflow"`
+	Workflow      config.WorkflowConfig `json:"workflow"`
+	OwnerPluginID *string               `json:"owner_plugin_id"`
 }
 
 type workflowValidation struct {
@@ -741,12 +743,15 @@ type response struct {
 }
 
 type serverState struct {
-	mu     sync.RWMutex
-	reg    *registry.Registry
-	market *market.Client
-	ssh    *sshmgr.Manager
-	runMu  sync.Mutex
-	active map[string]context.CancelFunc
+	mu             sync.RWMutex
+	reg            *registry.Registry
+	market         *market.Client
+	ssh            *sshmgr.Manager
+	marketSourceMu sync.Mutex
+	marketBuildMu  sync.Mutex
+	nexusMu        sync.Mutex
+	runMu          sync.Mutex
+	active         map[string]context.CancelFunc
 }
 
 func newServerState(reg *registry.Registry) *serverState {
@@ -937,6 +942,13 @@ func NewHandler(reg *registry.Registry) http.Handler {
 	mux.HandleFunc("/api/plugins/user-workflows.zip", userWorkflowPluginExportHandler(state))
 	mux.HandleFunc("/api/market", marketCatalogHandler(state))
 	mux.HandleFunc("/api/market/install", marketInstallHandler(state))
+	mux.HandleFunc("/api/market/sources", marketSourcesHandler(state))
+	mux.HandleFunc("/api/market/sources/test", marketSourceTestHandler(state))
+	mux.HandleFunc("/api/nexus/plugins", nexusPluginsHandler(state))
+	mux.HandleFunc("/api/nexus/plugin", nexusDeleteHandler(state))
+	mux.HandleFunc("/api/nexus/download", nexusDownloadHandler(state))
+	mux.HandleFunc("/api/nexus/upload", nexusUploadHandler(state))
+	mux.HandleFunc("/api/nexus/rebuild", nexusRebuildHandler(state))
 	mux.HandleFunc("/api/plugins/upload", pluginUploadHandler(state))
 	mux.HandleFunc("/api/plugins/", pluginDownloadHandler(state))
 	mux.HandleFunc("/api/tools/", toolsHandler(state))
@@ -1233,6 +1245,9 @@ func toolsHandler(state *serverState) http.HandlerFunc {
 			return
 		}
 		if len(targets) > 0 {
+			if reqBody.IncludeLocal {
+				targets = append(targets, runner.LocalTargetID)
+			}
 			handleBatchToolRun(w, req, state, reg, r, id, targets, config.InterfaceMapToValues(reqBody.Params))
 			return
 		}
@@ -1555,7 +1570,7 @@ func handleWorkflowValidate(w http.ResponseWriter, req *http.Request, reg *regis
 }
 
 func handleWorkflowSave(w http.ResponseWriter, req *http.Request, reg *registry.Registry, id string) {
-	wf, err := decodeWorkflow(req)
+	wf, ownerPluginID, err := decodeWorkflowSaveRequest(req)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 		return
@@ -1569,7 +1584,17 @@ func handleWorkflowSave(w http.ResponseWriter, req *http.Request, reg *registry.
 		writeJSON(w, http.StatusBadRequest, response{Data: result, Error: result.Error})
 		return
 	}
-	path, source, err := saveWorkflowAsset(reg, wf)
+	if ownerPluginID != nil {
+		if existing := reg.Workflows[wf.ID]; existing != nil && existing.Source.Type != "plugin" {
+			writeJSON(w, http.StatusBadRequest, response{Error: "内置工作流不支持修改归属插件"})
+			return
+		}
+		if _, err := workflowOwnerForPlugin(reg, strings.TrimSpace(*ownerPluginID)); err != nil {
+			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+			return
+		}
+	}
+	path, source, err := saveWorkflowAsset(reg, wf, ownerPluginID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
 		return
@@ -1589,23 +1614,44 @@ func handleWorkflowDelete(w http.ResponseWriter, reg *registry.Registry, path st
 		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
 		return
 	}
-	if wf.Source.PluginID != userWorkflowPluginID || !isUserWorkflowPluginPath(reg, wf.Path) {
-		writeJSON(w, http.StatusBadRequest, response{Error: "只能删除 Web 页面保存的用户工作流"})
+	if wf.Source.Type != "plugin" || strings.TrimSpace(wf.Source.PluginID) == "" {
+		writeJSON(w, http.StatusBadRequest, response{Error: "只能删除插件中的工作流"})
+		return
+	}
+	owner, err := workflowOwnerForPlugin(reg, wf.Source.PluginID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+		return
+	}
+	if !pathWithinDir(owner.Dir, wf.Path) {
+		writeJSON(w, http.StatusBadRequest, response{Error: "工作流文件不在插件目录内，无法删除"})
 		return
 	}
 	if err := os.Remove(wf.Path); err != nil && !os.IsNotExist(err) {
 		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
 		return
 	}
-	if err := os.RemoveAll(workflowConfigDir(reg, id)); err != nil && !os.IsNotExist(err) {
-		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
-		return
+	if owner.ID == userWorkflowPluginID {
+		if err := os.RemoveAll(workflowConfigDir(reg, id)); err != nil && !os.IsNotExist(err) {
+			writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+			return
+		}
+		if err := maintainUserWorkflowPluginManifest(reg); err != nil {
+			writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+			return
+		}
+	} else {
+		rel, err := filepath.Rel(owner.Dir, wf.Path)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+			return
+		}
+		if err := updatePluginWorkflowContribution(owner.Dir, "", filepath.ToSlash(rel)); err != nil {
+			writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
+			return
+		}
 	}
 	delete(reg.Workflows, id)
-	if err := maintainUserWorkflowPluginManifest(reg); err != nil {
-		writeJSON(w, http.StatusInternalServerError, response{Error: err.Error()})
-		return
-	}
 	writeJSON(w, http.StatusOK, response{Status: "deleted", ID: id})
 }
 
@@ -2761,13 +2807,18 @@ func effectiveWorkflowConfirm(reg *registry.Registry, wf *config.WorkflowConfig)
 }
 
 func decodeWorkflow(req *http.Request) (*config.WorkflowConfig, error) {
+	wf, _, err := decodeWorkflowSaveRequest(req)
+	return wf, err
+}
+
+func decodeWorkflowSaveRequest(req *http.Request) (*config.WorkflowConfig, *string, error) {
 	defer req.Body.Close()
 	var body workflowSaveRequest
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	config.NormalizeWorkflow(&body.Workflow)
-	return &body.Workflow, nil
+	return &body.Workflow, body.OwnerPluginID, nil
 }
 
 func validateWorkflow(reg *registry.Registry, wf *config.WorkflowConfig) workflowValidation {
@@ -2794,17 +2845,191 @@ func saveWorkflow(path string, wf *config.WorkflowConfig) error {
 	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
-func saveWorkflowAsset(reg *registry.Registry, wf *config.WorkflowConfig) (string, registry.Source, error) {
-	path := workflowPath(reg, wf.ID)
-	if err := saveWorkflow(path, wf); err != nil {
+func saveWorkflowAsset(reg *registry.Registry, wf *config.WorkflowConfig, ownerPluginID *string) (string, registry.Source, error) {
+	existing := reg.Workflows[wf.ID]
+	ownerID := ""
+	preservePath := false
+	if ownerPluginID != nil {
+		ownerID = strings.TrimSpace(*ownerPluginID)
+		if ownerID == "" {
+			ownerID = userWorkflowPluginID
+		}
+		if existing != nil && existing.Source.Type != "plugin" {
+			return "", registry.Source{}, fmt.Errorf("内置工作流不支持修改归属插件")
+		}
+		preservePath = existing != nil && existing.Source.PluginID == ownerID
+	} else if existing != nil {
+		ownerID = existing.Source.PluginID
+		preservePath = true
+		if ownerID == "" {
+			if err := saveWorkflow(existing.Path, wf); err != nil {
+				return "", registry.Source{}, err
+			}
+			return existing.Path, existing.Source, nil
+		}
+	} else {
+		ownerID = userWorkflowPluginID
+	}
+
+	owner, err := workflowOwnerForPlugin(reg, ownerID)
+	if err != nil {
 		return "", registry.Source{}, err
 	}
-	if isUserWorkflowPluginPath(reg, path) || reg.Workflows[wf.ID] == nil {
-		if err := maintainUserWorkflowPluginManifest(reg); err != nil {
+	var oldOwner workflowOwnerInfo
+	moving := existing != nil && existing.Path != "" && !preservePath
+	if moving {
+		if existing.Source.PluginID == "" {
+			return "", registry.Source{}, fmt.Errorf("内置工作流不支持修改归属插件")
+		}
+		oldOwner, err = workflowOwnerForPlugin(reg, existing.Source.PluginID)
+		if err != nil {
+			return "", registry.Source{}, err
+		}
+		if !pathWithinDir(oldOwner.Dir, existing.Path) {
+			return "", registry.Source{}, fmt.Errorf("工作流文件不在插件 %s 目录内，无法迁移", oldOwner.ID)
+		}
+	}
+
+	path := ""
+	if preservePath && existing != nil && strings.TrimSpace(existing.Path) != "" {
+		path = existing.Path
+	} else {
+		path, err = newWorkflowOwnerPath(owner, wf.ID)
+		if err != nil {
 			return "", registry.Source{}, err
 		}
 	}
-	return path, workflowSource(reg, path), nil
+	if err := saveWorkflow(path, wf); err != nil {
+		return "", registry.Source{}, err
+	}
+
+	if moving {
+		if err := os.Remove(existing.Path); err != nil && !os.IsNotExist(err) {
+			return "", registry.Source{}, err
+		}
+		if oldOwner.ID == userWorkflowPluginID {
+			if err := maintainUserWorkflowPluginManifest(reg); err != nil {
+				return "", registry.Source{}, err
+			}
+		} else {
+			rel, err := filepath.Rel(oldOwner.Dir, existing.Path)
+			if err != nil {
+				return "", registry.Source{}, err
+			}
+			if err := updatePluginWorkflowContribution(oldOwner.Dir, "", filepath.ToSlash(rel)); err != nil {
+				return "", registry.Source{}, err
+			}
+		}
+	}
+
+	if owner.ID == userWorkflowPluginID {
+		if err := maintainUserWorkflowPluginManifest(reg); err != nil {
+			return "", registry.Source{}, err
+		}
+	} else {
+		rel, err := filepath.Rel(owner.Dir, path)
+		if err != nil {
+			return "", registry.Source{}, err
+		}
+		if err := updatePluginWorkflowContribution(owner.Dir, filepath.ToSlash(rel), ""); err != nil {
+			return "", registry.Source{}, err
+		}
+	}
+	return path, owner.Source, nil
+}
+
+type workflowOwnerInfo struct {
+	ID     string
+	Dir    string
+	Source registry.Source
+}
+
+func workflowOwnerForPlugin(reg *registry.Registry, ownerID string) (workflowOwnerInfo, error) {
+	ownerID = strings.TrimSpace(ownerID)
+	if ownerID == "" || ownerID == userWorkflowPluginID {
+		return workflowOwnerInfo{
+			ID:  userWorkflowPluginID,
+			Dir: userWorkflowPluginDir(reg),
+			Source: registry.Source{
+				Type:          "plugin",
+				PluginID:      userWorkflowPluginID,
+				PluginName:    userWorkflowPluginName,
+				PluginVersion: userWorkflowPluginVersion,
+			},
+		}, nil
+	}
+	pkg, ok := installedPlugin(reg, ownerID)
+	if !ok {
+		return workflowOwnerInfo{}, fmt.Errorf("未找到已启用的插件 %s", ownerID)
+	}
+	return workflowOwnerInfo{
+		ID:  pkg.Manifest.ID,
+		Dir: pkg.Dir,
+		Source: registry.Source{
+			Type:          "plugin",
+			PluginID:      pkg.Manifest.ID,
+			PluginName:    pkg.Manifest.Name,
+			PluginVersion: pkg.Manifest.Version,
+		},
+	}, nil
+}
+
+func newWorkflowOwnerPath(owner workflowOwnerInfo, workflowID string) (string, error) {
+	dir := filepath.Join(owner.Dir, "workflows")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	filename := workflowFilename(workflowID)
+	path := filepath.Join(dir, filename)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return path, nil
+	}
+	base := strings.TrimSuffix(filename, filepath.Ext(filename))
+	ext := filepath.Ext(filename)
+	for index := 2; ; index++ {
+		candidate := filepath.Join(dir, fmt.Sprintf("%s-%d%s", base, index, ext))
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate, nil
+		}
+	}
+}
+
+func updatePluginWorkflowContribution(pluginDir, addPath, removePath string) error {
+	pkg, err := plugin.LoadPackage(pluginDir)
+	if err != nil {
+		return err
+	}
+	manifest := pkg.Manifest
+	workflows := make([]plugin.Workflow, 0, len(manifest.Contributes.Workflows)+1)
+	seen := map[string]bool{}
+	for _, entry := range manifest.Contributes.Workflows {
+		entryPath := filepath.ToSlash(entry.Path)
+		if entryPath == removePath || entryPath == addPath {
+			continue
+		}
+		if seen[entryPath] {
+			continue
+		}
+		seen[entryPath] = true
+		workflows = append(workflows, entry)
+	}
+	if addPath != "" && !seen[addPath] {
+		workflows = append(workflows, plugin.Workflow{Path: addPath})
+	}
+	manifest.Contributes.Workflows = workflows
+	return savePluginManifest(filepath.Join(pluginDir, "plugin.yaml"), manifest)
+}
+
+func pathWithinDir(dir, path string) bool {
+	dirAbs, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	return pathAbs == dirAbs || strings.HasPrefix(pathAbs, dirAbs+string(os.PathSeparator))
 }
 
 func workflowPath(reg *registry.Registry, id string) string {

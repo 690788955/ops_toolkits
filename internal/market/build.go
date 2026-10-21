@@ -24,10 +24,11 @@ var fixedZipTime = time.Date(1980, 1, 1, 0, 0, 0, 0, time.UTC)
 const userWorkflowPluginID = "user.workflows"
 
 type BuildOptions struct {
-	BaseDir   string
-	Plugins   config.PluginsConfig
-	OutputDir string
-	Name      string
+	BaseDir    string
+	Plugins    config.PluginsConfig
+	OutputDir  string
+	Name       string
+	AllowEmpty bool
 }
 
 type BuildResult struct {
@@ -67,7 +68,7 @@ func BuildIndex(opts BuildOptions) (BuildResult, error) {
 		}
 		packages = append(packages, pkg)
 	}
-	if len(packages) == 0 {
+	if len(packages) == 0 && !opts.AllowEmpty {
 		return BuildResult{}, fmt.Errorf("没有找到可发布的插件")
 	}
 	sort.Slice(packages, func(i, j int) bool { return packages[i].Manifest.ID < packages[j].Manifest.ID })
@@ -103,7 +104,7 @@ func BuildIndex(opts BuildOptions) (BuildResult, error) {
 			return BuildResult{}, fmt.Errorf("写入插件包 %s 失败: %w", fileName, err)
 		}
 		sum := sha256.Sum256(data)
-		entry := pluginEntry(pkg.Manifest)
+		entry := PluginEntry(pkg.Manifest)
 		entry.Package = Package{
 			URL:    "packages/" + fileName,
 			SHA256: hex.EncodeToString(sum[:]),
@@ -129,7 +130,7 @@ func BuildIndex(opts BuildOptions) (BuildResult, error) {
 	}, nil
 }
 
-func pluginEntry(manifest plugin.Manifest) Plugin {
+func PluginEntry(manifest plugin.Manifest) Plugin {
 	categories := make([]Category, 0, len(manifest.Contributes.Categories))
 	for _, category := range manifest.Contributes.Categories {
 		categories = append(categories, Category{

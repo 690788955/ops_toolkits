@@ -48,6 +48,60 @@ export function postMarketInstall(payload) {
   return postJSON('/api/market/install', payload)
 }
 
+export function fetchMarketSources() {
+  return fetchJSON('/api/market/sources')
+}
+
+export function createMarketSource(payload) {
+  return postJSON('/api/market/sources', payload)
+}
+
+export function updateMarketSource(payload) {
+  return putJSON('/api/market/sources', payload)
+}
+
+export function deleteMarketSource(id) {
+  const query = new URLSearchParams({id})
+  return deleteJSON(`/api/market/sources?${query.toString()}`)
+}
+
+export function testMarketSource(payload) {
+  return postJSON('/api/market/sources/test', payload)
+}
+
+function sourceQuery(sourceID, values = {}) {
+  const query = new URLSearchParams()
+  if (sourceID) query.set('source', sourceID)
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== undefined && value !== null && value !== '') query.set(key, value)
+  }
+  const encoded = query.toString()
+  return encoded ? `?${encoded}` : ''
+}
+
+export function fetchNexusPlugins(sourceID = '') {
+  return fetchJSON(`/api/nexus/plugins${sourceQuery(sourceID)}`)
+}
+
+export async function postNexusPluginZip(sourceID, file, replace) {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await uploadFetch(`/api/nexus/upload${sourceQuery(sourceID, {replace: replace ? 'true' : ''})}`, form)
+  return readJSONResponse(res)
+}
+
+export function deleteNexusPlugin(sourceID, id, version) {
+  return deleteJSON(`/api/nexus/plugin${sourceQuery(sourceID, {id, version})}`)
+}
+
+export function rebuildNexusIndex(sourceID) {
+  return postJSON(`/api/nexus/rebuild${sourceQuery(sourceID)}`, {})
+}
+
+export function nexusDownloadURL(sourceID, id, version) {
+  return `/api/nexus/download${sourceQuery(sourceID, {id, version})}`
+}
+
 export async function postPluginZip(file, replace) {
   const form = new FormData()
   form.append('file', file)
@@ -66,6 +120,10 @@ export async function downloadUserWorkflowExport(workflowIDs, includeDependencie
   }
   if (includeDependencies) query.set('include_dependencies', '1')
   const res = await fetch(`/api/plugins/user-workflows.zip?${query.toString()}`, {credentials: 'same-origin'})
+  return downloadResponse(res, includeDependencies ? 'user-workflows-bundle.zip' : 'user.workflows.zip')
+}
+
+async function downloadResponse(res, fallbackName) {
   if (!res.ok) {
     let body = {}
     try {
@@ -78,7 +136,7 @@ export async function downloadUserWorkflowExport(workflowIDs, includeDependencie
     err.body = body
     throw err
   }
-  const filename = responseFilename(res) || (includeDependencies ? 'user-workflows-bundle.zip' : 'user.workflows.zip')
+  const filename = responseFilename(res) || fallbackName
   const url = URL.createObjectURL(await res.blob())
   const link = document.createElement('a')
   link.href = url

@@ -32,10 +32,10 @@ ui:
   title: 运维工作流控制台
   log_font_size: 18
 config_defaults: {}
-name: ''
-description: ''
+name: ""
+description: ""
 categories: []
 tools: []
 workflows: []
 http:
-  addr: ''
+  addr: ""

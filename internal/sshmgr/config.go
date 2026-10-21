@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -50,6 +51,7 @@ type Host struct {
 	Passphrase     string `yaml:"passphrase,omitempty"`
 	StrictHostKey  *bool  `yaml:"strict_host_key,omitempty"`
 	KnownHostsPath string `yaml:"known_hosts_path,omitempty"`
+	BundleBaseDir  string `yaml:"bundle_base_dir,omitempty"`
 	Enabled        *bool  `yaml:"enabled,omitempty"`
 	Description    string `yaml:"description,omitempty"`
 }
@@ -75,6 +77,7 @@ type HostInput struct {
 	ClearPassphrase bool   `json:"clear_passphrase"`
 	StrictHostKey   *bool  `json:"strict_host_key"`
 	KnownHostsPath  string `json:"known_hosts_path"`
+	BundleBaseDir   string `json:"bundle_base_dir"`
 	Enabled         *bool  `json:"enabled"`
 	Description     string `json:"description"`
 }
@@ -93,6 +96,7 @@ type HostView struct {
 	Auth           string `json:"auth"`
 	KeyPath        string `json:"key_path,omitempty"`
 	KnownHostsPath string `json:"known_hosts_path,omitempty"`
+	BundleBaseDir  string `json:"bundle_base_dir,omitempty"`
 	StrictHostKey  bool   `json:"strict_host_key"`
 	Enabled        bool   `json:"enabled"`
 	Description    string `json:"description,omitempty"`
@@ -228,6 +232,10 @@ func normalizeHost(host *Host) {
 	host.Auth = strings.ToLower(strings.TrimSpace(host.Auth))
 	host.KeyPath = strings.TrimSpace(host.KeyPath)
 	host.KnownHostsPath = strings.TrimSpace(host.KnownHostsPath)
+	host.BundleBaseDir = strings.TrimSpace(host.BundleBaseDir)
+	if host.BundleBaseDir != "" {
+		host.BundleBaseDir = path.Clean(host.BundleBaseDir)
+	}
 	host.Description = strings.TrimSpace(host.Description)
 	if host.Port == 0 {
 		host.Port = 22
@@ -281,6 +289,28 @@ func validateHost(host Host, requireSecret bool) error {
 	default:
 		return fmt.Errorf("认证方式必须是 %s 或 %s", AuthKey, AuthPassword)
 	}
+	if err := validateBundleBaseDir(host.BundleBaseDir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateBundleBaseDir(value string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.ContainsAny(value, "\x00\r\n\t") {
+		return fmt.Errorf("下发根目录不能包含控制字符")
+	}
+	if strings.Contains(value, "\\") {
+		return fmt.Errorf("下发根目录必须使用 POSIX 路径分隔符 /")
+	}
+	if !strings.HasPrefix(value, "/") {
+		return fmt.Errorf("下发根目录必须是绝对路径，例如 /tmp 或 /data/opsctl")
+	}
+	if path.Clean(value) == "/" {
+		return fmt.Errorf("下发根目录不能是根目录 /")
+	}
 	return nil
 }
 
@@ -313,6 +343,7 @@ func buildHost(input HostInput, existing *Host) (Host, error) {
 	}
 	host.KeyPath = strings.TrimSpace(input.KeyPath)
 	host.KnownHostsPath = strings.TrimSpace(input.KnownHostsPath)
+	host.BundleBaseDir = strings.TrimSpace(input.BundleBaseDir)
 	host.Description = strings.TrimSpace(input.Description)
 	if input.StrictHostKey != nil {
 		host.StrictHostKey = boolValue(*input.StrictHostKey)

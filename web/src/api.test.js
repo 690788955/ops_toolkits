@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest'
-import {downloadUserWorkflowExport, fetchJSON, fetchMarket, postJSON, postMarketInstall, postPluginZip, postRunUploadNode, postRunUploadNodeChunked} from './api.js'
+import {createMarketSource, deleteMarketSource, deleteNexusPlugin, downloadUserWorkflowExport, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusPlugins, nexusDownloadURL, postJSON, postMarketInstall, postNexusPluginZip, postPluginZip, postRunUploadNode, postRunUploadNodeChunked, rebuildNexusIndex, testMarketSource, updateMarketSource} from './api.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -116,5 +116,61 @@ describe('api helpers', () => {
       '/api/runs/workflow-1/uploads/upload/chunk?session_id=upload-1&file_index=0&offset=4',
       '/api/runs/workflow-1/uploads/upload/finish'
     ])
+  })
+
+  it('manages market sources', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ok: true, json: async () => ({data: {sources: []}})})))
+
+    await expect(fetchMarketSources()).resolves.toEqual({data: {sources: []}})
+    await expect(createMarketSource({id: 'nexus', type: 'nexus', url: 'http://nexus.example.com'})).resolves.toEqual({data: {sources: []}})
+    await expect(updateMarketSource({id: 'nexus', type: 'nexus', url: 'http://nexus.example.com'})).resolves.toEqual({data: {sources: []}})
+    await expect(deleteMarketSource('nexus')).resolves.toEqual({data: {sources: []}})
+    await expect(testMarketSource({type: 'nexus', url: 'http://nexus.example.com'})).resolves.toEqual({data: {sources: []}})
+
+    expect(fetch.mock.calls.map(call => [call[0], call[1]?.method])).toEqual([
+      ['/api/market/sources', undefined],
+      ['/api/market/sources', 'POST'],
+      ['/api/market/sources', 'PUT'],
+      ['/api/market/sources?id=nexus', 'DELETE'],
+      ['/api/market/sources/test', 'POST']
+    ])
+  })
+
+  it('uploads and lists nexus plugins by market source', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ok: true, json: async () => ({data: {plugins: []}})})))
+
+    await expect(fetchNexusPlugins('nexus')).resolves.toEqual({data: {plugins: []}})
+    await expect(postNexusPluginZip('nexus', new Blob(['zip']), false)).resolves.toEqual({data: {plugins: []}})
+    await expect(postNexusPluginZip('nexus', new Blob(['zip']), true)).resolves.toEqual({data: {plugins: []}})
+    await expect(fetchNexusPlugins()).resolves.toEqual({data: {plugins: []}})
+
+    expect(fetch.mock.calls.map(call => call[0])).toEqual([
+      '/api/nexus/plugins?source=nexus',
+      '/api/nexus/upload?source=nexus',
+      '/api/nexus/upload?source=nexus&replace=true',
+      '/api/nexus/plugins'
+    ])
+    const uploadOptions = fetch.mock.calls[1][1]
+    expect(uploadOptions.method).toBe('POST')
+    expect(uploadOptions.credentials).toBe('same-origin')
+    expect(uploadOptions.body).toBeInstanceOf(FormData)
+  })
+
+  it('deletes nexus plugins and builds download links', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ok: true, json: async () => ({status: 'deleted'})})))
+
+    await expect(deleteNexusPlugin('nexus', 'demo.plugin', '1.0.0')).resolves.toEqual({status: 'deleted'})
+    expect(fetch.mock.calls[0][0]).toBe('/api/nexus/plugin?source=nexus&id=demo.plugin&version=1.0.0')
+    expect(fetch.mock.calls[0][1].method).toBe('DELETE')
+    expect(nexusDownloadURL('nexus', 'demo.plugin', '1.0.0')).toBe('/api/nexus/download?source=nexus&id=demo.plugin&version=1.0.0')
+  })
+
+  it('rebuilds the nexus index', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ok: true, json: async () => ({data: {scanned: 1, indexed: 1}})})))
+
+    await expect(rebuildNexusIndex('nexus')).resolves.toEqual({data: {scanned: 1, indexed: 1}})
+    expect(fetch.mock.calls[0][0]).toBe('/api/nexus/rebuild?source=nexus')
+    expect(fetch.mock.calls[0][1].method).toBe('POST')
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({})
   })
 })

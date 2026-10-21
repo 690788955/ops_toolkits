@@ -11,22 +11,19 @@ import FileUploadInput from '../FileUploadInput.jsx'
 
 const MAX_PLATFORM_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
 const REMEMBERED_WORKFLOW_PREFIX = 'ops.workflowEditor.selectedWorkflow'
+const UNCATEGORIZED_WORKFLOW_CATEGORY = '__uncategorized__'
 
-export default function WorkflowEditor({catalog, activeCategory, hosts = [], setResult, refreshCatalog, resultPanel = null}) {
-  const [workflow, setWorkflow] = useState(emptyWorkflow(activeCategory))
-  const sidebarScopedCategory = activeCategory || ''
-  const workflowOptions = useMemo(() => {
-    return (catalog.workflows || []).filter(workflow => !sidebarScopedCategory || workflow.category === sidebarScopedCategory)
-  }, [catalog, sidebarScopedCategory])
-  const workflowScope = workflowScopeCategory(workflow.category)
-  const scopedCategory = workflowScope === 'global' ? '' : workflowScope
-  const toolOptions = useMemo(() => {
-    return (catalog.tools || []).filter(tool => !sidebarScopedCategory || tool.category === sidebarScopedCategory)
-  }, [catalog, sidebarScopedCategory])
+export default function WorkflowEditor({catalog, activeCategory = '', hosts = [], setResult, refreshCatalog, resultPanel = null}) {
+  const [workflow, setWorkflow] = useState(emptyWorkflow())
+  const workflowOptions = useMemo(() => catalog.workflows || [], [catalog.workflows])
+  const toolOptions = useMemo(() => catalog.tools || [], [catalog.tools])
+  const [workflowCategoryFilter, setWorkflowCategoryFilter] = useState(activeCategory || '')
   const [selectedWorkflowID, setSelectedWorkflowID] = useState('')
+  const [workflowOwnerID, setWorkflowOwnerID] = useState('user.workflows')
+  const [workflowOwnerLocked, setWorkflowOwnerLocked] = useState(false)
   const [canvasMode, setCanvasMode] = useState('execute')
   const [workflowAction, setWorkflowAction] = useState('')
-  const [savedDraftSignature, setSavedDraftSignature] = useState(() => workflowDraftSignature(emptyWorkflow(activeCategory), [], [], activeCategory, '[]'))
+  const [savedDraftSignature, setSavedDraftSignature] = useState(() => workflowDraftSignature(emptyWorkflow(), [], [], '', '[]', 'user.workflows'))
   const [executeDetailView, setExecuteDetailView] = useState('canvas')
   const [selectedNodeID, setSelectedNodeID] = useState('')
   const [selectedEdgeID, setSelectedEdgeID] = useState('')
@@ -87,14 +84,6 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
   }, [clearCanvasRunOverlay, onEdgesChange])
 
   useEffect(() => {
-    setWorkflow(prev => ({...prev, category: activeCategory || 'global'}))
-    setEditorValidation(null)
-    setNodeConfigModalOpen(false)
-    setEdgeConfigModalOpen(false)
-    clearCanvasRunOverlay()
-  }, [activeCategory, clearCanvasRunOverlay])
-
-  useEffect(() => {
     if (!selectedWorkflowID) return
     if (workflowOptions.some(item => item.id === selectedWorkflowID)) return
     setSelectedWorkflowID('')
@@ -108,6 +97,53 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
   const selectedTool = useMemo(() => (catalog.tools || []).find(tool => tool.id === selectedNode?.data.tool), [catalog.tools, selectedNode])
   const selectedLoopTool = useMemo(() => (catalog.tools || []).find(tool => tool.id === selectedNode?.data.loop?.tool), [catalog.tools, selectedNode])
   const nodePickerToolOptions = useMemo(() => filterEntries(toolOptions, nodePickerSearchText, ''), [toolOptions, nodePickerSearchText])
+  const workflowOwnerOptions = useMemo(
+    () => (catalog.plugins || []).filter(item => item.id && item.id !== 'user.workflows' && !item.disabled),
+    [catalog.plugins]
+  )
+  const workflowCategoryLabels = useMemo(
+    () => new Map((catalog.categories || []).map(item => [item.id, item.name || item.id])),
+    [catalog.categories]
+  )
+  const workflowCategoryGroups = useMemo(() => {
+    const counts = new Map()
+    for (const item of workflowOptions) {
+      const key = workflowCategoryKey(item)
+      counts.set(key, (counts.get(key) || 0) + 1)
+    }
+    return [...counts.entries()]
+      .map(([id, count]) => ({id, count, label: workflowCategoryLabel(id, workflowCategoryLabels)}))
+      .sort((left, right) => {
+        if (left.id === UNCATEGORIZED_WORKFLOW_CATEGORY) return 1
+        if (right.id === UNCATEGORIZED_WORKFLOW_CATEGORY) return -1
+        return left.label.localeCompare(right.label, 'zh-CN')
+      })
+  }, [workflowOptions, workflowCategoryLabels])
+  const filteredWorkflowOptions = useMemo(
+    () => workflowCategoryFilter
+      ? workflowOptions.filter(item => workflowCategoryKey(item) === workflowCategoryFilter)
+      : workflowOptions,
+    [workflowOptions, workflowCategoryFilter]
+  )
+  const workflowOptionGroups = useMemo(() => {
+    const byCategory = new Map()
+    for (const item of filteredWorkflowOptions) {
+      const key = workflowCategoryKey(item)
+      if (!byCategory.has(key)) byCategory.set(key, [])
+      byCategory.get(key).push(item)
+    }
+    return workflowCategoryGroups
+      .filter(group => byCategory.has(group.id))
+      .map(group => ({...group, items: byCategory.get(group.id)}))
+  }, [filteredWorkflowOptions, workflowCategoryGroups])
+  const selectedWorkflowOutsideFilter = Boolean(workflowCategoryFilter && selectedWorkflowID)
+    && !filteredWorkflowOptions.some(item => item.id === selectedWorkflowID)
+    && workflowOptions.some(item => item.id === selectedWorkflowID)
+  const workflowOwnerLabel = workflowOwnerLocked
+    ? '内置工作流'
+    : workflowOwnerID === 'user.workflows'
+      ? '全局工作流'
+      : (workflowOwnerOptions.find(item => item.id === workflowOwnerID)?.name || workflowOwnerID)
   const workflowParameters = useMemo(() => workflowModel.parseJSONList(workflowParamsText), [workflowParamsText])
   const parsedRunParams = useMemo(() => parseJSONObject(runParamsText), [runParamsText])
   const runParams = parsedRunParams.value
@@ -135,21 +171,25 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
   ), [nodes, canvasRunState, catalog.tools, isEditingCanvas, isActiveRunRunning, activeRunID, rerunWorkflowNode, hosts])
   const displayEdges = useMemo(() => buildDisplayEdges(edges, displayNodes, canvasRunState), [edges, displayNodes, canvasRunState])
   const currentDraftSignature = useMemo(
-    () => workflowDraftSignature(workflow, nodes, edges, activeCategory, workflowParamsText),
-    [workflow, nodes, edges, activeCategory, workflowParamsText]
+    () => workflowDraftSignature(workflow, nodes, edges, '', workflowParamsText, workflowOwnerID),
+    [workflow, nodes, edges, workflowParamsText, workflowOwnerID]
   )
   const hasUnsavedChanges = currentDraftSignature !== savedDraftSignature
 
   useEffect(() => {
+    setWorkflowCategoryFilter(activeCategory || '')
+  }, [activeCategory])
+
+  useEffect(() => {
     if (selectedWorkflowID || nodes.length > 0 || isActiveRunRunning) return
-    const rememberedID = readRememberedWorkflowID(sidebarScopedCategory)
+    const rememberedID = readRememberedWorkflowID('')
     if (!rememberedID) return
     if (!workflowOptions.some(item => item.id === rememberedID)) {
-      forgetRememberedWorkflowID(sidebarScopedCategory, rememberedID)
+      forgetRememberedWorkflowID('', rememberedID)
       return
     }
     loadWorkflow(rememberedID, {silent: true})
-  }, [selectedWorkflowID, nodes.length, isActiveRunRunning, sidebarScopedCategory, workflowOptions])
+  }, [selectedWorkflowID, nodes.length, isActiveRunRunning, workflowOptions])
 
   useEffect(() => {
     if (!hasUnsavedChanges) return undefined
@@ -302,7 +342,12 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
     try {
       const body = await fetchJSON(`/api/workflows/${encodeURIComponent(id)}`)
       const config = body.data.Config || body.data.config
+      const source = body.data.Source || body.data.source || {}
+      const ownerID = source.plugin_id || 'user.workflows'
+      const ownerLocked = Boolean(source.type) && source.type !== 'plugin'
       setWorkflow(config)
+      setWorkflowOwnerID(ownerID)
+      setWorkflowOwnerLocked(ownerLocked)
       setWorkflowParamsText(JSON.stringify(config.parameters || [], null, 2))
       setRunParamsText(JSON.stringify(workflowModel.defaultParams(config.parameters || []), null, 2))
       const workflowNodes = config.nodes || []
@@ -315,7 +360,7 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
       const layoutNodes = workflowModel.autoLayoutNodes(flowNodes, flowEdges)
       setNodes(layoutNodes)
       setEdges(flowEdges)
-      setSavedDraftSignature(workflowDraftSignature(config, layoutNodes, flowEdges, activeCategory, JSON.stringify(config.parameters || [])))
+      setSavedDraftSignature(workflowDraftSignature(config, layoutNodes, flowEdges, '', JSON.stringify(config.parameters || []), ownerID))
       setSelectedWorkflowID(id)
       setSelectedNodeID('')
       setSelectedEdgeID('')
@@ -324,7 +369,7 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
       setUploadNodeFiles({})
       closeNodePicker()
       fitCanvasViewAfterLayout()
-      rememberWorkflowID(sidebarScopedCategory, id)
+      rememberWorkflowID('', id)
       if (!options.silent) setResult({message: `已加载工作流 ${id}`})
     } catch (err) {
       if (!options.silent) setResult({message: readableAPIError(err, '加载工作流失败。'), response: err.body})
@@ -336,7 +381,7 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
   function createWorkflow() {
     if (!confirmDiscardDraft()) return
     clearCanvasRunOverlay()
-    const next = emptyWorkflow(activeCategory)
+    const next = emptyWorkflow(workflowCategoryFilter || activeCategory || 'global')
     setCanvasMode('edit')
     setWorkflow(next)
     setWorkflowParamsText('[]')
@@ -344,12 +389,14 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
     setNodes([])
     setEdges([])
     setSelectedWorkflowID('')
+    setWorkflowOwnerID('user.workflows')
+    setWorkflowOwnerLocked(false)
     setSelectedNodeID('')
     setSelectedEdgeID('')
     setNodeConfigModalOpen(false)
     setEdgeConfigModalOpen(false)
     setEditorValidation(null)
-    setSavedDraftSignature(workflowDraftSignature(next, [], [], activeCategory, '[]'))
+    setSavedDraftSignature(workflowDraftSignature(next, [], [], '', '[]', 'user.workflows'))
     closeNodePicker()
     setResult({message: '已创建空白工作流草稿'})
   }
@@ -831,13 +878,12 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
     } catch (err) {
       errors.push(`工作流参数 JSON 无效：${err.message}`)
     }
-    const draft = workflowModel.buildWorkflowDraft(workflow, nodes, edges, activeCategory, workflowParameters)
+    const draft = workflowModel.buildWorkflowDraft(workflow, nodes, edges, '', workflowParameters)
     workflowModel.validateConditionDraft(nodes, edges).forEach(error => errors.push(error))
     workflowModel.validateControlDraft(nodes, edges, catalog.tools || []).forEach(error => errors.push(error))
     if (nodes.length > 1 && edges.length === 0 && draft.edges.length === 0) {
       errors.push('多个节点没有连线，无法确定执行顺序。请为条件、并行、合流等控制节点显式连接依赖关系。')
     }
-    if (activeCategory && draft.category !== activeCategory) errors.push(`当前分类上下文只能保存为 ${activeCategory} 工作流。`)
     if (!String(draft.id || '').trim()) {
       if (mode === 'save') {
         errors.push('请先填写工作流 ID。')
@@ -853,9 +899,6 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
       }
     }
     if (nodes.length === 0) errors.push('请至少添加一个工作流节点。')
-    workflowModel.findOutOfScopeToolNodes(nodes, catalog.tools || [], scopedCategory).forEach(item => {
-      errors.push(`节点 ${item.nodeID}（${item.toolID}）不属于当前工作流工具范围：${item.scopeName}`)
-    })
     workflowModel.findMissingRequiredNodeParams(nodes, catalog.tools || []).forEach(item => {
       errors.push(`节点 ${item.nodeID}（${item.toolName}）缺少必填参数：${item.paramName}`)
     })
@@ -921,15 +964,22 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
     }
     const nodeCount = check.draft.nodes?.length || 0
     const edgeCount = check.draft.edges?.length || 0
-    if (!window.confirm(`确认保存工作流「${check.draft.name || check.draft.id}」？\n\n节点：${nodeCount}\n依赖：${edgeCount}\n保存后会覆盖当前工作流配置。`)) return
+    if (!window.confirm(`确认保存工作流「${check.draft.name || check.draft.id}」？\n\n归属：${workflowOwnerLabel}\n节点：${nodeCount}\n依赖：${edgeCount}\n保存后会覆盖当前工作流配置。`)) return
     try {
       setWorkflowAction('saving')
       setEditorValidation(null)
       setWorkflow(check.draft)
-      const body = await postJSON(`/api/workflows/${check.draft.id}/save`, {workflow: check.draft})
+      const payload = {workflow: check.draft}
+      if (!workflowOwnerLocked) payload.owner_plugin_id = workflowOwnerID
+      const body = await postJSON(`/api/workflows/${check.draft.id}/save`, payload)
+      const source = body.data?.Source || body.data?.source
+      if (source) {
+        setWorkflowOwnerID(source.plugin_id || 'user.workflows')
+        setWorkflowOwnerLocked(Boolean(source.type) && source.type !== 'plugin')
+      }
       setSelectedWorkflowID(check.draft.id)
-      setSavedDraftSignature(workflowDraftSignature(check.draft, nodes, edges, activeCategory, workflowParamsText))
-      rememberWorkflowID(sidebarScopedCategory, check.draft.id)
+      setSavedDraftSignature(workflowDraftSignature(check.draft, nodes, edges, '', workflowParamsText, source?.plugin_id || workflowOwnerID))
+      rememberWorkflowID('', check.draft.id)
       await refreshCatalog({keepCategory: true})
       setResult({message: summarizeAPIResponse(body, '工作流保存成功。'), response: body})
     } catch (err) {
@@ -943,12 +993,12 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
     const id = selectedWorkflowID
     if (!id) return
     const label = workflow.name || id
-    if (!window.confirm(`确认删除工作流「${label}」？\n\n该操作会删除 Web 页面保存的工作流配置，且不可撤销。`)) return
+    if (!window.confirm(`确认删除工作流「${label}」？\n\n该操作会删除归属插件目录中的工作流配置，且不可撤销。`)) return
     try {
       setWorkflowAction('deleting')
       const body = await deleteJSON(`/api/workflows/${encodeURIComponent(id)}`)
       clearCanvasRunOverlay()
-      const next = emptyWorkflow(activeCategory)
+      const next = emptyWorkflow()
       setCanvasMode('edit')
       setWorkflow(next)
       setWorkflowParamsText('[]')
@@ -956,13 +1006,15 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
       setNodes([])
       setEdges([])
       setSelectedWorkflowID('')
-      forgetRememberedWorkflowID(sidebarScopedCategory, id)
+      setWorkflowOwnerID('user.workflows')
+      setWorkflowOwnerLocked(false)
+      forgetRememberedWorkflowID('', id)
       setSelectedNodeID('')
       setSelectedEdgeID('')
       setNodeConfigModalOpen(false)
       setEdgeConfigModalOpen(false)
       setEditorValidation(null)
-      setSavedDraftSignature(workflowDraftSignature(next, [], [], activeCategory, '[]'))
+      setSavedDraftSignature(workflowDraftSignature(next, [], [], '', '[]', 'user.workflows'))
       setUploadNodeFiles({})
       closeNodePicker()
       await refreshCatalog({keepCategory: true})
@@ -1135,35 +1187,75 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
       <button className={!isEditingCanvas ? 'primary' : 'secondary'} type="button" onClick={enterExecuteMode}>执行模式</button>
     </div>
   )
+  function renderWorkflowOption(item) {
+    const owner = item.source?.plugin_id
+    const ownerLabel = owner && owner !== 'user.workflows' ? ` · ${item.source.plugin_name || owner}` : ''
+    return <option key={item.id} value={item.id}>{item.name || item.id}{ownerLabel}</option>
+  }
   const workflowLoader = (
     <section className="workflowSelection" aria-labelledby="workflow-selection-title">
       <div className="workflowSelectionHeader">
         <div>
           <strong id="workflow-selection-title">打开已有工作流</strong>
-          <span>{workflowOptions.length > 0 ? `当前分类可加载 ${workflowOptions.length} 个` : '当前分类还没有已保存工作流'}</span>
+          <span>{workflowOptions.length === 0
+            ? '还没有已保存工作流'
+            : workflowCategoryFilter
+              ? `当前分类 ${workflowCategoryLabel(workflowCategoryFilter, workflowCategoryLabels)}：${filteredWorkflowOptions.length} / 共 ${workflowOptions.length} 个工作流`
+              : `共 ${workflowOptions.length} 个工作流可加载`}</span>
         </div>
         <span className={selectedWorkflowID ? 'workflowSelectionState active' : 'workflowSelectionState'}>
           {selectedWorkflowID ? '已加载' : '未选择'}
         </span>
       </div>
       <label className="workflowSelectionField">
+        <span>工作流分类</span>
+        <select
+          aria-label="按分类筛选工作流"
+          value={workflowCategoryFilter}
+          disabled={Boolean(workflowAction) || isActiveRunRunning || workflowCategoryGroups.length === 0}
+          onChange={event => setWorkflowCategoryFilter(event.target.value)}
+        >
+          <option value="">全部分类（{workflowOptions.length}）</option>
+          {workflowCategoryGroups.map(group => (
+            <option key={group.id} value={group.id}>{group.label}（{group.count}）</option>
+          ))}
+        </select>
+      </label>
+      <label className="workflowSelectionField">
         <span>选择要加载的工作流</span>
         <select
           aria-label="选择要加载的工作流"
           value={selectedWorkflowID}
-          disabled={Boolean(workflowAction) || isActiveRunRunning || workflowOptions.length === 0}
+          disabled={Boolean(workflowAction) || isActiveRunRunning || (filteredWorkflowOptions.length === 0 && !selectedWorkflowOutsideFilter)}
           onChange={event => loadWorkflow(event.target.value)}
         >
           <option value="">
             {workflowAction === 'loading'
               ? '正在加载...'
-              : workflowOptions.length > 0 ? '请选择一个工作流' : '当前分类暂无可加载工作流'}
+              : workflowOptions.length === 0
+                ? '暂无可加载工作流'
+                : filteredWorkflowOptions.length === 0 && !selectedWorkflowOutsideFilter
+                  ? '当前分类暂无工作流'
+                  : '请选择一个工作流'}
           </option>
-          {workflowOptions.map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
+          {selectedWorkflowOutsideFilter && (
+            <optgroup label="当前已加载（不在所选分类）">
+              {renderWorkflowOption(workflowOptions.find(item => item.id === selectedWorkflowID))}
+            </optgroup>
+          )}
+          {workflowOptionGroups.map(group => (
+            <optgroup key={group.id} label={group.label}>
+              {group.items.map(renderWorkflowOption)}
+            </optgroup>
+          ))}
         </select>
       </label>
       <small className="workflowSelectionHint">
-        {selectedWorkflowID ? '已加载到当前画布，可继续编辑或执行。' : '没有合适的工作流？点击下方“新建”开始。'}
+        {selectedWorkflowID
+          ? '已加载到当前画布，可继续编辑或执行。'
+          : workflowOptions.length > 0 && filteredWorkflowOptions.length === 0
+            ? '当前分类暂无工作流，可切换分类或查看全部分类。'
+            : '没有合适的工作流？点击下方“新建”开始。'}
       </small>
     </section>
   )
@@ -1250,6 +1342,45 @@ export default function WorkflowEditor({catalog, activeCategory, hosts = [], set
         <label>
           <span>工作流 ID</span>
           <input value={workflow.id || ''} onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, id: event.target.value}) }} placeholder="demo.my-flow" />
+        </label>
+        <label>
+          <span>归属</span>
+          <select
+            value={workflowOwnerLocked ? '__builtin__' : workflowOwnerID}
+            disabled={workflowOwnerLocked || Boolean(workflowAction)}
+            onChange={event => setWorkflowOwnerID(event.target.value)}
+          >
+            {workflowOwnerLocked ? (
+              <option value="__builtin__">内置工作流（不可迁移）</option>
+            ) : (
+              <>
+                <option value="user.workflows">全局工作流</option>
+                {workflowOwnerOptions.map(item => <option key={item.id} value={item.id}>{item.name || item.id}（{item.id}）</option>)}
+              </>
+            )}
+          </select>
+          <small className="workflowSelectionHint">
+            {workflowOwnerLocked
+              ? '内置工作流保存在原配置文件，不能修改归属。'
+              : workflowOwnerID === 'user.workflows'
+                ? '保存在 user.workflows 目录，不绑定业务插件，可在所有分类中管理；不随业务插件 ZIP 导出。'
+                : `保存后 YAML 写入插件 ${workflowOwnerID} 的 workflows/ 目录，导出该插件 ZIP 时自动携带。`}
+          </small>
+        </label>
+        <label>
+          <span>分类</span>
+          <select
+            value={workflow.category || 'global'}
+            disabled={Boolean(workflowAction)}
+            onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, category: event.target.value}) }}
+          >
+            {(catalog.categories || []).map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
+            <option value="global">全局（跨分类）</option>
+            {workflow.category && workflow.category !== 'global' && !(catalog.categories || []).some(item => item.id === workflow.category) && (
+              <option value={workflow.category}>{workflow.category}</option>
+            )}
+          </select>
+          <small className="workflowSelectionHint">用于工作流管理的分类筛选，不影响可添加的工具。</small>
         </label>
         <label>
           <span>名称</span>
@@ -1719,6 +1850,16 @@ export function shouldClearCanvasRunOverlayForNodeChanges(changes) {
 
 function sleep(ms) {
   return new Promise(resolve => window.setTimeout(resolve, ms))
+}
+
+function workflowCategoryKey(item) {
+  return String(item?.category || '').trim() || UNCATEGORIZED_WORKFLOW_CATEGORY
+}
+
+function workflowCategoryLabel(category, labels) {
+  if (category === UNCATEGORIZED_WORKFLOW_CATEGORY) return '未分类'
+  if (category === 'global') return '全局'
+  return labels.get(category) || category
 }
 
 function rememberedWorkflowKey(category) {
@@ -2528,13 +2669,13 @@ function extractRunDetailFromResponse(body) {
   return null
 }
 
-function emptyWorkflow(category) {
+function emptyWorkflow(category = 'global') {
   return {
     id: '',
     name: '',
     description: '',
     version: '1.0.0',
-    category: category || 'global',
+    category,
     tags: [],
     parameters: [],
     nodes: [],
@@ -2758,11 +2899,6 @@ export function workflowNodeToFlowNode(node, index, onRemove, workflowNodes = []
   }
 }
 
-function workflowScopeCategory(value, fallbackCategory = '') {
-  if (value === 'global') return 'global'
-  return value || fallbackCategory || 'global'
-}
-
 function defaultCondition() {
   return {
     input: '',
@@ -2912,13 +3048,13 @@ function uniqueNodeID(toolID, nodes) {
   return id
 }
 
-function workflowDraftSignature(workflow, nodes, edges, activeCategory, workflowParamsText) {
+function workflowDraftSignature(workflow, nodes, edges, fallbackCategory, workflowParamsText, ownerID = '') {
   let parameters = []
   try {
     const parsed = JSON.parse(workflowParamsText || '[]')
     if (Array.isArray(parsed)) parameters = parsed
   } catch {
-    return JSON.stringify({workflow, nodes: (nodes || []).map(node => ({id: node.id, type: node.type, data: node.data})), edges, workflowParamsText})
+    return JSON.stringify({ownerID, workflow, nodes: (nodes || []).map(node => ({id: node.id, type: node.type, data: node.data})), edges, workflowParamsText})
   }
-  return JSON.stringify(workflowModel.buildWorkflowDraft(workflow, nodes, edges, activeCategory, parameters))
+  return JSON.stringify({ownerID, draft: workflowModel.buildWorkflowDraft(workflow, nodes, edges, fallbackCategory, parameters)})
 }

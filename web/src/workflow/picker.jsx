@@ -1,6 +1,76 @@
-import React from 'react'
+import React, {useEffect, useMemo, useState} from 'react'
 import {controlNodeCatalog} from './catalog.js'
 import {controlShapeMarker} from './nodes.jsx'
+
+function toolPluginKey(tool) {
+  return tool.source?.plugin_id || tool.source?.plugin_name || tool.category || '其他工具'
+}
+
+function toolPluginLabel(tool) {
+  return tool.source?.plugin_name || tool.source?.plugin_id || tool.category || '其他工具'
+}
+
+function groupToolsByPlugin(tools) {
+  const groups = []
+  const byKey = new Map()
+  for (const tool of tools) {
+    const key = toolPluginKey(tool)
+    let group = byKey.get(key)
+    if (!group) {
+      group = {key, label: toolPluginLabel(tool), tools: []}
+      byKey.set(key, group)
+      groups.push(group)
+    }
+    group.tools.push(tool)
+  }
+  return groups
+}
+
+function ToolPluginSelect({tools, onAddTool}) {
+  const groups = useMemo(() => groupToolsByPlugin(tools), [tools])
+  const [pluginKey, setPluginKey] = useState(groups[0]?.key || '')
+  const [toolID, setToolID] = useState(groups[0]?.tools[0]?.id || '')
+  const activeGroup = groups.find(group => group.key === pluginKey) || groups[0] || null
+  const selectedTool = activeGroup?.tools.find(tool => tool.id === toolID) || activeGroup?.tools[0] || null
+
+  useEffect(() => {
+    const group = groups.find(item => item.key === pluginKey) || groups[0]
+    if (!group) {
+      if (pluginKey) setPluginKey('')
+      if (toolID) setToolID('')
+      return
+    }
+    if (group.key !== pluginKey) setPluginKey(group.key)
+    if (!group.tools.some(tool => tool.id === toolID)) {
+      setToolID(group.tools[0]?.id || '')
+    }
+  }, [groups, pluginKey, toolID])
+
+  if (groups.length === 0) return null
+
+  return (
+    <div className="toolPluginPicker">
+      <label>
+        <span>选择插件</span>
+        <select value={activeGroup?.key || ''} onChange={event => setPluginKey(event.target.value)}>
+          {groups.map(group => <option key={group.key} value={group.key}>{group.label}（{group.tools.length}）</option>)}
+        </select>
+      </label>
+      <label>
+        <span>选择工具</span>
+        <select value={selectedTool?.id || ''} onChange={event => setToolID(event.target.value)}>
+          {(activeGroup?.tools || []).map(tool => <option key={tool.id} value={tool.id}>{tool.name || tool.id}</option>)}
+        </select>
+      </label>
+      <button type="button" className="primary" disabled={!selectedTool} onClick={() => { if (selectedTool) onAddTool(selectedTool) }}>添加工具节点</button>
+      {selectedTool && (
+        <small className="toolPluginPickerHint">
+          {selectedTool.id}{selectedTool.description ? ` · ${selectedTool.description}` : ''}
+        </small>
+      )}
+    </div>
+  )
+}
 
 function NodePickerPanel({searchText, setSearchText, tools, totalTools, panelPosition, canvasElement, mode = 'add', connection, insertEdge, onAddTool, onAddControl, onClose}) {
   const keyword = searchText.trim().toLowerCase()
@@ -46,18 +116,9 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, panelPos
         </div>
         <div className="nodePickerSection">
           <span>插件工具 · {tools.length} / {totalTools}</span>
-          <div className="nodePickerList">
-            {tools.map(tool => (
-              <button key={tool.id} type="button" className="nodePickerItem" onClick={() => onAddTool(tool)} title={`${tool.name || tool.id}\n${tool.id}${tool.description ? `\n${tool.description}` : ''}`}>
-                <span className="paletteShape tool" aria-hidden="true" />
-                <span className="nodePickerItemText">
-                  <b>{tool.name || tool.id}</b>
-                  <small>{toolPickerMeta(tool)}</small>
-                </span>
-              </button>
-            ))}
-            {tools.length === 0 && <div className="empty small">没有匹配的插件工具；可换用工具名称、描述、ID 或标签继续搜索。</div>}
-          </div>
+          {tools.length > 0
+            ? <ToolPluginSelect tools={tools} onAddTool={onAddTool} />
+            : <div className="empty small">没有匹配的插件工具；可换用工具名称、描述、ID 或标签继续搜索。</div>}
         </div>
       </div>
     </div>
@@ -83,12 +144,6 @@ function pickerPanelStyle(position, element) {
   const x = Math.max(220, Math.min(position.x, Math.max(220, viewportWidth - 220)))
   const y = Math.max(120, Math.min(position.y, Math.max(120, viewportHeight - 120)))
   return {left: `${x}px`, top: `${y}px`}
-}
-
-function toolPickerMeta(tool) {
-  const paramCount = (tool.parameters || []).length
-  const source = tool.source?.plugin_name || tool.source?.plugin_id || tool.category || '插件工具'
-  return `${source} · ${paramCount} 参数`
 }
 
 export {CanvasDock, NodePickerPanel}

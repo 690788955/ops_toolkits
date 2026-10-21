@@ -41,6 +41,7 @@ function emptyForm() {
     password: '',
     passphrase: '',
     known_hosts_path: '',
+    bundle_base_dir: '',
     strict_host_key: true,
     enabled: true,
     description: '',
@@ -61,6 +62,7 @@ function hostToForm(host) {
     password: '',
     passphrase: '',
     known_hosts_path: host.known_hosts_path || '',
+    bundle_base_dir: host.bundle_base_dir || '',
     strict_host_key: host.strict_host_key !== false,
     enabled: host.enabled !== false,
     description: host.description || '',
@@ -193,6 +195,7 @@ export default function SshHostsModal({data, error, onClose, onRefresh}) {
       passphrase: form.passphrase,
       strict_host_key: Boolean(form.strict_host_key),
       known_hosts_path: form.known_hosts_path.trim(),
+      bundle_base_dir: form.bundle_base_dir.trim(),
       enabled: Boolean(form.enabled),
       description: form.description.trim()
     }
@@ -326,6 +329,11 @@ export default function SshHostsModal({data, error, onClose, onRefresh}) {
                 <span>known_hosts 路径</span>
                 <input value={form.known_hosts_path} disabled={saving || !form.strict_host_key} placeholder="~/.ssh/known_hosts（留空使用默认）" onChange={event => updateField('known_hosts_path', event.target.value)} />
               </label>
+              <label className="sshFormWide">
+                <span>下发根目录</span>
+                <input value={form.bundle_base_dir} disabled={saving} placeholder="/tmp 或 /data/opsctl（留空使用 TMPDIR 或 /tmp）" onChange={event => updateField('bundle_base_dir', event.target.value)} />
+                <small className="sshFormHint">远程执行时工具包会解压到此目录下的临时子目录，执行结束自动清理；需保证 SSH 用户有写权限。</small>
+              </label>
               <label className="checkboxLabel sshFormWide">
                 <input type="checkbox" checked={form.strict_host_key} disabled={saving} onChange={event => updateField('strict_host_key', event.target.checked)} />
                 <span>严格校验主机密钥（推荐；首次连接需要先把主机指纹加入 known_hosts）</span>
@@ -370,6 +378,7 @@ export default function SshHostsModal({data, error, onClose, onRefresh}) {
                     <small>
                       {host.auth === 'key' ? `私钥认证${host.key_path ? ` · ${host.key_path}` : ' · 自动查找'}` : '密码认证'}
                       {host.strict_host_key ? ' · 严格主机密钥' : ' · 跳过主机密钥校验'}
+                      {host.bundle_base_dir ? ` · 下发至 ${host.bundle_base_dir}` : ''}
                       {host.last_checked ? ` · 最近检测 ${formatCheckedAt(host.last_checked)}` : ''}
                       {state === 'online' && host.latency_ms ? ` · ${host.latency_ms} ms` : ''}
                     </small>

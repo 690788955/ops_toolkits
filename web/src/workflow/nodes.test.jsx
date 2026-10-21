@@ -150,13 +150,12 @@ describe('workflow node run status', () => {
       await act(async () => {
         root.render(React.createElement(WorkflowEditor, {
           catalog: {tools: [], workflows: [workflow]},
-          activeCategory: '',
           setResult,
           refreshCatalog: vi.fn()
         }))
       })
 
-      const select = host.querySelector('select')
+      const select = host.querySelector('select[aria-label="选择要加载的工作流"]')
       expect(select).toBeTruthy()
       const setSelectValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
       await act(async () => {
@@ -210,13 +209,12 @@ describe('workflow node run status', () => {
       await act(async () => {
         root.render(React.createElement(WorkflowEditor, {
           catalog: {tools: [], workflows: [workflow]},
-          activeCategory: '',
           setResult: vi.fn(),
           refreshCatalog: vi.fn()
         }))
       })
 
-      const select = host.querySelector('select')
+      const select = host.querySelector('select[aria-label="选择要加载的工作流"]')
       const setSelectValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
       await act(async () => {
         setSelectValue.call(select, 'sidebar-run-flow')
@@ -270,13 +268,12 @@ describe('workflow node run status', () => {
       await act(async () => {
         root.render(React.createElement(WorkflowEditor, {
           catalog: {tools: [tool], workflows: [workflow]},
-          activeCategory: '',
           setResult: vi.fn(),
           refreshCatalog: vi.fn()
         }))
       })
 
-      const select = host.querySelector('select')
+      const select = host.querySelector('select[aria-label="选择要加载的工作流"]')
       const setSelectValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
       await act(async () => {
         setSelectValue.call(select, 'tool-param-flow')
@@ -324,14 +321,13 @@ describe('workflow node run status', () => {
       await act(async () => {
         root.render(React.createElement(WorkflowEditor, {
           catalog: {tools: [{id: 'demo.inspect', name: '巡检工具'}], workflows: [workflow]},
-          activeCategory: '',
           setResult: vi.fn(),
           refreshCatalog: vi.fn(),
           resultPanel: React.createElement('section', {className: 'card resultCard workflowResultCard'}, '执行日志面板')
         }))
       })
 
-      const select = host.querySelector('select')
+      const select = host.querySelector('select[aria-label="选择要加载的工作流"]')
       const setSelectValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
       await act(async () => {
         setSelectValue.call(select, 'view-switch-flow')
@@ -379,5 +375,51 @@ describe('workflow node run status', () => {
     expect(node.type).toBe('controlNode')
     expect(node.data.controlType).toBe('extract_config')
     expect(node.data.extract_config.target_path).toBe('everisk-deployment/config.yaml')
+  })
+
+  it('filters the workflow loader by the active category', async () => {
+    const workflows = [
+      {id: 'docker-flow', name: 'Docker 巡检', category: 'docker', parameters: [], nodes: [], edges: []},
+      {id: 'system-flow', name: '系统巡检', category: 'system', parameters: [], nodes: [], edges: []}
+    ]
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    try {
+      await act(async () => {
+        root.render(React.createElement(WorkflowEditor, {
+          catalog: {
+            categories: [{id: 'docker', name: 'Docker'}, {id: 'system', name: '系统管理'}],
+            tools: [],
+            workflows
+          },
+          activeCategory: 'docker',
+          setResult: vi.fn(),
+          refreshCatalog: vi.fn()
+        }))
+      })
+
+      const categorySelect = host.querySelector('select[aria-label="按分类筛选工作流"]')
+      const workflowSelect = host.querySelector('select[aria-label="选择要加载的工作流"]')
+      expect(categorySelect.value).toBe('docker')
+
+      let optionNames = [...workflowSelect.querySelectorAll('option')].map(option => option.textContent)
+      expect(optionNames).toContain('Docker 巡检')
+      expect(optionNames).not.toContain('系统巡检')
+      expect([...workflowSelect.querySelectorAll('optgroup')].map(group => group.label)).toContain('Docker')
+
+      const setSelectValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
+      await act(async () => {
+        setSelectValue.call(categorySelect, '')
+        categorySelect.dispatchEvent(new Event('change', {bubbles: true}))
+      })
+
+      optionNames = [...workflowSelect.querySelectorAll('option')].map(option => option.textContent)
+      expect(optionNames).toContain('Docker 巡检')
+      expect(optionNames).toContain('系统巡检')
+    } finally {
+      root.unmount()
+      host.remove()
+    }
   })
 })
