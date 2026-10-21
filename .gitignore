@@ -2,6 +2,10 @@ bin/
 dist/
 runs/
 web/node_modules/
+/opsctl
+/opsctl.exe
+/opsctl.exe~
+/serve.log
 graphify-out/
 .claude/worktrees/
 /workflows/
