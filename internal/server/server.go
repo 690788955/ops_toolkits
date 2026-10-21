@@ -726,6 +726,7 @@ type runLogEvent struct {
 	StepID    string `json:"step_id,omitempty"`
 	Iteration int    `json:"iteration,omitempty"`
 	Stream    string `json:"stream"`
+	Line      int    `json:"line"`
 	Text      string `json:"text"`
 	Status    string `json:"status"`
 }
@@ -2143,15 +2144,9 @@ func handleRunEvents(w http.ResponseWriter, req *http.Request, state *serverStat
 
 	tailer := newRunLogTailer(id, runDir, detail.Record)
 	seq := 0
-	lastBySource := map[string]string{}
 	sendLogEvents := func() bool {
 		events := tailer.read(detail.Record.Status)
 		for _, event := range events {
-			key := event.ItemID + ":" + event.Stream
-			if lastBySource[key] == event.Text {
-				continue
-			}
-			lastBySource[key] = event.Text
 			seq++
 			event.Seq = seq
 			if err := writeSSEEvent(w, "log", event); err != nil {
@@ -2556,6 +2551,7 @@ type runLogTailer struct {
 	runDir string
 	record runner.RunRecord
 	offset map[string]int64
+	line   map[string]int
 }
 
 type runLogSource struct {
@@ -2568,15 +2564,16 @@ type runLogSource struct {
 }
 
 func newRunLogTailer(runID, runDir string, record runner.RunRecord) *runLogTailer {
-	return &runLogTailer{runID: runID, runDir: runDir, record: record, offset: map[string]int64{}}
+	return &runLogTailer{runID: runID, runDir: runDir, record: record, offset: map[string]int64{}, line: map[string]int{}}
 }
 
 func (t *runLogTailer) read(status string) []runLogEvent {
 	events := []runLogEvent{}
 	for _, source := range t.sources() {
-		lines, nextOffset := readNewLogLines(source.path, t.offset[source.path])
+		lines, nextOffset := readNewLogLines(source.path, t.offset[source.path], status != "running")
 		t.offset[source.path] = nextOffset
 		for _, line := range lines {
+			t.line[source.path]++
 			events = append(events, runLogEvent{
 				RunID:     t.runID,
 				ItemID:    source.itemID,
@@ -2584,6 +2581,7 @@ func (t *runLogTailer) read(status string) []runLogEvent {
 				StepID:    source.stepID,
 				Iteration: source.iteration,
 				Stream:    source.stream,
+				Line:      t.line[source.path],
 				Text:      line,
 				Status:    status,
 			})
@@ -2624,7 +2622,7 @@ func (t *runLogTailer) sources() []runLogSource {
 	return sources
 }
 
-func readNewLogLines(path string, offset int64) ([]string, int64) {
+func readNewLogLines(path string, offset int64, complete bool) ([]string, int64) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, offset
@@ -2643,6 +2641,9 @@ func readNewLogLines(path string, offset int64) ([]string, int64) {
 	data, err := io.ReadAll(file)
 	if err != nil {
 		return nil, offset
+	}
+	if !complete {
+		data = data[:bytes.LastIndexAny(data, "\r\n")+1]
 	}
 	nextOffset := offset + int64(len(data))
 	if len(data) == 0 {

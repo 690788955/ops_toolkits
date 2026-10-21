@@ -976,7 +976,7 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
       <div className="pluginItemActions">
         {!item.disabled && (
           <div className="pluginExportLinks">
-            <a className="secondary" href={`/api/plugins/${encodeURIComponent(item.id)}.zip`} title="插件 ZIP 会自动包含归属于该插件的工作流">插件 ZIP{workflowCountForPlugin(item.id) > 0 ? `（含 ${workflowCountForPlugin(item.id)} 个工作流）` : ''}</a>
+            <a className="secondary" href={`/api/plugins/${encodeURIComponent(item.id)}.zip`} title="插件 ZIP 会自动包含归属于该插件的工作流">插件 ZIP</a>
             <a className="secondary" href={`${runtimeBase(item)}.zip?goos=${encodeURIComponent(goos)}&goarch=${encodeURIComponent(goarch)}`}>运行包 ZIP</a>
           </div>
         )}
@@ -1001,12 +1001,13 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
   }
 
   function installedPluginCard(item) {
+    const workflowCount = workflowCountForPlugin(item.id)
     return (
       <div className={item.disabled ? 'pluginExportItem pluginDisabled' : 'pluginExportItem'} key={item.id}>
         <div>
           <strong>{item.name || item.id}</strong>
           <span>{item.id}@{item.version || '-'}</span>
-          <small>{item.disabled ? '状态：已禁用' : '状态：启用中'}</small>
+          <small>{item.disabled ? '状态：已禁用' : '状态：启用中'}{workflowCount > 0 ? ` · 含 ${workflowCount} 个工作流` : ''}</small>
           {item.description && <small>{item.description}</small>}
         </div>
         {installedPluginActions(item)}
@@ -2700,7 +2701,7 @@ function BatchRunResult({batch}) {
       {activeRun.error && <div className="batchRunError">{activeRun.error}</div>}
       {activeRun.id ? (
         <React.Suspense fallback={<div className="empty small">正在加载实时日志终端...</div>}>
-          <LiveRunTerminal runID={activeRun.id} running={activeRun.status === 'running'} initialItems={activeDetail?.logs?.items || []} />
+          <LiveRunTerminal key={activeRun.id} runID={activeRun.id} running={activeRun.status === 'running'} initialItems={activeDetail?.record?.id === activeRun.id ? activeDetail.logs?.items || [] : []} />
         </React.Suspense>
       ) : null}
     </div>

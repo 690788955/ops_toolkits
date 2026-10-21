@@ -5,11 +5,9 @@ import {DEFAULT_LOG_FONT_SIZE, LOG_LEVELS, countLogsByLevel, detectLogLevel, exp
 
 export default function LiveRunTerminal({runID, running = false, initialItems = []}) {
   const terminalRef = useRef(null)
-  const lastIndexRef = useRef(0)
   const filtersRef = useRef(new Set(LOG_LEVELS))
   const autoScrollRef = useRef(true)
   const seenLogsRef = useRef(new Set())
-  const lastLogRef = useRef(null)
   const [logs, setLogs] = useState([])
   const [filters, setFilters] = useState(() => new Set(LOG_LEVELS))
   const [search, setSearch] = useState('')
@@ -43,9 +41,7 @@ export default function LiveRunTerminal({runID, running = false, initialItems = 
   }, [autoScroll])
 
   useEffect(() => {
-    lastIndexRef.current = 0
     seenLogsRef.current = new Set()
-    lastLogRef.current = null
     setLogs([])
     terminalRef.current?.reset()
   }, [runID])
@@ -57,10 +53,7 @@ export default function LiveRunTerminal({runID, running = false, initialItems = 
     for (const entry of entries) {
       const key = logEntryKey(entry)
       if (seenLogsRef.current.has(key)) continue
-      const last = lastLogRef.current
-      if (last && last.text === entry.text && last.item_id === entry.item_id && last.stream === entry.stream) continue
       seenLogsRef.current.add(key)
-      lastLogRef.current = entry
       accepted.push(entry)
     }
     if (!accepted.length) return
@@ -80,11 +73,8 @@ export default function LiveRunTerminal({runID, running = false, initialItems = 
   }, [filters, logs])
 
   useEffect(() => {
-    const events = flattenLogItems(initialItems)
-    const newEvents = events.slice(lastIndexRef.current)
-    lastIndexRef.current = events.length
-    appendEvents(newEvents)
-  }, [appendEvents, initialItems])
+    appendEvents(flattenLogItems(initialItems, runID, running))
+  }, [appendEvents, initialItems, runID, running])
 
   useEffect(() => {
     if (!runID || !running) return undefined
@@ -180,19 +170,26 @@ export default function LiveRunTerminal({runID, running = false, initialItems = 
   )
 }
 
-function flattenLogItems(items = []) {
+function flattenLogItems(items, runID, running) {
   const events = []
   const visit = item => {
     if (!item) return
     const base = {
+      run_id: runID,
       item_id: item.id,
       kind: item.kind,
       step_id: item.kind === 'loop_iteration' ? String(item.id || '').split('#')[0] : item.id,
       iteration: item.iteration || 0,
       status: item.status
     }
-    String(item.stdout || '').split(/\r?\n/).filter(Boolean).forEach(text => events.push({...base, stream: 'stdout', text}))
-    String(item.stderr || '').split(/\r?\n/).filter(Boolean).forEach(text => events.push({...base, stream: 'stderr', text}))
+    for (const stream of ['stdout', 'stderr']) {
+      const lines = String(item[stream] || '').split(/\r\n|\r|\n/)
+      if (running) lines.pop()
+      let line = 0
+      for (const text of lines) {
+        if (text) events.push({...base, stream, line: ++line, text})
+      }
+    }
     ;(item.children || []).forEach(visit)
   }
   items.forEach(visit)
@@ -200,11 +197,5 @@ function flattenLogItems(items = []) {
 }
 
 function logEntryKey(entry) {
-  return [
-    entry.run_id || '',
-    entry.item_id || '',
-    entry.stream || '',
-    entry.iteration || 0,
-    entry.text || ''
-  ].join('|')
+  return JSON.stringify([entry.run_id, entry.item_id, entry.stream, entry.iteration || 0, entry.line])
 }

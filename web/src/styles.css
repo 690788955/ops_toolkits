@@ -1337,10 +1337,10 @@ pre {
   justify-content: flex-end;
   gap: 10px;
 }
-.pluginInstalledListSection > div:first-child strong,
-.pluginInstalledListSection > div:first-child span { display: block; }
-.pluginInstalledListSection > div:first-child strong { color: var(--color-black); font-size: 15px; font-weight: 900; }
-.pluginInstalledListSection > div:first-child span { margin-top: 5px; color: var(--color-muted); font-size: 13px; line-height: 1.4; }
+.pluginInstalledHeader > div:first-child > strong,
+.pluginInstalledHeader > div:first-child > span { display: block; }
+.pluginInstalledHeader > div:first-child > strong { color: var(--color-black); font-size: 15px; font-weight: 900; }
+.pluginInstalledHeader > div:first-child > span { margin-top: 5px; color: var(--color-muted); font-size: 13px; line-height: 1.4; }
 .modalBackdropNested { z-index: 60; background: rgba(0,0,0,.45); }
 
 .resultExpandedModal {
@@ -1397,6 +1397,7 @@ pre {
   padding: 12px;
   background: var(--color-surface);
 }
+.pluginExportItem > div:first-child { min-width: 0; overflow-wrap: anywhere; }
 .pluginExportItem strong { color: var(--color-black); font-size: 14px; font-weight: 900; }
 .pluginExportItem span { margin-top: 4px; color: var(--color-link); font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; font-weight: 800; }
 .pluginExportItem small { margin-top: 5px; color: var(--color-muted); font-size: 12px; line-height: 1.35; }
@@ -1434,12 +1435,21 @@ pre {
   align-items: stretch;
   min-width: 0;
 }
-.pluginGrid .pluginExportItem > div:first-child { min-width: 0; }
 .pluginGrid .pluginItemActions {
-  justify-content: flex-start;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: auto;
   padding-top: 10px;
 }
+.pluginGrid .pluginExportLinks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.pluginGrid .pluginItemActions a,
+.pluginGrid .pluginItemActions button { width: 100%; min-width: 0; }
+.pluginGrid .pluginItemActions > button:only-of-type { grid-column: 1 / -1; }
 .pluginGrid .marketPluginCard {
   display: flex;
   flex-direction: column;

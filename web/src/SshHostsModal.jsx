@@ -42,6 +42,7 @@ function emptyForm() {
     passphrase: '',
     known_hosts_path: '',
     bundle_base_dir: '',
+    keep_bundle: false,
     strict_host_key: true,
     enabled: true,
     description: '',
@@ -63,6 +64,7 @@ function hostToForm(host) {
     passphrase: '',
     known_hosts_path: host.known_hosts_path || '',
     bundle_base_dir: host.bundle_base_dir || '',
+    keep_bundle: Boolean(host.keep_bundle),
     strict_host_key: host.strict_host_key !== false,
     enabled: host.enabled !== false,
     description: host.description || '',
@@ -196,6 +198,7 @@ export default function SshHostsModal({data, error, onClose, onRefresh}) {
       strict_host_key: Boolean(form.strict_host_key),
       known_hosts_path: form.known_hosts_path.trim(),
       bundle_base_dir: form.bundle_base_dir.trim(),
+      keep_bundle: Boolean(form.keep_bundle),
       enabled: Boolean(form.enabled),
       description: form.description.trim()
     }
@@ -332,7 +335,11 @@ export default function SshHostsModal({data, error, onClose, onRefresh}) {
               <label className="sshFormWide">
                 <span>下发根目录</span>
                 <input value={form.bundle_base_dir} disabled={saving} placeholder="/tmp 或 /data/opsctl（留空使用 TMPDIR 或 /tmp）" onChange={event => updateField('bundle_base_dir', event.target.value)} />
-                <small className="sshFormHint">远程执行时工具包会解压到此目录下的临时子目录，执行结束自动清理；需保证 SSH 用户有写权限。</small>
+                <small className="sshFormHint">远程执行时工具包会解压到此目录下的临时子目录；需保证 SSH 用户有写权限。</small>
+              </label>
+              <label className="checkboxLabel sshFormWide">
+                <input type="checkbox" checked={!form.keep_bundle} disabled={saving} onChange={event => updateField('keep_bundle', !event.target.checked)} />
+                <span>执行后清理下发文件（取消勾选会保留临时目录，需手动清理；运行日志会输出保留路径，便于排查问题）</span>
               </label>
               <label className="checkboxLabel sshFormWide">
                 <input type="checkbox" checked={form.strict_host_key} disabled={saving} onChange={event => updateField('strict_host_key', event.target.checked)} />
@@ -379,6 +386,7 @@ export default function SshHostsModal({data, error, onClose, onRefresh}) {
                       {host.auth === 'key' ? `私钥认证${host.key_path ? ` · ${host.key_path}` : ' · 自动查找'}` : '密码认证'}
                       {host.strict_host_key ? ' · 严格主机密钥' : ' · 跳过主机密钥校验'}
                       {host.bundle_base_dir ? ` · 下发至 ${host.bundle_base_dir}` : ''}
+                      {host.keep_bundle ? ' · 保留下发文件' : ''}
                       {host.last_checked ? ` · 最近检测 ${formatCheckedAt(host.last_checked)}` : ''}
                       {state === 'online' && host.latency_ms ? ` · ${host.latency_ms} ms` : ''}
                     </small>

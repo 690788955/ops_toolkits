@@ -63,7 +63,7 @@ func (e *Executor) RunTool(ctx context.Context, req runner.RemoteToolRequest, st
 	if err != nil {
 		return err
 	}
-	result, err := e.ssh.StreamExec(ctx, req.HostID, remoteCommand(host.BundleBaseDir), bundle, stdout, stderr)
+	result, err := e.ssh.StreamExec(ctx, req.HostID, remoteCommand(host.BundleBaseDir, host.KeepBundle), bundle, stdout, stderr)
 	if err != nil {
 		return err
 	}
@@ -73,7 +73,7 @@ func (e *Executor) RunTool(ctx context.Context, req runner.RemoteToolRequest, st
 	return nil
 }
 
-func remoteCommand(bundleBaseDir string) string {
+func remoteCommand(bundleBaseDir string, keepBundle bool) string {
 	// 外层包装只使用 POSIX 语法，目标机即使没有 GNU Bash 也能解包并启动。
 	base := `"${TMPDIR:-/tmp}"`
 	if baseDir := strings.TrimSpace(bundleBaseDir); baseDir != "" {
@@ -82,8 +82,15 @@ func remoteCommand(bundleBaseDir string) string {
 	script := `base=` + base + `
 mkdir -p "$base" || exit 1
 d=$(mktemp -d "$base/opsctl.XXXXXX") || exit 1
-trap 'rm -rf "$d"' EXIT
-tar -xzf - -C "$d" || exit 1
+`
+	if keepBundle {
+		script += `echo "opsctl: 下发文件保留在 $d" >&2
+`
+	} else {
+		script += `trap 'rm -rf "$d"' EXIT
+`
+	}
+	script += `tar -xzf - -C "$d" || exit 1
 /bin/sh "$d/run.sh"`
 	return "/bin/sh -c " + shellQuote(script)
 }

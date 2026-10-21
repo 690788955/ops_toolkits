@@ -2795,14 +2795,64 @@ func TestRunEventsAPIStreamsAppendedLogsAndCompletes(t *testing.T) {
 		if strings.Count(body, `"text":"old-line"`) != 1 {
 			t.Fatalf("历史日志发送次数不正确: %s", body)
 		}
-		if strings.Count(body, `"text":"new-line"`) != 1 {
-			t.Fatalf("增量重复日志未被抑制: %s", body)
+		if strings.Count(body, `"text":"new-line"`) != 2 {
+			t.Fatalf("相同内容的两行日志应完整保留: %s", body)
 		}
 		if !strings.Contains(body, "event: complete") || !strings.Contains(body, `"status":"succeeded"`) {
 			t.Fatalf("事件流缺少 complete: %s", body)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("事件流未在运行结束后关闭")
+	}
+}
+
+func TestRunLogTailerPreservesLineIdentityAcrossReads(t *testing.T) {
+	runDir := t.TempDir()
+	stdoutPath := filepath.Join(runDir, "stdout.log")
+	initial := "same\nsame\r\n\npar"
+	if err := os.WriteFile(stdoutPath, []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "stderr.log"), []byte("same\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record := runner.RunRecord{ID: "run-lines", Kind: "tool"}
+	tailer := newRunLogTailer(record.ID, runDir, record)
+	events := tailer.read("running")
+	if len(events) != 3 {
+		t.Fatalf("events = %#v, want two stdout lines and one stderr line", events)
+	}
+	for index, event := range events {
+		wantLine := index + 1
+		wantStream := "stdout"
+		if index == 2 {
+			wantLine = 1
+			wantStream = "stderr"
+		}
+		if event.Text != "same" || event.Line != wantLine || event.Stream != wantStream {
+			t.Fatalf("event = %#v, want %s line %d with repeated text", event, wantStream, wantLine)
+		}
+	}
+	if events := tailer.read("running"); len(events) != 0 {
+		t.Fatalf("unchanged log replayed: %#v", events)
+	}
+	if err := os.WriteFile(stdoutPath, []byte(initial+"tial\r\nlast"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	events = tailer.read("running")
+	if len(events) != 1 || events[0].Text != "partial" || events[0].Line != 3 {
+		t.Fatalf("events = %#v, want completed partial line 3", events)
+	}
+	events = tailer.read("succeeded")
+	if len(events) != 1 || events[0].Text != "last" || events[0].Line != 4 {
+		t.Fatalf("events = %#v, want unterminated final line 4", events)
+	}
+	if events := tailer.read("succeeded"); len(events) != 0 {
+		t.Fatalf("completed log replayed: %#v", events)
+	}
+	replayed := newRunLogTailer(record.ID, runDir, record).read("succeeded")
+	if len(replayed) != 5 || replayed[2].Line != 3 || replayed[3].Line != 4 || replayed[4].Line != 1 {
+		t.Fatalf("reconnected stream changed log identities: %#v", replayed)
 	}
 }
 

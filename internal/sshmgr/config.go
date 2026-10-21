@@ -37,6 +37,7 @@ const (
 
 const configFileHeader = `# SSH 操作机配置，由 Web 控制台维护。
 # 密码和私钥口令以明文保存，请限制该文件访问权限。
+# keep_bundle: true 会保留下发到操作机的临时文件，默认执行后自动清理。
 `
 
 type Host struct {
@@ -52,6 +53,7 @@ type Host struct {
 	StrictHostKey  *bool  `yaml:"strict_host_key,omitempty"`
 	KnownHostsPath string `yaml:"known_hosts_path,omitempty"`
 	BundleBaseDir  string `yaml:"bundle_base_dir,omitempty"`
+	KeepBundle     bool   `yaml:"keep_bundle,omitempty"`
 	Enabled        *bool  `yaml:"enabled,omitempty"`
 	Description    string `yaml:"description,omitempty"`
 }
@@ -78,6 +80,7 @@ type HostInput struct {
 	StrictHostKey   *bool  `json:"strict_host_key"`
 	KnownHostsPath  string `json:"known_hosts_path"`
 	BundleBaseDir   string `json:"bundle_base_dir"`
+	KeepBundle      bool   `json:"keep_bundle"`
 	Enabled         *bool  `json:"enabled"`
 	Description     string `json:"description"`
 }
@@ -97,6 +100,7 @@ type HostView struct {
 	KeyPath        string `json:"key_path,omitempty"`
 	KnownHostsPath string `json:"known_hosts_path,omitempty"`
 	BundleBaseDir  string `json:"bundle_base_dir,omitempty"`
+	KeepBundle     bool   `json:"keep_bundle"`
 	StrictHostKey  bool   `json:"strict_host_key"`
 	Enabled        bool   `json:"enabled"`
 	Description    string `json:"description,omitempty"`
@@ -344,6 +348,7 @@ func buildHost(input HostInput, existing *Host) (Host, error) {
 	host.KeyPath = strings.TrimSpace(input.KeyPath)
 	host.KnownHostsPath = strings.TrimSpace(input.KnownHostsPath)
 	host.BundleBaseDir = strings.TrimSpace(input.BundleBaseDir)
+	host.KeepBundle = input.KeepBundle
 	host.Description = strings.TrimSpace(input.Description)
 	if input.StrictHostKey != nil {
 		host.StrictHostKey = boolValue(*input.StrictHostKey)

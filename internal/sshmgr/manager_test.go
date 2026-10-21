@@ -165,6 +165,42 @@ func TestManagerBundleBaseDirValidationAndNormalization(t *testing.T) {
 	}
 }
 
+func TestManagerKeepBundle(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	view, err := manager.Create(HostInput{
+		Address:    "10.0.0.12",
+		User:       "root",
+		Auth:       AuthKey,
+		KeepBundle: true,
+	})
+	if err != nil {
+		t.Fatalf("create host with keep bundle: %v", err)
+	}
+	if !view.KeepBundle {
+		t.Fatal("keep_bundle should be true after create")
+	}
+	marshaled, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(marshaled), `"keep_bundle":true`) {
+		t.Fatalf("view should expose keep_bundle: %s", marshaled)
+	}
+
+	updated, err := manager.Update(view.ID, HostInput{
+		Address:    "10.0.0.12",
+		User:       "root",
+		Auth:       AuthKey,
+		KeepBundle: false,
+	})
+	if err != nil {
+		t.Fatalf("update keep bundle: %v", err)
+	}
+	if updated.KeepBundle {
+		t.Fatal("keep_bundle should be false after update")
+	}
+}
+
 func TestManagerValidation(t *testing.T) {
 	manager := NewManager(t.TempDir())
 	if _, err := manager.Create(HostInput{Address: "10.0.0.10", User: "root", Auth: AuthPassword}); err == nil {

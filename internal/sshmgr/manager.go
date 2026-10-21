@@ -457,6 +457,7 @@ func (m *Manager) viewLocked(host Host) HostView {
 		KeyPath:        host.KeyPath,
 		KnownHostsPath: host.KnownHostsPath,
 		BundleBaseDir:  host.BundleBaseDir,
+		KeepBundle:     host.KeepBundle,
 		StrictHostKey:  host.IsStrictHostKey(),
 		Enabled:        host.IsEnabled(),
 		Description:    host.Description,

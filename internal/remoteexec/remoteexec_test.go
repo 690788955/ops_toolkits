@@ -310,7 +310,7 @@ func TestBuildBundleRejectsWindowsPaths(t *testing.T) {
 }
 
 func TestRemoteCommandUsesBundleBaseDir(t *testing.T) {
-	fallback := remoteCommand("")
+	fallback := remoteCommand("", false)
 	for _, want := range []string{
 		`base="${TMPDIR:-/tmp}"`,
 		`mkdir -p "$base" || exit 1`,
@@ -322,7 +322,7 @@ func TestRemoteCommandUsesBundleBaseDir(t *testing.T) {
 		}
 	}
 
-	custom := remoteCommand("/data/ops cache")
+	custom := remoteCommand("/data/ops cache", false)
 	if !strings.Contains(custom, `base='\''/data/ops cache'\''`) {
 		t.Fatalf("command should use configured base dir:\n%s", custom)
 	}
@@ -331,6 +331,19 @@ func TestRemoteCommandUsesBundleBaseDir(t *testing.T) {
 	}
 	if !strings.Contains(custom, `mkdir -p "$base" || exit 1`) {
 		t.Fatalf("command should create configured base dir:\n%s", custom)
+	}
+}
+
+func TestRemoteCommandKeepBundle(t *testing.T) {
+	keep := remoteCommand("", true)
+	if strings.Contains(keep, "trap") {
+		t.Fatalf("keep bundle command should not register cleanup trap:\n%s", keep)
+	}
+	if !strings.Contains(keep, "下发文件保留在 $d") {
+		t.Fatalf("keep bundle command should print retained dir:\n%s", keep)
+	}
+	if !strings.Contains(keep, `tar -xzf - -C "$d" || exit 1`) {
+		t.Fatalf("keep bundle command should still extract bundle:\n%s", keep)
 	}
 }
 
