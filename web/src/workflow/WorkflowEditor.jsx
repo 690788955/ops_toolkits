@@ -6,12 +6,16 @@ import {controlNodeCatalog, controlNodeHelp, controlNodeTitle} from './catalog.j
 import * as workflowModel from './model.js'
 import {controlShapeMarker, nodeTypes, normalizeRunStatus, runStatusLabel} from './nodes.jsx'
 import {EdgeConfigModal, NodeConfigEditor, NodeConfigModal, ValidationSummary} from './inspectors.jsx'
+import {sshHostStatusLabel} from '../SshHostsModal.jsx'
 import {CanvasDock, NodePickerPanel} from './picker.jsx'
 import FileUploadInput from '../FileUploadInput.jsx'
 
 const MAX_PLATFORM_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
 const REMEMBERED_WORKFLOW_PREFIX = 'ops.workflowEditor.selectedWorkflow'
 const UNCATEGORIZED_WORKFLOW_CATEGORY = '__uncategorized__'
+// 工作流运行级执行目标：follow_nodes 表示沿用各节点自己的 host 配置。
+const RUN_TARGET_FOLLOW = 'follow_nodes'
+const RUN_TARGET_LOCAL = 'local'
 
 export default function WorkflowEditor({catalog, activeCategory = '', hosts = [], setResult, refreshCatalog, resultPanel = null}) {
   const [workflow, setWorkflow] = useState(emptyWorkflow())
@@ -31,10 +35,16 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   const [edgeConfigModalOpen, setEdgeConfigModalOpen] = useState(false)
   const [workflowParamsText, setWorkflowParamsText] = useState('[]')
   const [runParamsText, setRunParamsText] = useState('{}')
+  const [runTarget, setRunTarget] = useState(RUN_TARGET_FOLLOW)
+  const [runTargetOverride, setRunTargetOverride] = useState(false)
   const [executeStep, setExecuteStep] = useState('params')
   const [runParamsModalOpen, setRunParamsModalOpen] = useState(false)
   const [nodeParamsText, setNodeParamsText] = useState('{}')
   const [editorValidation, setEditorValidation] = useState(null)
+  const [saveModalOpen, setSaveModalOpen] = useState(false)
+  const [saveModalErrors, setSaveModalErrors] = useState([])
+  const [saveModalErrorTitle, setSaveModalErrorTitle] = useState('保存前检查未通过')
+  const saveModalErrorsRef = useRef(null)
   const [flowInstance, setFlowInstance] = useState(null)
   const canvasCardRef = useRef(null)
   const quickConnectRef = useRef(null)
@@ -101,15 +111,36 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     () => (catalog.plugins || []).filter(item => item.id && item.id !== 'user.workflows' && !item.disabled),
     [catalog.plugins]
   )
+  const workflowOwnerCategories = useMemo(
+    () => pluginCategories(catalog, workflowOwnerID),
+    [catalog, workflowOwnerID]
+  )
+  const workflowOwnerCategory = !workflowOwnerLocked && workflowOwnerCategories.length === 1 ? workflowOwnerCategories[0] : null
+  const workflowShareOptions = useMemo(
+    () => workflowOwnerOptions.filter(item => item.id !== workflowOwnerID),
+    [workflowOwnerOptions, workflowOwnerID]
+  )
   const workflowCategoryLabels = useMemo(
     () => new Map((catalog.categories || []).map(item => [item.id, item.name || item.id])),
     [catalog.categories]
   )
+  const workflowVisibleCategories = useMemo(() => {
+    const map = new Map()
+    for (const item of workflowOptions) {
+      const categories = new Set([workflowCategoryKey(item)])
+      for (const pluginID of item.shared_with || []) {
+        for (const category of pluginCategories(catalog, pluginID)) categories.add(category.id)
+      }
+      map.set(item.id, categories)
+    }
+    return map
+  }, [workflowOptions, catalog])
   const workflowCategoryGroups = useMemo(() => {
     const counts = new Map()
     for (const item of workflowOptions) {
-      const key = workflowCategoryKey(item)
-      counts.set(key, (counts.get(key) || 0) + 1)
+      for (const categoryID of workflowVisibleCategories.get(item.id) || []) {
+        counts.set(categoryID, (counts.get(categoryID) || 0) + 1)
+      }
     }
     return [...counts.entries()]
       .map(([id, count]) => ({id, count, label: workflowCategoryLabel(id, workflowCategoryLabels)}))
@@ -118,24 +149,26 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
         if (right.id === UNCATEGORIZED_WORKFLOW_CATEGORY) return -1
         return left.label.localeCompare(right.label, 'zh-CN')
       })
-  }, [workflowOptions, workflowCategoryLabels])
+  }, [workflowOptions, workflowVisibleCategories, workflowCategoryLabels])
   const filteredWorkflowOptions = useMemo(
     () => workflowCategoryFilter
-      ? workflowOptions.filter(item => workflowCategoryKey(item) === workflowCategoryFilter)
+      ? workflowOptions.filter(item => workflowVisibleCategories.get(item.id)?.has(workflowCategoryFilter))
       : workflowOptions,
-    [workflowOptions, workflowCategoryFilter]
+    [workflowOptions, workflowCategoryFilter, workflowVisibleCategories]
   )
   const workflowOptionGroups = useMemo(() => {
     const byCategory = new Map()
     for (const item of filteredWorkflowOptions) {
-      const key = workflowCategoryKey(item)
-      if (!byCategory.has(key)) byCategory.set(key, [])
-      byCategory.get(key).push(item)
+      const keys = workflowCategoryFilter ? [workflowCategoryFilter] : [workflowCategoryKey(item)]
+      for (const key of keys) {
+        if (!byCategory.has(key)) byCategory.set(key, [])
+        byCategory.get(key).push(item)
+      }
     }
     return workflowCategoryGroups
       .filter(group => byCategory.has(group.id))
       .map(group => ({...group, items: byCategory.get(group.id)}))
-  }, [filteredWorkflowOptions, workflowCategoryGroups])
+  }, [filteredWorkflowOptions, workflowCategoryFilter, workflowCategoryGroups])
   const selectedWorkflowOutsideFilter = Boolean(workflowCategoryFilter && selectedWorkflowID)
     && !filteredWorkflowOptions.some(item => item.id === selectedWorkflowID)
     && workflowOptions.some(item => item.id === selectedWorkflowID)
@@ -144,9 +177,21 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     : workflowOwnerID === 'user.workflows'
       ? '全局工作流'
       : (workflowOwnerOptions.find(item => item.id === workflowOwnerID)?.name || workflowOwnerID)
+  const workflowCategoryText = workflowOwnerCategory
+    ? (workflowOwnerCategory.name || workflowOwnerCategory.id)
+    : workflowCategoryLabel(workflow.category, workflowCategoryLabels)
   const workflowParameters = useMemo(() => workflowModel.parseJSONList(workflowParamsText), [workflowParamsText])
   const parsedRunParams = useMemo(() => parseJSONObject(runParamsText), [runParamsText])
   const runParams = parsedRunParams.value
+  const runHostOptions = useMemo(() => (hosts || []).filter(host => host && host.id), [hosts])
+  const nodesWithOwnTarget = useMemo(() => nodes.filter(node => Boolean(node.data?.host)).length, [nodes])
+  const runTargetLabel = useMemo(() => {
+    if (runTarget === RUN_TARGET_FOLLOW) return '跟随节点配置'
+    if (runTarget === RUN_TARGET_LOCAL) return '本机'
+    const host = runHostOptions.find(item => item.id === runTarget)
+    return host ? `${host.name || host.id}（${host.user}@${host.address}:${host.port}）` : runTarget
+  }, [runTarget, runHostOptions])
+  const runTargetAppliesTo = runTargetOverride ? nodes.length : Math.max(nodes.length - nodesWithOwnTarget, 0)
   const executableParamGroups = useMemo(() => buildExecutableParamGroups(nodes, toolMap), [nodes, toolMap])
   const executableParamCount = useMemo(() => executableParamGroups.reduce((total, group) => total + group.parameters.length, 0), [executableParamGroups])
   const mappingSources = useMemo(() => workflowModel.buildMappingSources(workflowParameters, selectedNodeID, nodes, edges, catalog.tools || []), [workflowParameters, selectedNodeID, nodes, edges, catalog.tools])
@@ -200,6 +245,11 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     window.addEventListener('beforeunload', warnBeforeLeave)
     return () => window.removeEventListener('beforeunload', warnBeforeLeave)
   }, [hasUnsavedChanges])
+
+  useEffect(() => {
+    if (!saveModalOpen || saveModalErrors.length === 0) return
+    saveModalErrorsRef.current?.scrollIntoView?.({block: 'nearest'})
+  }, [saveModalOpen, saveModalErrors])
 
   useEffect(() => {
     if (!selectedEdge) {
@@ -345,6 +395,8 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       const source = body.data.Source || body.data.source || {}
       const ownerID = source.plugin_id || 'user.workflows'
       const ownerLocked = Boolean(source.type) && source.type !== 'plugin'
+      setSaveModalOpen(false)
+      setSaveModalErrors([])
       setWorkflow(config)
       setWorkflowOwnerID(ownerID)
       setWorkflowOwnerLocked(ownerLocked)
@@ -378,9 +430,37 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     }
   }
 
+  function changeWorkflowOwner(nextOwnerID) {
+    setWorkflowOwnerID(nextOwnerID)
+    const categories = pluginCategories(catalog, nextOwnerID)
+    clearCanvasRunOverlay()
+    setEditorValidation(null)
+    setWorkflow(current => {
+      const currentShared = current.shared_with || []
+      const sharedWith = currentShared.filter(id => id !== nextOwnerID)
+      const nextCategory = nextOwnerID === 'user.workflows'
+        ? current.category
+        : (categories.find(item => item.id === current.category)?.id || categories[0]?.id || 'global')
+      if (nextCategory === current.category && sharedWith.length === currentShared.length) return current
+      return {...current, category: nextCategory, shared_with: sharedWith}
+    })
+  }
+
+  function toggleWorkflowSharedWith(pluginID) {
+    if (!pluginID || pluginID === workflowOwnerID) return
+    clearCanvasRunOverlay()
+    setEditorValidation(null)
+    setWorkflow(current => {
+      const values = current.shared_with || []
+      return {...current, shared_with: values.includes(pluginID) ? values.filter(id => id !== pluginID) : [...values, pluginID]}
+    })
+  }
+
   function createWorkflow() {
     if (!confirmDiscardDraft()) return
     clearCanvasRunOverlay()
+    setSaveModalOpen(false)
+    setSaveModalErrors([])
     const next = emptyWorkflow(workflowCategoryFilter || activeCategory || 'global')
     setCanvasMode('edit')
     setWorkflow(next)
@@ -397,6 +477,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     setEdgeConfigModalOpen(false)
     setEditorValidation(null)
     setSavedDraftSignature(workflowDraftSignature(next, [], [], '', '[]', 'user.workflows'))
+    forgetRememberedWorkflowID('')
     closeNodePicker()
     setResult({message: '已创建空白工作流草稿'})
   }
@@ -879,6 +960,12 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       errors.push(`工作流参数 JSON 无效：${err.message}`)
     }
     const draft = workflowModel.buildWorkflowDraft(workflow, nodes, edges, '', workflowParameters)
+    if (!workflowOwnerLocked && workflowOwnerID !== 'user.workflows') {
+      const ownerCategories = pluginCategories(catalog, workflowOwnerID)
+      draft.category = ownerCategories.find(item => item.id === draft.category)?.id || ownerCategories[0]?.id || 'global'
+    }
+    const sharedWith = (draft.shared_with || []).filter(id => id && id !== workflowOwnerID && id !== 'user.workflows')
+    draft.shared_with = sharedWith.length > 0 ? sharedWith : undefined
     workflowModel.validateConditionDraft(nodes, edges).forEach(error => errors.push(error))
     workflowModel.validateControlDraft(nodes, edges, catalog.tools || []).forEach(error => errors.push(error))
     if (nodes.length > 1 && edges.length === 0 && draft.edges.length === 0) {
@@ -956,15 +1043,21 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     }
   }
 
+  function openSaveModal() {
+    if (workflowAction) return
+    setSaveModalErrorTitle('保存前检查未通过')
+    setSaveModalErrors([])
+    setSaveModalOpen(true)
+  }
+
   async function saveDraft() {
     const check = preflightWorkflowDraft('save')
     if (check.errors.length > 0) {
-      showEditorValidation(check)
+      setSaveModalErrorTitle('保存前检查未通过')
+      setSaveModalErrors(check.errors)
       return
     }
-    const nodeCount = check.draft.nodes?.length || 0
-    const edgeCount = check.draft.edges?.length || 0
-    if (!window.confirm(`确认保存工作流「${check.draft.name || check.draft.id}」？\n\n归属：${workflowOwnerLabel}\n节点：${nodeCount}\n依赖：${edgeCount}\n保存后会覆盖当前工作流配置。`)) return
+    setSaveModalErrors([])
     try {
       setWorkflowAction('saving')
       setEditorValidation(null)
@@ -980,10 +1073,14 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       setSelectedWorkflowID(check.draft.id)
       setSavedDraftSignature(workflowDraftSignature(check.draft, nodes, edges, '', workflowParamsText, source?.plugin_id || workflowOwnerID))
       rememberWorkflowID('', check.draft.id)
-      await refreshCatalog({keepCategory: true})
+      setSaveModalOpen(false)
       setResult({message: summarizeAPIResponse(body, '工作流保存成功。'), response: body})
+      refreshCatalog({keepCategory: true}).catch(() => {})
     } catch (err) {
-      setResult({message: readableAPIError(err, '工作流保存失败。'), response: err.body})
+      const message = readableAPIError(err, '工作流保存失败。')
+      setSaveModalErrorTitle('工作流保存失败')
+      setSaveModalErrors([message])
+      setResult({message, response: err.body})
     } finally {
       setWorkflowAction('')
     }
@@ -1066,7 +1163,13 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       const uploadNodeFilesSnapshot = uploadNodeFiles
       setResult({message: '执行工作流...', uploadProgress: null})
       setExecuteDetailView('logs')
-      const body = await postJSON(`/api/workflows/${check.draft.id}/run?async=true`, {params: runParams, workflow: check.draft, confirm: confirmRequired})
+      const body = await postJSON(`/api/workflows/${check.draft.id}/run?async=true`, {
+        params: runParams,
+        workflow: check.draft,
+        confirm: confirmRequired,
+        target: runTarget === RUN_TARGET_FOLLOW ? undefined : runTarget,
+        override_nodes: runTarget === RUN_TARGET_FOLLOW ? false : runTargetOverride
+      })
       setRunParamsModalOpen(false)
       if (body.id) {
         setActiveRun({id: body.id, status: body.status || 'running', target: body.target || check.draft.id})
@@ -1112,8 +1215,21 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       return
     }
     setEditorValidation(null)
+    setExecuteStep('target')
+    setResult({message: '参数已确认，请选择执行机器。'})
+  }
+
+  function prepareRunConfirmStep() {
+    if (isActiveRunRunning) return
+    const check = preflightRunParamsStep()
+    if (check.errors.length > 0) {
+      clearCanvasRunOverlay()
+      showEditorValidation(check)
+      return
+    }
+    setEditorValidation(null)
     setExecuteStep('run')
-    setResult({message: '参数已确认，可开始运行。'})
+    setResult({message: `执行机器已确认：${runTargetLabel}。`})
   }
 
   function openRunParamsModal() {
@@ -1190,7 +1306,9 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   function renderWorkflowOption(item) {
     const owner = item.source?.plugin_id
     const ownerLabel = owner && owner !== 'user.workflows' ? ` · ${item.source.plugin_name || owner}` : ''
-    return <option key={item.id} value={item.id}>{item.name || item.id}{ownerLabel}</option>
+    const sharedOnly = Boolean(workflowCategoryFilter) && workflowCategoryKey(item) !== workflowCategoryFilter
+    const sharedLabel = sharedOnly ? ` · 共享自 ${item.source?.plugin_name || item.source?.plugin_id || '其它插件'}` : ''
+    return <option key={item.id} value={item.id}>{item.name || item.id}{ownerLabel}{sharedLabel}</option>
   }
   const workflowLoader = (
     <section className="workflowSelection" aria-labelledby="workflow-selection-title">
@@ -1324,6 +1442,13 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       {editorValidation?.errors?.length > 0 && <ValidationSummary status={editorValidation} />}
       <div className="form compact">
         {workflowLoader}
+        <div className="workflowSidebarStatus" title={`${workflow.name || workflow.id || '未命名工作流'} · ${workflowOwnerLabel} · ${workflowCategoryText}`}>
+          <strong>{workflow.name || workflow.id || '未命名工作流'}</strong>
+          <span>
+            {workflowOwnerLabel} · {workflowCategoryText}
+            {(workflow.shared_with || []).length > 0 ? ` · 共享 ${workflow.shared_with.length} 个插件` : ''}
+          </span>
+        </div>
         <div className={`workflowDraftStatus ${draftStatus.kind}`} role="status" aria-live="polite">
           <strong>{draftStatus.title}</strong>
           <span>{draftStatus.detail}</span>
@@ -1331,7 +1456,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
         <div className="buttonRow">
           <button className="secondary" type="button" onClick={createWorkflow} disabled={Boolean(workflowAction)}>新建</button>
           <button className="secondary" type="button" onClick={validateDraft} disabled={Boolean(workflowAction)}>{workflowAction === 'validating' ? '校验中...' : '校验'}</button>
-          <button className="primary" type="button" onClick={saveDraft} disabled={Boolean(workflowAction)}>{workflowAction === 'saving' ? '保存中...' : '保存'}</button>
+          <button className="primary" type="button" onClick={openSaveModal} disabled={Boolean(workflowAction)}>保存</button>
           <button className="secondary danger" type="button" onClick={deleteWorkflow} disabled={!canDeleteWorkflow || Boolean(workflowAction)}>删除工作流</button>
         </div>
         <div className="buttonRow">
@@ -1339,75 +1464,6 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
           <button className="secondary danger" type="button" onClick={removeSelectedEdge} disabled={!selectedEdge}>删除依赖</button>
           <button className="secondary" type="button" onClick={clearSelection} disabled={!selectedNode && !selectedEdge}>取消选择</button>
         </div>
-        <label>
-          <span>工作流 ID</span>
-          <input value={workflow.id || ''} onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, id: event.target.value}) }} placeholder="demo.my-flow" />
-        </label>
-        <label>
-          <span>归属</span>
-          <select
-            value={workflowOwnerLocked ? '__builtin__' : workflowOwnerID}
-            disabled={workflowOwnerLocked || Boolean(workflowAction)}
-            onChange={event => setWorkflowOwnerID(event.target.value)}
-          >
-            {workflowOwnerLocked ? (
-              <option value="__builtin__">内置工作流（不可迁移）</option>
-            ) : (
-              <>
-                <option value="user.workflows">全局工作流</option>
-                {workflowOwnerOptions.map(item => <option key={item.id} value={item.id}>{item.name || item.id}（{item.id}）</option>)}
-              </>
-            )}
-          </select>
-          <small className="workflowSelectionHint">
-            {workflowOwnerLocked
-              ? '内置工作流保存在原配置文件，不能修改归属。'
-              : workflowOwnerID === 'user.workflows'
-                ? '保存在 user.workflows 目录，不绑定业务插件，可在所有分类中管理；不随业务插件 ZIP 导出。'
-                : `保存后 YAML 写入插件 ${workflowOwnerID} 的 workflows/ 目录，导出该插件 ZIP 时自动携带。`}
-          </small>
-        </label>
-        <label>
-          <span>分类</span>
-          <select
-            value={workflow.category || 'global'}
-            disabled={Boolean(workflowAction)}
-            onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, category: event.target.value}) }}
-          >
-            {(catalog.categories || []).map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
-            <option value="global">全局（跨分类）</option>
-            {workflow.category && workflow.category !== 'global' && !(catalog.categories || []).some(item => item.id === workflow.category) && (
-              <option value={workflow.category}>{workflow.category}</option>
-            )}
-          </select>
-          <small className="workflowSelectionHint">用于工作流管理的分类筛选，不影响可添加的工具。</small>
-        </label>
-        <label>
-          <span>名称</span>
-          <input value={workflow.name || ''} onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, name: event.target.value}) }} placeholder="工作流名称" />
-        </label>
-        <label>
-          <span>描述</span>
-          <textarea
-            className="workflowDescriptionInput"
-            value={workflow.description || ''}
-            onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, description: event.target.value}) }}
-            placeholder="工作流描述，可分多行记录用途、前置条件或注意事项"
-          />
-        </label>
-        <label>
-          <span>工作流参数定义 JSON</span>
-          <textarea
-            className="workflowRunParamsInput"
-            value={workflowParamsText}
-            onChange={event => {
-              clearCanvasRunOverlay()
-              setWorkflowParamsText(event.target.value)
-              setEditorValidation(null)
-            }}
-            placeholder='[{"name":"host","type":"string","required":true,"default":"127.0.0.1"}]'
-          />
-        </label>
       </div>
     </section>
   )
@@ -1426,6 +1482,12 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
         </div>
         <div className={isActiveRunRunning ? 'workflowSidebarStatus running' : 'workflowSidebarStatus'} title={activeRunID ? `运行 ID：${activeRunID}` : '执行后可在这里取消当前画布发起的运行任务。'}>
           <strong>{isActiveRunRunning ? '运行中' : activeRunID ? runStatusLabel(activeRunStatus) : '未运行'}</strong>
+        </div>
+        <div
+          className="workflowSidebarStatus"
+          title={runTarget === RUN_TARGET_FOLLOW ? '运行时沿用每个节点自己配置的执行目标。' : runTargetOverride ? '运行时会把所有节点改到该机器执行。' : '运行时只对未单独指定执行目标的节点生效。'}
+        >
+          <strong>执行机器：{runTargetLabel}</strong>
         </div>
         {nodes.length === 0 ? (
           <div className="workflowEmptyStart">
@@ -1553,6 +1615,74 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
             />
           </details>
         </>
+      ) : executeStep === 'target' ? (
+        <>
+          <div className="workflowRunParamSection">
+            <strong>选择执行机器</strong>
+            <div className="workflowTargetOptions" role="radiogroup" aria-label="工作流执行机器">
+              <button
+                type="button"
+                role="radio"
+                aria-checked={runTarget === RUN_TARGET_FOLLOW}
+                className={runTarget === RUN_TARGET_FOLLOW ? 'workflowTargetOption active' : 'workflowTargetOption'}
+                disabled={isActiveRunRunning}
+                onClick={() => setRunTarget(RUN_TARGET_FOLLOW)}
+              >
+                <strong>跟随节点配置</strong>
+                <small>每个节点使用自己配置的执行目标，未单独配置的在本机执行。</small>
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={runTarget === RUN_TARGET_LOCAL}
+                className={runTarget === RUN_TARGET_LOCAL ? 'workflowTargetOption active' : 'workflowTargetOption'}
+                disabled={isActiveRunRunning}
+                onClick={() => setRunTarget(RUN_TARGET_LOCAL)}
+              >
+                <strong>本机</strong>
+                <small>在这台机器上执行，不经过 SSH 操作机。</small>
+              </button>
+              {runHostOptions.map(host => (
+                <button
+                  key={host.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={runTarget === host.id}
+                  className={runTarget === host.id ? 'workflowTargetOption active' : 'workflowTargetOption'}
+                  disabled={isActiveRunRunning || !host.enabled}
+                  onClick={() => setRunTarget(host.id)}
+                  title={host.enabled ? `${host.name || host.id} · ${host.user}@${host.address}:${host.port}` : `操作机 ${host.name || host.id} 已停用`}
+                >
+                  <strong>{host.name || host.id}</strong>
+                  <small>{host.user}@{host.address}:{host.port} · {sshHostStatusLabel(host.status)}{host.enabled ? '' : ' · 已停用'}</small>
+                </button>
+              ))}
+            </div>
+            {runHostOptions.length === 0 && (
+              <div className="empty small">还没有配置 SSH 操作机，目前只能选择本机或跟随节点配置。</div>
+            )}
+          </div>
+          {runTarget !== RUN_TARGET_FOLLOW && (
+            <div className="workflowRunParamSection">
+              <label className="workflowTargetOverride">
+                <input
+                  type="checkbox"
+                  checked={runTargetOverride}
+                  disabled={isActiveRunRunning}
+                  onChange={event => setRunTargetOverride(event.target.checked)}
+                />
+                <span>覆盖节点已配置的执行目标</span>
+              </label>
+              <div className="workflowSidebarHint">
+                <span>
+                  {runTargetOverride
+                    ? `全部 ${nodes.length} 个节点都会改到「${runTargetLabel}」执行，节点自身配置的机器被忽略。`
+                    : `仅对未单独指定执行目标的节点生效（${nodesWithOwnTarget} 个节点已单独指定，不受影响）。`}
+                </span>
+              </div>
+            </div>
+          )}
+        </>
       ) : (
         <>
           <div className="workflowRunParamSection">
@@ -1560,6 +1690,16 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
             <div className="workflowSidebarHint">
               <strong>{workflow.name || workflow.id || '未选择工作流'}</strong>
               <span>{workflowParameters.length + executableParamCount} 项参数 · {nodes.length} 个节点 · {edges.length} 条依赖</span>
+            </div>
+            <div className="workflowSidebarHint">
+              <strong>执行机器：{runTargetLabel}</strong>
+              <span>
+                {runTarget === RUN_TARGET_FOLLOW
+                  ? `沿用节点配置，${Math.max(nodes.length - nodesWithOwnTarget, 0)} 个节点在本机执行`
+                  : runTargetOverride
+                    ? `全部 ${nodes.length} 个节点都会改到该目标执行`
+                    : `${runTargetAppliesTo} 个未指定执行目标的节点会改到该目标执行`}
+              </span>
             </div>
           </div>
           {uploadFlowNodes(nodes).length > 0 && (
@@ -1686,13 +1826,166 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       {isEditingCanvas || executeDetailView === 'canvas' ? workflowCanvas : null}
       {!isEditingCanvas && executeDetailView === 'logs' ? executeResultPanel : null}
 
+      {saveModalOpen && (
+        <div className="modalBackdrop" onClick={() => { if (workflowAction !== 'saving') setSaveModalOpen(false) }}>
+          <section className="modal workflowSaveModal" role="dialog" aria-modal="true" aria-label="保存工作流" onClick={event => event.stopPropagation()}>
+            <div className="modalHeader">
+              <div>
+                <h3>保存工作流</h3>
+                <p>{workflowOwnerLabel} · {workflowCategoryText} · {nodes.length} 节点 / {edges.length} 依赖</p>
+              </div>
+              <button type="button" className="modalClose" onClick={() => setSaveModalOpen(false)} disabled={workflowAction === 'saving'}>×</button>
+            </div>
+            {saveModalErrors.length > 0 && (
+              <div ref={saveModalErrorsRef}>
+                <ValidationSummary status={{title: saveModalErrorTitle, errors: saveModalErrors}} />
+              </div>
+            )}
+            <div className="form compact">
+              <label>
+                <span>工作流 ID</span>
+                <input
+                  value={workflow.id || ''}
+                  readOnly={Boolean(selectedWorkflowID)}
+                  disabled={Boolean(workflowAction)}
+                  onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, id: event.target.value}) }}
+                  placeholder="demo.my-flow"
+                />
+                <small className="workflowSelectionHint">
+                  {selectedWorkflowID ? '工作流 ID 是唯一标识，保存后不可修改。' : '保存后作为唯一标识，不能与已有工作流重复。'}
+                </small>
+              </label>
+              <label>
+                <span>名称</span>
+                <input value={workflow.name || ''} disabled={Boolean(workflowAction)} onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, name: event.target.value}) }} placeholder="工作流名称" />
+              </label>
+              <label>
+                <span>描述</span>
+                <textarea
+                  className="workflowDescriptionInput"
+                  value={workflow.description || ''}
+                  disabled={Boolean(workflowAction)}
+                  onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, description: event.target.value}) }}
+                  placeholder="工作流描述，可分多行记录用途、前置条件或注意事项"
+                />
+              </label>
+              <label>
+                <span>归属</span>
+                <select
+                  value={workflowOwnerLocked ? '__builtin__' : workflowOwnerID}
+                  disabled={workflowOwnerLocked || Boolean(workflowAction)}
+                  onChange={event => changeWorkflowOwner(event.target.value)}
+                >
+                  {workflowOwnerLocked ? (
+                    <option value="__builtin__">内置工作流（不可迁移）</option>
+                  ) : (
+                    <>
+                      <option value="user.workflows">全局工作流</option>
+                      {workflowOwnerOptions.map(item => <option key={item.id} value={item.id}>{item.name || item.id}（{item.id}）</option>)}
+                    </>
+                  )}
+                </select>
+                <small className="workflowSelectionHint">
+                  {workflowOwnerLocked
+                    ? '内置工作流保存在原配置文件，不能修改归属。'
+                    : workflowOwnerID === 'user.workflows'
+                      ? '保存在 user.workflows 目录，不绑定业务插件，可在所有分类中管理；不随业务插件 ZIP 导出。'
+                      : `保存后 YAML 写入插件 ${workflowOwnerID} 的 workflows/ 目录，导出该插件 ZIP 时自动携带；分类跟随该插件。`}
+                </small>
+              </label>
+              {!workflowOwnerLocked && workflowOwnerID !== 'user.workflows' && workflowOwnerCategories.length > 1 ? (
+                <label>
+                  <span>插件分类</span>
+                  <select
+                    value={workflow.category || workflowOwnerCategories[0].id}
+                    disabled={Boolean(workflowAction)}
+                    onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, category: event.target.value}) }}
+                  >
+                    {workflowOwnerCategories.map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
+                    {workflow.category && !workflowOwnerCategories.some(item => item.id === workflow.category) && (
+                      <option value={workflow.category}>{workflow.category}</option>
+                    )}
+                  </select>
+                  <small className="workflowSelectionHint">归属插件声明了多个分类，只能在其声明的范围内选择。</small>
+                </label>
+              ) : workflowOwnerLocked || workflowOwnerID === 'user.workflows' ? (
+                <label>
+                  <span>分类</span>
+                  <select
+                    value={workflow.category || 'global'}
+                    disabled={Boolean(workflowAction)}
+                    onChange={event => { clearCanvasRunOverlay(); setWorkflow({...workflow, category: event.target.value}) }}
+                  >
+                    {(catalog.categories || []).map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>)}
+                    <option value="global">全局（跨分类）</option>
+                    {workflow.category && workflow.category !== 'global' && !(catalog.categories || []).some(item => item.id === workflow.category) && (
+                      <option value={workflow.category}>{workflow.category}</option>
+                    )}
+                  </select>
+                  <small className="workflowSelectionHint">
+                    {workflowOwnerID === 'user.workflows'
+                      ? '全局工作流没有归属插件，分类仅用于筛选与分组。'
+                      : '用于工作流管理的分类筛选，不影响可添加的工具。'}
+                  </small>
+                </label>
+              ) : null}
+              {!workflowOwnerLocked && workflowShareOptions.length > 0 && (
+                <div className="workflowShareField">
+                  <span>共享给（可选）</span>
+                  <div className="workflowShareOptions">
+                    {workflowShareOptions.map(item => {
+                      const active = (workflow.shared_with || []).includes(item.id)
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          className={active ? 'workflowShareChip active' : 'workflowShareChip'}
+                          aria-pressed={active}
+                          disabled={Boolean(workflowAction)}
+                          onClick={() => toggleWorkflowSharedWith(item.id)}
+                          title={item.id}
+                        >
+                          {item.name || item.id}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <small className="workflowSelectionHint">共享仅让该工作流出现在所选插件的分类下；文件仍保存在归属插件目录，不复制、不随对方插件 ZIP 导出。</small>
+                </div>
+              )}
+              <details className="workflowSaveAdvanced">
+                <summary>高级设置{workflowParameters.length > 0 ? `（已配置 ${workflowParameters.length} 个参数）` : ''}</summary>
+                <label>
+                  <span>工作流参数定义 JSON</span>
+                  <textarea
+                    className="workflowRunParamsInput"
+                    value={workflowParamsText}
+                    disabled={Boolean(workflowAction)}
+                    onChange={event => {
+                      clearCanvasRunOverlay()
+                      setWorkflowParamsText(event.target.value)
+                      setEditorValidation(null)
+                    }}
+                    placeholder='[{"name":"host","type":"string","required":true,"default":"127.0.0.1"}]'
+                  />
+                </label>
+              </details>
+            </div>
+            <div className="modalFooter">
+              <button className="secondary" type="button" onClick={() => setSaveModalOpen(false)} disabled={workflowAction === 'saving'}>取消</button>
+              <button className="primary" type="button" onClick={saveDraft} disabled={Boolean(workflowAction)}>{workflowAction === 'saving' ? '保存中...' : '保存'}</button>
+            </div>
+          </section>
+        </div>
+      )}
+
       {runParamsModalOpen && (
         <div className="modalBackdrop" onClick={() => setRunParamsModalOpen(false)}>
           <section className="modal workflowRunParamsPanel workflowRunParamsModal" role="dialog" aria-modal="true" aria-label="填写运行参数" onClick={event => event.stopPropagation()}>
             <div className="modalHeader">
               <div>
-                <h3>{executeStep === 'params' ? '填写运行参数' : '确认运行'}</h3>
-                <p>步骤 {executeStep === 'params' ? '1' : '2'} / 2 · {workflowParameters.length + executableParamCount} 项参数 · {nodes.length} 个节点</p>
+                <h3>{executeStep === 'params' ? '填写运行参数' : executeStep === 'target' ? '选择执行机器' : '确认运行'}</h3>
+                <p>步骤 {executeStep === 'params' ? '1' : executeStep === 'target' ? '2' : '3'} / 3 · {workflowParameters.length + executableParamCount} 项参数 · {nodes.length} 个节点 · 执行机器：{runTargetLabel}</p>
               </div>
               <button type="button" className="modalClose" onClick={() => setRunParamsModalOpen(false)}>×</button>
             </div>
@@ -1703,9 +1996,14 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
                   <button className="secondary" type="button" onClick={validateDraft}>校验</button>
                   <button className="primary" type="button" onClick={prepareRunStep} disabled={isActiveRunRunning}>下一步</button>
                 </>
-              ) : (
+              ) : executeStep === 'target' ? (
                 <>
                   <button className="secondary" type="button" onClick={() => setExecuteStep('params')} disabled={isActiveRunRunning}>上一步</button>
+                  <button className="primary" type="button" onClick={prepareRunConfirmStep} disabled={isActiveRunRunning}>下一步</button>
+                </>
+              ) : (
+                <>
+                  <button className="secondary" type="button" onClick={() => setExecuteStep('target')} disabled={isActiveRunRunning}>上一步</button>
                   <button
                     className="primary"
                     type="button"
@@ -1854,6 +2152,11 @@ function sleep(ms) {
 
 function workflowCategoryKey(item) {
   return String(item?.category || '').trim() || UNCATEGORIZED_WORKFLOW_CATEGORY
+}
+
+function pluginCategories(catalog, ownerID) {
+  const plugin = (catalog?.plugins || []).find(item => item.id === ownerID)
+  return (plugin?.categories || []).filter(item => item && item.id)
 }
 
 function workflowCategoryLabel(category, labels) {
@@ -2677,6 +2980,7 @@ function emptyWorkflow(category = 'global') {
     version: '1.0.0',
     category,
     tags: [],
+    shared_with: [],
     parameters: [],
     nodes: [],
     edges: [],

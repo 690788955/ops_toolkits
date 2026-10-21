@@ -69,9 +69,10 @@ function buildToolConfigItems(catalog, activeCategory) {
 function buildWorkflowConfigItems(catalog, activeCategory) {
   return (catalog?.workflows || [])
     .filter(workflow => !activeCategory || workflow.category === activeCategory)
-    .filter(workflow => (workflow.config_files || []).length > 0)
+    .filter(workflow => (workflow.config_files || []).length > 0 || workflowReferencedConfigPlugins(workflow).length > 0)
     .map(workflow => {
       const files = (workflow.config_files || []).map(normalizeWorkflowConfigListItem)
+      const referencedPlugins = workflowReferencedConfigPlugins(workflow)
       return {
         type: 'workflow',
         id: workflow.id,
@@ -79,11 +80,22 @@ function buildWorkflowConfigItems(catalog, activeCategory) {
         typeLabel: '工作流',
         description: workflow.description || `工作流 ${workflow.id} 的真实挂载路径配置文件`,
         files,
+        referencedPlugins,
         category: workflow.category,
         source: workflow.source
       }
     })
     .sort((left, right) => String(left.name || left.id).localeCompare(String(right.name || right.id), 'zh-CN'))
+}
+
+// 工作流节点引用到的插件里，真正声明了配置文件的那些。
+export function workflowReferencedConfigPlugins(workflow) {
+  return (workflow?.referenced_plugins || [])
+    .map(plugin => ({
+      ...plugin,
+      files: (plugin.config_files || []).map(file => normalizeConfigFileItem(file, plugin.id))
+    }))
+    .filter(plugin => plugin.files.length > 0)
 }
 
 function normalizeConfigFileItem(file, pluginID) {

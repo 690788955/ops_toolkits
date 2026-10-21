@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -310,6 +311,7 @@ func NormalizeWorkflow(cfg *WorkflowConfig) {
 	if len(cfg.Nodes) == 0 {
 		cfg.Nodes = cfg.Steps
 	}
+	cfg.SharedWith = normalizeSharedWith(cfg.SharedWith)
 	for i := range cfg.ConfigFiles {
 		NormalizeConfigFileRef(&cfg.ConfigFiles[i])
 		if cfg.ConfigFiles[i].Access == "" {
@@ -341,6 +343,27 @@ func NormalizeWorkflow(cfg *WorkflowConfig) {
 			cfg.Nodes[i].OnFailure = "stop"
 		}
 	}
+}
+
+func normalizeSharedWith(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
 }
 
 func edgesFromDependsOn(nodes []WorkflowNode) []WorkflowEdge {

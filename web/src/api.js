@@ -102,6 +102,14 @@ export function nexusDownloadURL(sourceID, id, version) {
   return `/api/nexus/download${sourceQuery(sourceID, {id, version})}`
 }
 
+export function fetchNexusShareTargets() {
+  return fetchJSON('/api/nexus/share/targets')
+}
+
+export function postPluginShare(pluginID, sourceID, replace) {
+  return postJSON(`/api/plugins/${encodeURIComponent(pluginID)}/share${sourceQuery(sourceID, {replace: replace ? 'true' : ''})}`, {})
+}
+
 export async function postPluginZip(file, replace) {
   const form = new FormData()
   form.append('file', file)
@@ -111,6 +119,10 @@ export async function postPluginZip(file, replace) {
     body: form
   })
   return readJSONResponse(res)
+}
+
+export function rescanPlugins() {
+  return postJSON('/api/plugins/rescan', {})
 }
 
 export async function downloadUserWorkflowExport(workflowIDs, includeDependencies) {

@@ -176,9 +176,18 @@ describe('workflow node run status', () => {
         nextButton.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
       })
 
+      expect(host.textContent).toContain('选择执行机器')
+      expect(host.textContent).toContain('跟随节点配置')
+      expect(setResult).toHaveBeenLastCalledWith({message: '参数已确认，请选择执行机器。'})
+
+      const targetNextButton = Array.from(host.querySelectorAll('button')).find(item => item.textContent === '下一步')
+      await act(async () => {
+        targetNextButton.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+      })
+
       expect(host.textContent).toContain('确认运行')
       expect(host.textContent).toContain('开始运行')
-      expect(setResult).toHaveBeenLastCalledWith({message: '参数已确认，可开始运行。'})
+      expect(setResult).toHaveBeenLastCalledWith({message: '执行机器已确认：跟随节点配置。'})
     } finally {
       root.unmount()
       host.remove()

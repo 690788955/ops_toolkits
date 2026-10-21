@@ -1,0 +1,161 @@
+id: config.deploy
+name: 配置文件部署
+version: 1.0.2
+description: 把插件内受管配置文件的内容写入目标路径，支持差异检查、自动备份、权限保留和原子写入
+author: ops-team
+
+contributes:
+  categories:
+    - id: config
+      name: 配置部署
+      description: 配置文件下发与差异检查工具
+
+  tools:
+    - id: config.deploy.push
+      name: 下发配置文件
+      category: config
+      description: 将插件 config 目录中的配置文件内容写入目标路径，入参为目标文件路径（或目标目录）
+      tags: [config, deploy, file, push]
+      command: scripts/push-config.sh
+      args:
+        - --action
+        - push
+        - --target
+        - "{{ .target_path }}"
+        - --source
+        - "{{ .source }}"
+        - --create-dirs
+        - "{{ .create_dirs }}"
+        - --backup
+        - "{{ .backup }}"
+        - --if-changed
+        - "{{ .if_changed }}"
+        - --mode
+        - "{{ .mode }}"
+        - --owner
+        - "{{ .owner }}"
+      workdir: .
+      timeout: 2m
+      parameters:
+        - name: target_path
+          type: string
+          description: 目标文件路径（绝对路径）；传入已存在的目录或以 / 结尾时，写入该目录下的同名配置文件
+          required: true
+        - name: source
+          type: string
+          description: 插件 config 目录内的源配置文件名，例如 app.conf
+          required: false
+          default: app.conf
+        - name: create_dirs
+          type: string
+          description: 目标父目录不存在时是否自动创建
+          required: false
+          default: "yes"
+          options:
+            - "yes"
+            - "no"
+        - name: backup
+          type: string
+          description: 目标文件已存在时是否先备份为 <目标文件>.bak.<时间戳>
+          required: false
+          default: "yes"
+          options:
+            - "yes"
+            - "no"
+        - name: if_changed
+          type: string
+          description: 内容与目标文件一致时是否跳过写入（幂等）
+          required: false
+          default: "yes"
+          options:
+            - "yes"
+            - "no"
+        - name: mode
+          type: string
+          description: 写入后设置的权限位，例如 0644；留空则沿用目标文件原有权限
+          required: false
+          default: ""
+        - name: owner
+          type: string
+          description: 写入后设置的属主，格式 user:group；留空则不修改（通常需要 root 权限）
+          required: false
+          default: ""
+      config_dir: config
+      config_files:
+        - app.conf
+      outputs:
+        - name: target_path
+          description: 实际写入的目标文件路径
+          type: string
+          required: true
+          json_path: target_path
+        - name: sha256
+          description: 写入后目标文件的 SHA256
+          type: string
+          required: true
+          json_path: sha256
+        - name: status
+          description: 执行结果，updated / skipped / created
+          type: string
+          required: false
+          json_path: status
+        - name: backup_path
+          description: 备份文件路径，未备份时为空
+          type: string
+          required: false
+          json_path: backup_path
+        - name: bytes
+          description: 写入文件大小（字节）
+          type: string
+          required: false
+          json_path: bytes
+      confirm:
+        required: true
+        message: 确认将配置文件内容写入目标路径？该操作会覆盖目标文件（默认先备份）。
+
+    - id: config.deploy.check
+      name: 检查配置差异
+      category: config
+      description: 对比插件配置文件与目标文件内容，仅输出差异，不写入任何文件
+      tags: [config, diff, check, file]
+      command: scripts/push-config.sh
+      args:
+        - --action
+        - check
+        - --target
+        - "{{ .target_path }}"
+        - --source
+        - "{{ .source }}"
+      workdir: .
+      timeout: 1m
+      parameters:
+        - name: target_path
+          type: string
+          description: 目标文件路径（绝对路径）；传入已存在的目录或以 / 结尾时，比对目录下的同名配置文件
+          required: true
+        - name: source
+          type: string
+          description: 插件 config 目录内的源配置文件名，例如 app.conf
+          required: false
+          default: app.conf
+      config_dir: config
+      config_files:
+        - app.conf
+      outputs:
+        - name: target_path
+          description: 参与比对的目标文件路径
+          type: string
+          required: true
+          json_path: target_path
+        - name: status
+          description: 比对结果，identical / different / missing
+          type: string
+          required: true
+          json_path: status
+        - name: changed
+          description: 是否存在差异（true / false）
+          type: string
+          required: false
+          json_path: changed
+      confirm:
+        required: false

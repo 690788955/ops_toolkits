@@ -650,13 +650,26 @@ type toolCatalogEntry struct {
 
 type workflowCatalogEntry struct {
 	config.WorkflowRef
-	Tags         []string               `json:"tags"`
-	Parameters   []config.Parameter     `json:"parameters"`
-	ConfigFiles  []config.ConfigFileRef `json:"config_files,omitempty"`
-	Confirm      config.Confirmation    `json:"confirm"`
-	Source       registry.Source        `json:"source"`
-	Dependencies []workflowDependency   `json:"dependencies,omitempty"`
-	MissingTools []string               `json:"missing_tools,omitempty"`
+	Tags              []string                   `json:"tags"`
+	SharedWith        []string                   `json:"shared_with,omitempty"`
+	Parameters        []config.Parameter         `json:"parameters"`
+	ConfigFiles       []config.ConfigFileRef     `json:"config_files,omitempty"`
+	ReferencedPlugins []workflowReferencedPlugin `json:"referenced_plugins,omitempty"`
+	Confirm           config.Confirmation        `json:"confirm"`
+	Source            registry.Source            `json:"source"`
+	Dependencies      []workflowDependency       `json:"dependencies,omitempty"`
+	MissingTools      []string                   `json:"missing_tools,omitempty"`
+}
+
+// workflowReferencedPlugin 描述工作流节点引用到的插件，以及该插件声明的配置文件。
+// 配置文件仍由插件持有，这里只是把它带到工作流配置视图里，方便就地查看与跳转编辑。
+type workflowReferencedPlugin struct {
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name,omitempty"`
+	Version     string                 `json:"version,omitempty"`
+	Disabled    bool                   `json:"disabled,omitempty"`
+	Tools       []string               `json:"tools,omitempty"`
+	ConfigFiles []config.ConfigFileRef `json:"config_files,omitempty"`
 }
 
 type workflowDependency struct {
@@ -667,18 +680,20 @@ type workflowDependency struct {
 }
 
 type pluginCatalogEntry struct {
-	ID          string           `json:"id"`
-	Name        string           `json:"name"`
-	Version     string           `json:"version"`
-	Description string           `json:"description,omitempty"`
-	Disabled    bool             `json:"disabled"`
-	Warnings    []plugin.Warning `json:"warnings,omitempty"`
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Version     string            `json:"version"`
+	Description string            `json:"description,omitempty"`
+	Disabled    bool              `json:"disabled"`
+	Categories  []config.Category `json:"categories,omitempty"`
+	Warnings    []plugin.Warning  `json:"warnings,omitempty"`
 }
 
 type runRequest struct {
 	Params        map[string]interface{}                 `json:"params"`
 	Confirm       bool                                   `json:"confirm"`
 	Target        string                                 `json:"target,omitempty"`
+	OverrideNodes bool                                   `json:"override_nodes,omitempty"`
 	Targets       []string                               `json:"targets,omitempty"`
 	IncludeLocal  bool                                   `json:"include_local,omitempty"`
 	Workflow      *config.WorkflowConfig                 `json:"workflow,omitempty"`
@@ -950,7 +965,9 @@ func NewHandler(reg *registry.Registry) http.Handler {
 	mux.HandleFunc("/api/nexus/download", nexusDownloadHandler(state))
 	mux.HandleFunc("/api/nexus/upload", nexusUploadHandler(state))
 	mux.HandleFunc("/api/nexus/rebuild", nexusRebuildHandler(state))
+	mux.HandleFunc("/api/nexus/share/targets", nexusShareTargetsHandler(state))
 	mux.HandleFunc("/api/plugins/upload", pluginUploadHandler(state))
+	mux.HandleFunc("/api/plugins/rescan", pluginRescanHandler(state))
 	mux.HandleFunc("/api/plugins/", pluginDownloadHandler(state))
 	mux.HandleFunc("/api/tools/", toolsHandler(state))
 	mux.HandleFunc("/api/workflows/", workflowsHandler(state))
@@ -1428,6 +1445,11 @@ func handleWorkflowRun(w http.ResponseWriter, req *http.Request, state *serverSt
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 		return
 	}
+	workflowConfig, err = applyWorkflowRunTarget(state, workflowConfig, reqBody.Target, reqBody.OverrideNodes)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
+	}
 	if err := validateWorkflowTargets(state, workflowConfig); err != nil {
 		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 		return
@@ -1488,6 +1510,58 @@ func watchRunCompletion(state *serverState, reg *registry.Registry, runID string
 func isAsyncRunRequest(req *http.Request) bool {
 	value := strings.ToLower(strings.TrimSpace(req.URL.Query().Get("async")))
 	return value == "1" || value == "true" || value == "yes"
+}
+
+// workflowRunTargetFollowNodes 表示运行时不指定统一目标，沿用各节点自己的 host 配置。
+const workflowRunTargetFollowNodes = "follow_nodes"
+
+// applyWorkflowRunTarget 把“执行这一步选中的机器”应用到一个工作流副本上。
+// target 为空 / follow_nodes 时不做任何改动；override 为真时覆盖节点已有 host。
+func applyWorkflowRunTarget(state *serverState, wf *config.WorkflowConfig, rawTarget string, override bool) (*config.WorkflowConfig, error) {
+	if wf == nil {
+		return nil, nil
+	}
+	target := strings.TrimSpace(rawTarget)
+	if target == "" || target == workflowRunTargetFollowNodes {
+		return wf, nil
+	}
+	if target == "local" || target == runner.LocalTargetID {
+		// 本机在节点层面就是“host 留空”，与节点配置里的“本机执行”保持一致。
+		target = ""
+	}
+	if target != "" {
+		if err := validateRemoteTarget(state, target); err != nil {
+			return nil, fmt.Errorf("工作流运行目标无效: %w", err)
+		}
+	}
+	clone := cloneWorkflowConfig(wf)
+	if clone == nil {
+		return wf, nil
+	}
+	for i := range clone.Nodes {
+		node := &clone.Nodes[i]
+		if node.Host != "" && !override {
+			continue
+		}
+		node.Host = target
+	}
+	return clone, nil
+}
+
+func cloneWorkflowConfig(wf *config.WorkflowConfig) *config.WorkflowConfig {
+	if wf == nil {
+		return nil
+	}
+	data, err := json.Marshal(wf)
+	if err != nil {
+		return nil
+	}
+	var out config.WorkflowConfig
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil
+	}
+	out.Steps = nil
+	return &out
 }
 
 func validateWorkflowTargets(state *serverState, wf *config.WorkflowConfig) error {
@@ -1594,6 +1668,10 @@ func handleWorkflowSave(w http.ResponseWriter, req *http.Request, reg *registry.
 			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 			return
 		}
+	}
+	if err := normalizeWorkflowSharedWith(reg, wf, ownerPluginID); err != nil {
+		writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+		return
 	}
 	path, source, err := saveWorkflowAsset(reg, wf, ownerPluginID)
 	if err != nil {
@@ -2293,6 +2371,11 @@ func pluginDownloadHandler(state *serverState) http.HandlerFunc {
 			handlePluginEnable(w, req, state, pluginID)
 			return
 		}
+		// 分享插件到远程插件市场（Nexus）
+		if pluginID, ok := strings.CutSuffix(name, "/share"); ok {
+			handlePluginShare(w, req, state, pluginID)
+			return
+		}
 		// 版本管理路由已移除，业务配置已废弃
 		if req.Method == http.MethodDelete {
 			handlePluginDelete(w, req, state, strings.Trim(name, "/"))
@@ -2726,7 +2809,7 @@ func buildCatalog(reg *registry.Registry) catalogResponse {
 	}
 	resolver := newWorkflowDependencyResolver(reg)
 	for _, wf := range reg.Workflows {
-		entry := workflowCatalogEntry{WorkflowRef: wf.Entry, Tags: wf.Config.Tags, Parameters: wf.Config.Parameters, ConfigFiles: workflowConfigFilesForCatalog(reg, wf.Config), Confirm: effectiveWorkflowConfirm(reg, wf.Config), Source: wf.Source}
+		entry := workflowCatalogEntry{WorkflowRef: wf.Entry, Tags: wf.Config.Tags, SharedWith: wf.Config.SharedWith, Parameters: wf.Config.Parameters, ConfigFiles: workflowConfigFilesForCatalog(reg, wf.Config), ReferencedPlugins: workflowReferencedPlugins(reg, wf.Config), Confirm: effectiveWorkflowConfirm(reg, wf.Config), Source: wf.Source}
 		if wf.Source.PluginID == userWorkflowPluginID {
 			entry.Dependencies, entry.MissingTools = workflowPluginDependencies(reg, resolver, wf.Config)
 		}
@@ -2844,6 +2927,35 @@ func saveWorkflow(path string, wf *config.WorkflowConfig) error {
 		return err
 	}
 	return os.WriteFile(path, buf.Bytes(), 0o644)
+}
+
+// normalizeWorkflowSharedWith 校验共享插件列表：剔除归属插件与全局工作流自身，并要求目标插件已启用。
+func normalizeWorkflowSharedWith(reg *registry.Registry, wf *config.WorkflowConfig, ownerPluginID *string) error {
+	ownerID := ""
+	if ownerPluginID != nil {
+		ownerID = strings.TrimSpace(*ownerPluginID)
+		if ownerID == "" {
+			ownerID = userWorkflowPluginID
+		}
+	} else if existing := reg.Workflows[wf.ID]; existing != nil {
+		ownerID = existing.Source.PluginID
+	}
+	kept := make([]string, 0, len(wf.SharedWith))
+	for _, pluginID := range wf.SharedWith {
+		if pluginID == ownerID || pluginID == userWorkflowPluginID {
+			continue
+		}
+		if _, ok := installedPlugin(reg, pluginID); !ok {
+			return fmt.Errorf("共享插件 %s 未安装或未启用", pluginID)
+		}
+		kept = append(kept, pluginID)
+	}
+	if len(kept) == 0 {
+		wf.SharedWith = nil
+		return nil
+	}
+	wf.SharedWith = kept
+	return nil
 }
 
 func saveWorkflowAsset(reg *registry.Registry, wf *config.WorkflowConfig, ownerPluginID *string) (string, registry.Source, error) {
@@ -3841,6 +3953,71 @@ func declaredPluginConfigFile(reg *registry.Registry, pluginID, fileID string) (
 		}
 	}
 	return config.ConfigFileRef{}, nil, fmt.Errorf("配置文件 %s 未在插件 %s 中声明", fileID, pluginID)
+}
+
+func workflowReferencedPlugins(reg *registry.Registry, wf *config.WorkflowConfig) []workflowReferencedPlugin {
+	if reg == nil || wf == nil {
+		return nil
+	}
+	toolIDs := make([]string, 0, len(wf.Nodes))
+	seenTools := make(map[string]bool, len(wf.Nodes))
+	for _, node := range wf.Nodes {
+		for _, raw := range []string{node.Tool, node.Loop.Tool} {
+			id := strings.TrimSpace(raw)
+			if id == "" || seenTools[id] {
+				continue
+			}
+			seenTools[id] = true
+			toolIDs = append(toolIDs, id)
+		}
+	}
+	if len(toolIDs) == 0 {
+		return nil
+	}
+	packages := make(map[string]plugin.Package)
+	for _, pkg := range installedAnyPluginPackages(reg) {
+		packages[pkg.Manifest.ID] = pkg
+	}
+	byPlugin := make(map[string]*workflowReferencedPlugin)
+	order := make([]string, 0, len(toolIDs))
+	for _, toolID := range toolIDs {
+		tool, err := reg.Tool(toolID)
+		if err != nil || tool == nil {
+			continue
+		}
+		pluginID := strings.TrimSpace(tool.Source.PluginID)
+		if pluginID == "" || pluginID == userWorkflowPluginID {
+			continue
+		}
+		entry, ok := byPlugin[pluginID]
+		if !ok {
+			entry = &workflowReferencedPlugin{ID: pluginID}
+			if pkg, found := packages[pluginID]; found {
+				entry.Name = pkg.Manifest.Name
+				entry.Version = pkg.Manifest.Version
+				entry.Disabled = pluginDisabled(reg.Root.Plugins.Disabled, pkg)
+			}
+			byPlugin[pluginID] = entry
+			order = append(order, pluginID)
+		}
+		entry.Tools = append(entry.Tools, toolID)
+		seenFiles := make(map[string]bool, len(entry.ConfigFiles))
+		for _, file := range entry.ConfigFiles {
+			seenFiles[file.ID] = true
+		}
+		for _, file := range declaredConfigFiles(tool.Config) {
+			if file.ID == "" || seenFiles[file.ID] {
+				continue
+			}
+			seenFiles[file.ID] = true
+			entry.ConfigFiles = append(entry.ConfigFiles, file)
+		}
+	}
+	out := make([]workflowReferencedPlugin, 0, len(order))
+	for _, pluginID := range order {
+		out = append(out, *byPlugin[pluginID])
+	}
+	return out
 }
 
 func declaredConfigFiles(toolCfg *config.ToolConfig) []config.ConfigFileRef {

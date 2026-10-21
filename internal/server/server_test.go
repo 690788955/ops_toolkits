@@ -955,6 +955,69 @@ func readZipEntries(t *testing.T, data []byte) map[string][]byte {
 	return entries
 }
 
+func TestWorkflowSaveSharedWithKeepsOwnerAndExposesCatalogVisibility(t *testing.T) {
+	baseReg := testRegistry(t)
+	installDemoToolPlugin(t, baseReg.BaseDir)
+	installTestPluginWithWorkflow(t, baseReg.BaseDir, "vendor.shared", "1.0.0")
+	reg, err := registry.Load(baseReg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	handler := NewHandler(reg)
+	save := func(sharedWith string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := `{"workflow":{"id":"demo.shared","name":"共享工作流","category":"demo","shared_with":` + sharedWith + `,"nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]},"owner_plugin_id":"demo"}`
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/workflows/demo.shared/save", strings.NewReader(body)))
+		return res
+	}
+
+	res := save(`["vendor.missing"]`)
+	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "vendor.missing") {
+		t.Fatalf("未启用插件应被拒绝: status = %d, body = %s", res.Code, res.Body.String())
+	}
+
+	res = save(`["vendor.shared","demo","user.workflows"]`)
+	if res.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", res.Code, res.Body.String())
+	}
+	workflowPath := filepath.Join(reg.BaseDir, "plugins", "demo", "workflows", "demo.shared.yaml")
+	raw, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatalf("未找到工作流文件: %v", err)
+	}
+	if !strings.Contains(string(raw), "vendor.shared") {
+		t.Fatalf("共享插件未写入工作流: %s", raw)
+	}
+	if strings.Contains(string(raw), "- demo\n") || strings.Contains(string(raw), "user.workflows") {
+		t.Fatalf("归属插件与全局工作流不应出现在共享列表: %s", raw)
+	}
+	if got := reg.Workflows["demo.shared"]; got == nil || got.Source.PluginID != "demo" {
+		t.Fatalf("共享不应改变归属: %#v", got)
+	}
+
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	var body struct {
+		Data struct {
+			Workflows []workflowCatalogEntry `json:"workflows"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(catalogRes.Body.Bytes(), &body); err != nil {
+		t.Fatalf("catalog JSON 解析失败: %v", err)
+	}
+	for _, entry := range body.Data.Workflows {
+		if entry.ID != "demo.shared" {
+			continue
+		}
+		if len(entry.SharedWith) != 1 || entry.SharedWith[0] != "vendor.shared" {
+			t.Fatalf("catalog 应下发共享插件列表: %#v", entry.SharedWith)
+		}
+		return
+	}
+	t.Fatalf("catalog 缺少工作流条目")
+}
+
 func TestWorkflowSaveAPIRejectsMismatchedID(t *testing.T) {
 	reg := testRegistry(t)
 	body := `{"workflow":{"id":"demo.other","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`
@@ -1169,6 +1232,38 @@ func TestCatalogAPIIncludesExportablePlugins(t *testing.T) {
 	if !strings.Contains(body, `"plugins"`) || !strings.Contains(body, "vendor.catalog") {
 		t.Fatalf("catalog 缺少可导出插件列表: %s", body)
 	}
+}
+
+func TestCatalogAPIPluginEntriesExposeCategories(t *testing.T) {
+	reg := testRegistry(t)
+	installTestPluginWithWorkflow(t, reg.BaseDir, "vendor.ownercat", "1.0.0")
+	reloaded, err := registry.Load(reg.BaseDir)
+	if err != nil {
+		t.Fatalf("加载测试注册表失败: %v", err)
+	}
+	res := httptest.NewRecorder()
+	NewHandler(reloaded).ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Data struct {
+			Plugins []pluginCatalogEntry `json:"plugins"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("catalog JSON 解析失败: %v", err)
+	}
+	for _, entry := range body.Data.Plugins {
+		if entry.ID != "vendor.ownercat" {
+			continue
+		}
+		if len(entry.Categories) != 1 || entry.Categories[0].ID != "upload" {
+			t.Fatalf("插件应随 catalog 下发自身声明的分类: %#v", entry.Categories)
+		}
+		return
+	}
+	t.Fatalf("catalog 缺少插件条目: %#v", body.Data.Plugins)
 }
 
 func TestPluginUploadInstallsNewPluginAndRefreshesCatalog(t *testing.T) {
@@ -2411,9 +2506,32 @@ func TestPluginUploadDuplicateWithoutReplaceReturnsPrompt(t *testing.T) {
 	}
 }
 
-func TestPluginUploadRejectsSameOrLowerVersionReplace(t *testing.T) {
+func TestPluginUploadReplacesSameVersionOnConfirm(t *testing.T) {
 	reg := testRegistry(t)
 	installTestPlugin(t, reg.BaseDir, "vendor.version", "1.0.0")
+	// 同版本覆盖用于修复本机插件目录被改动的情况：允许重装，不再要求必须提升版本号。
+	req := pluginUploadRequest(t, pluginZip(t, "vendor.version", "1.0.0", true), true)
+	res := httptest.NewRecorder()
+	handler := NewHandler(reg)
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want ok; body = %s", res.Code, res.Body.String())
+	}
+	if !strings.Contains(res.Body.String(), "updated") || !strings.Contains(res.Body.String(), "same_version") {
+		t.Fatalf("响应缺少同版本覆盖信息: %s", res.Body.String())
+	}
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if !strings.Contains(catalogRes.Body.String(), "vendor.version.newtool") {
+		t.Fatalf("catalog 未刷新为覆盖后的插件内容: %s", catalogRes.Body.String())
+	}
+}
+
+func TestPluginUploadRejectsLowerVersionReplace(t *testing.T) {
+	reg := testRegistry(t)
+	installTestPlugin(t, reg.BaseDir, "vendor.version", "1.1.0")
 	req := pluginUploadRequest(t, pluginZip(t, "vendor.version", "1.0.0", false), true)
 	res := httptest.NewRecorder()
 
@@ -2422,8 +2540,52 @@ func TestPluginUploadRejectsSameOrLowerVersionReplace(t *testing.T) {
 	if res.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want bad request; body = %s", res.Code, res.Body.String())
 	}
-	if !strings.Contains(res.Body.String(), "不高于") {
+	if !strings.Contains(res.Body.String(), "低于已安装版本") {
 		t.Fatalf("响应缺少版本拒绝提示: %s", res.Body.String())
+	}
+}
+
+func TestPluginUploadDetectsExternallyAddedPluginAndRefreshesCatalog(t *testing.T) {
+	reg := testRegistry(t)
+	// 插件目录在服务启动后才出现（手工拷贝），内存注册表里没有它。
+	installTestPlugin(t, reg.BaseDir, "vendor.external", "1.0.0")
+	req := pluginUploadRequest(t, pluginZip(t, "vendor.external", "1.0.0", false), true)
+	res := httptest.NewRecorder()
+	handler := NewHandler(reg)
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want ok; body = %s", res.Code, res.Body.String())
+	}
+	catalogRes := httptest.NewRecorder()
+	handler.ServeHTTP(catalogRes, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if !strings.Contains(catalogRes.Body.String(), "vendor.external.tool") {
+		t.Fatalf("外部新增插件覆盖后 catalog 仍未包含该插件: %s", catalogRes.Body.String())
+	}
+}
+
+func TestPluginRescanPicksUpExternallyAddedPlugin(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	installTestPlugin(t, reg.BaseDir, "vendor.scan", "1.0.0")
+
+	before := httptest.NewRecorder()
+	handler.ServeHTTP(before, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if strings.Contains(before.Body.String(), "vendor.scan.tool") {
+		t.Fatalf("未重扫前不应包含外部新增插件: %s", before.Body.String())
+	}
+
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/api/plugins/rescan", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want ok; body = %s", res.Code, res.Body.String())
+	}
+
+	after := httptest.NewRecorder()
+	handler.ServeHTTP(after, httptest.NewRequest(http.MethodGet, "/api/catalog", nil))
+	if !strings.Contains(after.Body.String(), "vendor.scan.tool") {
+		t.Fatalf("重扫后 catalog 应包含外部新增插件: %s", after.Body.String())
 	}
 }
 

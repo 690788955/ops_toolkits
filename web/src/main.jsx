@@ -1,15 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import '@xyflow/react/dist/style.css'
 import './styles.css'
 import * as yaml from 'js-yaml'
-import {deleteJSON, downloadUserWorkflowExport, fetchJSON, fetchMarket, fetchMarketSources, fetchRunDetail, fetchRunSummary, postJSON, postMarketInstall, postPluginZip, putJSON} from './api.js'
+import {deleteJSON, downloadUserWorkflowExport, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusShareTargets, fetchRunDetail, fetchRunSummary, postJSON, postMarketInstall, postPluginZip, putJSON, rescanPlugins} from './api.js'
 import {buildTextDiff, countTextMatches, replaceTextDraft} from './configDiff.js'
 import {buildConfigItemCollections} from './configItems.js'
 import {filterEntries, readableAPIError, summarizeAPIResponse, tagsForEntries} from './utils.js'
 import FileUploadInput from './FileUploadInput.jsx'
 import {normalizeLogFontSize} from './logUtils.js'
 import SshHostsModal, {sshHostStatusLabel, summarizeSshHosts} from './SshHostsModal.jsx'
+import PluginShareModal from './PluginShareModal.jsx'
 import {MarketSourcesModal} from './MarketSourcesPanel.jsx'
 
 const WorkflowEditor = React.lazy(() => import('./workflow/WorkflowEditor.jsx'))
@@ -413,6 +415,9 @@ function App() {
             await refreshCatalog({keepCategory: true})
             setResult({message: JSON.stringify(body, null, 2)})
           }}
+          onRefresh={async () => {
+            await refreshCatalog({keepCategory: true})
+          }}
           onChanged={async body => {
             await refreshCatalog({keepCategory: true})
             setResult({message: summarizeAPIResponse(body, '插件状态已更新。'), response: body})
@@ -707,6 +712,10 @@ function ConfigPanel({catalog, activeCategory, configSelectedPlugin, setConfigSe
       <WorkflowConfigPanel
         workflow={configSelectedWorkflow}
         onBack={() => setConfigSelectedWorkflow(null)}
+        onOpenPluginConfig={plugin => {
+          setConfigSelectedWorkflow(null)
+          setConfigSelectedPlugin(plugin)
+        }}
         onSaved={async () => {
           await refreshCatalog()
         }}
@@ -762,6 +771,11 @@ function ConfigItemsList({items, onSelect, emptyText = '当前没有可配置项
                 </small>
               ))}
             </div>
+            {item.referencedPlugins?.length > 0 && (
+              <small className="configReferencedPlugins">
+                引用插件配置：{item.referencedPlugins.map(plugin => plugin.name || plugin.id).join('、')}
+              </small>
+            )}
             {item.disabled && <small>状态：插件已禁用</small>}
           </div>
         </button>
@@ -809,6 +823,30 @@ function FolderIcon() {
   )
 }
 
+function CaretDownIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M4 6.3 8 10.1 12 6.3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function CaretRightIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M6.3 4 10.1 8 6.3 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function ChevronLeftIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M10.1 4 6.3 8 10.1 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 function GearIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -817,11 +855,14 @@ function GearIcon() {
   )
 }
 
-function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onChanged}) {
+export function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onChanged, onRefresh}) {
   const [tab, setTab] = useState('installed')
   const [uploadOpen, setUploadOpen] = useState(false)
   const [pluginActionID, setPluginActionID] = useState('')
-  const [target, setTarget] = useState('windows/amd64')
+  const [rescanning, setRescanning] = useState(false)
+  const [rescanMessage, setRescanMessage] = useState('')
+  const [rescanStatus, setRescanStatus] = useState('')
+  const [downloadPlatform, setDownloadPlatform] = useState('windows/amd64')
   const [market, setMarket] = useState(null)
   const [marketLoading, setMarketLoading] = useState(false)
   const [marketError, setMarketError] = useState('')
@@ -829,10 +870,27 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
   const [marketSourceID, setMarketSourceID] = useState('')
   const [sourceManagerOpen, setSourceManagerOpen] = useState(false)
   const [installedView, setInstalledView] = useState('list')
+  const [installedSearch, setInstalledSearch] = useState('')
+  const [downloadMenu, setDownloadMenu] = useState(null)
   const [marketView, setMarketView] = useState('list')
   const [installingKey, setInstallingKey] = useState('')
   const [exportOpen, setExportOpen] = useState(false)
+  const [shareTargets, setShareTargets] = useState([])
+  const [shareTargetsLoading, setShareTargetsLoading] = useState(true)
+  const [shareTargetsMessage, setShareTargetsMessage] = useState('')
+  const [sharePlugin, setSharePlugin] = useState(null)
   const plugins = useMemo(() => [...(catalog?.plugins || [])].sort((left, right) => String(left.id || '').localeCompare(String(right.id || ''), 'zh-CN')), [catalog])
+  const filteredPlugins = useMemo(() => {
+    const keyword = installedSearch.trim().toLowerCase()
+    if (!keyword) return plugins
+    return plugins.filter(item => [
+      item.id,
+      item.name,
+      item.description,
+      item.version,
+      item.disabled ? '已禁用 disabled' : '启用中 enabled'
+    ].filter(Boolean).join(' ').toLowerCase().includes(keyword))
+  }, [plugins, installedSearch])
   const userWorkflows = useMemo(() => {
     return [...(catalog?.workflows || [])]
       .filter(item => item.source?.plugin_id === 'user.workflows')
@@ -840,6 +898,33 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
   }, [catalog])
   const workflowCountForPlugin = pluginID => (catalog?.workflows || []).filter(item => item.source?.plugin_id === pluginID).length
   const marketSources = market?.sources || []
+  const shareReady = shareTargets.length > 0
+  const shareHint = shareTargetsMessage || '未配置远程插件市场（Nexus），分享功能不可用。可在「插件市场 → 来源配置」中新增 Nexus 来源。'
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadShareTargets() {
+      setShareTargetsLoading(true)
+      try {
+        const body = await fetchNexusShareTargets()
+        if (cancelled) return
+        const data = body.data || {}
+        setShareTargets(Array.isArray(data.targets) ? data.targets : [])
+        setShareTargetsMessage(data.message || '')
+      } catch (err) {
+        if (!cancelled) {
+          setShareTargets([])
+          setShareTargetsMessage(readableAPIError(err, '读取远程插件市场配置失败，分享功能暂不可用。'))
+        }
+      } finally {
+        if (!cancelled) setShareTargetsLoading(false)
+      }
+    }
+    loadShareTargets()
+    return () => {
+      cancelled = true
+    }
+  }, [])
   useEffect(() => {
     if (marketSourceID && !marketSources.some(source => source.id === marketSourceID)) {
       setMarketSourceID('')
@@ -878,7 +963,65 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
     const label = installing ? '处理中...' : status === 'update_available' ? '更新' : status === 'installed' ? '已安装' : status === 'local_newer' ? '本地较新' : status === 'disabled' ? '已禁用' : '安装'
     return {...item, status, key, installing, disabled, label}
   }), [filteredMarketItems, installingKey])
-  const [goos, goarch] = target.split('/')
+  const DOWNLOAD_MENU_HEIGHT = {type: 148, platform: 272}
+  const downloadMenuTop = (anchorTop, anchorBottom, height) => {
+    if (anchorBottom + height + 8 <= window.innerHeight) return anchorBottom + 8
+    if (anchorTop - height - 8 >= 8) return anchorTop - height - 8
+    return Math.max(8, window.innerHeight - height - 8)
+  }
+
+  function toggleDownloadMenu(item, event) {
+    if (downloadMenu?.pluginID === item.id) {
+      setDownloadMenu(null)
+      return
+    }
+    const rect = event.currentTarget.getBoundingClientRect()
+    const width = 248
+    const anchorTop = rect.top
+    const anchorBottom = rect.bottom
+    setDownloadMenu({
+      pluginID: item.id,
+      item,
+      stage: 'type',
+      width,
+      anchorTop,
+      anchorBottom,
+      left: Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)),
+      top: downloadMenuTop(anchorTop, anchorBottom, DOWNLOAD_MENU_HEIGHT.type)
+    })
+  }
+
+  function switchDownloadStage(stage) {
+    setDownloadMenu(previous => previous ? {
+      ...previous,
+      stage,
+      top: downloadMenuTop(previous.anchorTop, previous.anchorBottom, DOWNLOAD_MENU_HEIGHT[stage])
+    } : previous)
+  }
+
+  useEffect(() => {
+    if (!downloadMenu) return
+    function handlePointerDown(event) {
+      if (!(event.target instanceof Element)) return
+      if (event.target.closest('.pluginDownloadPopover')) return
+      if (event.target.closest('[data-download-toggle]')) return
+      setDownloadMenu(null)
+    }
+    function handleKey(event) {
+      if (event.key === 'Escape') setDownloadMenu(null)
+    }
+    const close = () => setDownloadMenu(null)
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleKey)
+    window.addEventListener('resize', close)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleKey)
+      window.removeEventListener('resize', close)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [downloadMenu])
   const targets = [
     ['windows/amd64', 'Windows amd64'],
     ['windows/arm64', 'Windows arm64'],
@@ -905,6 +1048,35 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
   useEffect(() => {
     if (tab === 'market' && !market && !marketLoading) loadMarket(false)
   }, [tab])
+
+  // 打开插件管理时先按磁盘重建注册表：插件目录被外部新增或替换后，
+  // 服务内存里的注册表会滞后，直接读列表会出现“插件明明在磁盘上却看不到”“版本号还是旧的”。
+  useEffect(() => {
+    rescan(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  async function rescan(silent = false) {
+    setRescanning(true)
+    setRescanStatus('')
+    if (!silent) setRescanMessage('正在同步插件目录...')
+    try {
+      const body = await rescanPlugins()
+      const data = body.data || {}
+      if (onRefresh) await onRefresh()
+      if (silent) {
+        setRescanMessage('')
+      } else {
+        setRescanMessage(`插件目录已同步：插件 ${data.plugins ?? 0} 个，工具 ${data.tools ?? 0} 个。`)
+        setRescanStatus('success')
+      }
+    } catch (err) {
+      setRescanMessage(readableAPIError(err, '刷新插件目录失败。'))
+      setRescanStatus('error')
+    } finally {
+      setRescanning(false)
+    }
+  }
 
   async function installMarketPlugin(item) {
     const replace = item.install_status === 'update_available'
@@ -972,13 +1144,33 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
   }
 
   function installedPluginActions(item) {
+    const shareDisabled = !shareReady || pluginActionID === item.id
     return (
       <div className="pluginItemActions">
         {!item.disabled && (
-          <div className="pluginExportLinks">
-            <a className="secondary" href={`/api/plugins/${encodeURIComponent(item.id)}.zip`} title="插件 ZIP 会自动包含归属于该插件的工作流">插件 ZIP</a>
-            <a className="secondary" href={`${runtimeBase(item)}.zip?goos=${encodeURIComponent(goos)}&goarch=${encodeURIComponent(goarch)}`}>运行包 ZIP</a>
-          </div>
+          <button
+            className="secondary pluginDownloadToggle"
+            type="button"
+            data-download-toggle
+            aria-haspopup="menu"
+            aria-expanded={downloadMenu?.pluginID === item.id}
+            title="选择下载插件 ZIP 或完整运行包 ZIP"
+            onClick={event => toggleDownloadMenu(item, event)}
+          >
+            下载
+            <CaretDownIcon />
+          </button>
+        )}
+        {!item.disabled && (
+          <button
+            className="secondary"
+            type="button"
+            disabled={shareDisabled}
+            title={shareReady ? '打包插件并上传到远程插件市场（Nexus）' : shareHint}
+            onClick={() => setSharePlugin(item)}
+          >
+            分享
+          </button>
         )}
         {item.disabled ? (
           <>
@@ -1046,6 +1238,7 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
   }
 
   return (
+    <>
     <div className="modalBackdrop" onClick={onClose}>
       <div className="modal pluginManagerModal" onClick={event => event.stopPropagation()}>
         <div className="modalHeader">
@@ -1066,12 +1259,16 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
             <button type="button" className="secondary" onClick={() => setExportOpen(true)}>导出用户工作流</button>
           </section>
           <section className="pluginInstalledListSection">
+            {rescanMessage && <div className={`pluginOperationMessage${rescanStatus ? ` ${rescanStatus}` : ''}`}>{rescanMessage}</div>}
             <div className="pluginInstalledHeader">
               <div>
                 <strong>已安装插件</strong>
-                <span>{plugins.length} 个插件，删除前需要先禁用。</span>
+                <span>{installedSearch.trim() ? `匹配 ${filteredPlugins.length} / ${plugins.length} 个插件，删除前需要先禁用。` : `${plugins.length} 个插件，删除前需要先禁用。`}</span>
               </div>
-              <div className="pluginInstalledHeaderActions">
+            </div>
+            <div className="pluginInstalledToolbar">
+              <input value={installedSearch} onChange={event => setInstalledSearch(event.target.value)} placeholder="搜索插件名称、ID、描述..." aria-label="搜索已安装插件" />
+              <div className="pluginInstalledToolbarActions">
                 <div className="viewSwitch" role="group" aria-label="已安装插件视图">
                   <button type="button" aria-pressed={installedView === 'list'} className={installedView === 'list' ? 'active' : ''} onClick={() => setInstalledView('list')}>
                     <ListViewIcon />
@@ -1082,23 +1279,21 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
                     <span>表格</span>
                   </button>
                 </div>
-                <label className="runtimeTargetSelect compact">
-                  <span>运行包平台</span>
-                  <select value={target} onChange={event => setTarget(event.target.value)}>
-                    {targets.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                  </select>
-                </label>
+                <button className="secondary" type="button" disabled={rescanning} title="刷新插件目录，同步磁盘上外部新增或替换的插件" onClick={() => rescan(false)}>{rescanning ? '刷新中...' : '刷新'}</button>
               </div>
             </div>
+            {!shareTargetsLoading && !shareReady && (
+              <small className="marketHint pluginShareHint">{shareHint}</small>
+            )}
             {installedView === 'list' ? (
               <div className="pluginExportList">
-                {plugins.map(installedPluginCard)}
-                {plugins.length === 0 && <div className="empty small">当前没有已安装插件。</div>}
+                {filteredPlugins.map(installedPluginCard)}
+                {filteredPlugins.length === 0 && <div className="empty small">{plugins.length === 0 ? '当前没有已安装插件。' : '没有匹配的插件。'}</div>}
               </div>
             ) : (
               <div className="pluginGrid">
-                {plugins.map(installedPluginCard)}
-                {plugins.length === 0 && <div className="empty small">当前没有已安装插件。</div>}
+                {filteredPlugins.map(installedPluginCard)}
+                {filteredPlugins.length === 0 && <div className="empty small">{plugins.length === 0 ? '当前没有已安装插件。' : '没有匹配的插件。'}</div>}
               </div>
             )}
           </section>
@@ -1173,6 +1368,7 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
           <PluginUploadModal
             onClose={() => setUploadOpen(false)}
             onUploaded={onUploaded}
+            onRefresh={onRefresh}
           />
         )}
         {exportOpen && (
@@ -1182,26 +1378,105 @@ function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onCh
             onClose={() => setExportOpen(false)}
           />
         )}
+        {sharePlugin && (
+          <PluginShareModal
+            plugin={sharePlugin}
+            targets={shareTargets}
+            onClose={() => setSharePlugin(null)}
+            onShared={() => setMarket(null)}
+          />
+        )}
         {(state.response || state.message) && (
           <pre className="modalResult">{state.response ? JSON.stringify(state.response, null, 2) : state.message}</pre>
         )}
       </div>
     </div>
+    {downloadMenu && createPortal(
+      <div
+        className="pluginDownloadPopover"
+        role="menu"
+        aria-label="下载类型"
+        style={{top: downloadMenu.top, left: downloadMenu.left, width: downloadMenu.width}}
+      >
+        {downloadMenu.stage === 'platform' ? (
+          <>
+            <button
+              className="pluginDownloadBack"
+              type="button"
+              onClick={() => switchDownloadStage('type')}
+            >
+              <ChevronLeftIcon />
+              选择运行包平台
+            </button>
+            {targets.map(([value, label]) => {
+              const [goosValue, goarchValue] = value.split('/')
+              const active = value === downloadPlatform
+              return (
+                <a
+                  key={value}
+                  role="menuitem"
+                  className={active ? 'pluginDownloadPlatform active' : 'pluginDownloadPlatform'}
+                  href={`${runtimeBase(downloadMenu.item)}.zip?goos=${encodeURIComponent(goosValue)}&goarch=${encodeURIComponent(goarchValue)}`}
+                  title={`下载 ${label} 完整运行包，解压即可执行`}
+                  onClick={() => {
+                    setDownloadPlatform(value)
+                    setDownloadMenu(null)
+                  }}
+                >
+                  <span>{label}</span>
+                  {active && <small>上次下载</small>}
+                </a>
+              )
+            })}
+          </>
+        ) : (
+          <>
+            <a
+              role="menuitem"
+              href={`/api/plugins/${encodeURIComponent(downloadMenu.item.id)}.zip`}
+              title="插件 ZIP 会自动包含归属于该插件的工作流"
+              onClick={() => setDownloadMenu(null)}
+            >
+              <span>插件 ZIP</span>
+              <small>插件配置与归属工作流，用于分享或装到其他环境</small>
+            </a>
+            <button
+              className="pluginDownloadNext"
+              role="menuitem"
+              type="button"
+              onClick={() => switchDownloadStage('platform')}
+            >
+              <span className="pluginDownloadNextText">
+                <span>运行包 ZIP</span>
+                <small>选择运行包平台后下载</small>
+              </span>
+              <CaretRightIcon />
+            </button>
+          </>
+        )}
+      </div>,
+      document.body
+    )}
+    </>
   )
 }
 
-function PluginUploadModal({onClose, onUploaded}) {
+function PluginUploadModal({onClose, onUploaded, onRefresh}) {
   const [file, setFile] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [message, setMessage] = useState('')
   const [messageError, setMessageError] = useState(false)
-  const [duplicate, setDuplicate] = useState(null)
+  const [confirmDetail, setConfirmDetail] = useState(null)
 
-  function selectFile(nextFile) {
+  function selectFile(event) {
+    const nextFile = event.target.files?.[0] || null
+    // 清空 input 的 value：重新打包同名 ZIP 后再选同一个文件名时，浏览器不会触发 change，
+    // 状态会一直停留在旧文件上，导致上传的仍是上一次的内容（版本号永远不变）。
+    event.target.value = ''
     setFile(nextFile)
-    setDuplicate(null)
+    setConfirmDetail(null)
     setMessageError(false)
-    setMessage(nextFile ? `已选择 ${nextFile.name}，点击上传开始安装。` : '')
+    setMessage(nextFile ? `已选择 ${nextFile.name}（${formatBytes(nextFile.size)}，修改时间 ${new Date(nextFile.lastModified).toLocaleString()}），点击上传开始安装。` : '')
   }
 
   async function upload(replace = false) {
@@ -1216,13 +1491,16 @@ function PluginUploadModal({onClose, onUploaded}) {
     try {
       const body = await postPluginZip(file, replace)
       setMessage(`插件${body.status === 'updated' ? '更新' : '安装'}成功。`)
-      setDuplicate(null)
+      setConfirmDetail(null)
+      setFile(null)
       await onUploaded(body)
     } catch (err) {
       const detail = err.body?.data
       if (err.status === 409 && detail?.existing) {
-        setMessage(`插件已存在，是否覆盖更新？当前版本：${detail.existing_version || '-'}，上传版本：${detail.version || '-'}`)
-        setDuplicate(detail)
+        setConfirmDetail(detail)
+        setMessage('插件已存在，需确认覆盖后才会写入。')
+        // 同步一次插件目录：插件可能是外部新增/替换的，当前列表尚未包含它。
+        if (onRefresh) Promise.resolve(onRefresh()).catch(() => {})
       } else {
         setMessage(readableAPIError(err, '安装插件失败。'))
         setMessageError(true)
@@ -1245,19 +1523,54 @@ function PluginUploadModal({onClose, onUploaded}) {
         <div className="pluginUploadForm">
           <label>
             <span>插件 ZIP 包</span>
-            <input type="file" accept=".zip,application/zip" onChange={event => selectFile(event.target.files?.[0] || null)} />
+            <input type="file" accept=".zip,application/zip" onChange={selectFile} />
           </label>
           {message && <div className={messageError ? 'pluginOperationMessage error' : 'pluginOperationMessage'}>{message}</div>}
           <div className="buttonRow">
             <button className="primary" type="button" disabled={!file || uploading} onClick={() => upload(false)}>{uploading ? '正在处理...' : '上传'}</button>
-            {duplicate && <button className="secondary" type="button" disabled={uploading} onClick={() => upload(true)}>确认更新</button>}
             <a className="secondary downloadTemplate" href="/api/dev/toolkit.zip">下载插件模板</a>
             <button className="secondary" type="button" onClick={onClose}>关闭</button>
           </div>
         </div>
       </div>
+      {confirmDetail && (
+        <div className="modalBackdrop modalBackdropNested" onMouseDown={event => { if (event.target === event.currentTarget) setConfirmDetail(null) }}>
+          <div className="modal pluginOperationModal pluginConfirmModal" role="dialog" aria-modal="true" aria-labelledby="plugin-confirm-title">
+            <div className="modalHeader">
+              <div>
+                <h3 id="plugin-confirm-title">覆盖已安装插件</h3>
+                <p>{confirmDetail.plugin_id || '该插件'} 已安装在本机，继续将用本次上传的 ZIP 包整体替换现有插件目录。</p>
+              </div>
+              <button className="modalClose" type="button" onClick={() => setConfirmDetail(null)} aria-label="关闭">×</button>
+            </div>
+            <div className="pluginVersionCompare">
+              <div>
+                <span>已安装版本</span>
+                <strong>{confirmDetail.existing_version || '-'}</strong>
+              </div>
+              <div>
+                <span>本次上传版本</span>
+                <strong>{confirmDetail.version || '-'}</strong>
+              </div>
+            </div>
+            <p className="pluginConfirmHint">{uploadVersionHint(confirmDetail)}</p>
+            <div className="modalFooter">
+              <button className="secondary" type="button" disabled={uploading} onClick={() => setConfirmDetail(null)}>取消</button>
+              <button className="primary" type="button" disabled={uploading} onClick={() => upload(true)}>{uploading ? '正在覆盖...' : '确认覆盖'}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
+}
+
+function uploadVersionHint(detail) {
+  if (!detail) return ''
+  if (detail.same_version) {
+    return `版本号未变化（${detail.version || '-'}），将以本次上传内容覆盖现有插件；请确认 ZIP 是重新打包后的最新文件。`
+  }
+  return `将把已安装的 ${detail.existing_version || '-'} 覆盖为 ${detail.version || '-'}，现有插件目录会被整体替换。`
 }
 
 function WorkflowExportModal({workflows, categories = [], onClose}) {
@@ -1471,6 +1784,16 @@ function GlobalEnvModal({onClose, onSaved}) {
   )
 }
 
+const SETTINGS_SECTIONS = [
+  {id: 'app', label: '应用信息', hint: '名称、描述与版本'},
+  {id: 'server', label: '服务与端口', hint: '监听地址与端口'},
+  {id: 'plugins', label: '插件与命令', hint: '目录、严格模式、命令白名单'},
+  {id: 'market', label: '插件市场', hint: '来源、账号与接入状态'},
+  {id: 'paths', label: '路径与清理', hint: '运行目录、日志与旧记录'},
+  {id: 'ui', label: '界面', hint: '日志终端显示'},
+  {id: 'host', label: '宿主配置白名单', hint: '允许读取的宿主目录'}
+]
+
 function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
   const [content, setContent] = useState('')
   const [path, setPath] = useState('')
@@ -1478,6 +1801,8 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('正在加载配置...')
   const [editMode, setEditMode] = useState('form') // 'form' | 'yaml'
+  const [activeSection, setActiveSection] = useState('app')
+  const [dirty, setDirty] = useState(false)
   const [cleanupKeep, setCleanupKeep] = useState(20)
   const [cleanupRunning, setCleanupRunning] = useState(false)
   const [cleanupMessage, setCleanupMessage] = useState('点击“预览清理”查看会被清理的旧运行记录。')
@@ -1536,6 +1861,7 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
         }
 
         setMessage('配置已加载')
+        setDirty(false)
       } catch (err) {
         if (!cancelled) setMessage(readableAPIError(err, '加载配置失败'))
       } finally {
@@ -1564,6 +1890,7 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
   }
 
   function updateFormField(field, value) {
+    setDirty(true)
     setFormData(prev => ({...prev, [field]: value}))
   }
 
@@ -1658,6 +1985,7 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
       }
       const body = await putJSON('/api/config/global', {content: yamlToSave})
       setMessage('设置已保存')
+      setDirty(false)
       await onSaved(body)
     } catch (err) {
       setMessage(readableAPIError(err, '保存失败'))
@@ -1688,176 +2016,272 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
     }
   }
 
-  return (
-    <div className={modalMode ? 'platformSettingsPanel' : 'grid'}>
-      <section className={modalMode ? 'platformSettingsContent' : 'card pluginConfigCard'}>
-        {!modalMode && (
+  const dirtyNotice = dirty && !saving && !loading
+  const statusText = loading ? '正在加载配置...' : dirtyNotice ? '有未保存的修改，保存后生效' : message
+  const statusClass = dirtyNotice
+    ? 'settingsStatus dirty'
+    : message.startsWith('设置已保存') ? 'settingsStatus success' : 'settingsStatus'
+
+  const body = (
+    <div className={editMode === 'form' ? 'settingsLayout' : 'settingsLayout settingsLayoutSolo'}>
+      {editMode === 'form' && (
+        <nav className="settingsNav" aria-label="设置分区">
+          {SETTINGS_SECTIONS.map(section => (
+            <button
+              key={section.id}
+              type="button"
+              className={activeSection === section.id ? 'settingsNavItem active' : 'settingsNavItem'}
+              aria-current={activeSection === section.id ? 'true' : undefined}
+              onClick={() => setActiveSection(section.id)}
+            >
+              <strong>{section.label}</strong>
+              <small>{section.hint}</small>
+            </button>
+          ))}
+        </nav>
+      )}
+      <div className="settingsContent" key={editMode === 'form' ? activeSection : 'yaml'}>
+        {editMode === 'form' ? renderSection() : (
+          <section className="settingsCard settingsCardYaml">
+            <div className="settingsCardHead">
+              <h4>高级编辑</h4>
+              <p>直接编辑配置文件原文，适合批量调整表单未覆盖的字段；保存后立即生效。</p>
+            </div>
+            <label className="settingsField settingsWide">
+              <span>配置内容（YAML 格式）</span>
+              <textarea className="settingsYamlEditor" value={content} disabled={loading || saving} placeholder="app:&#10;  name: 运维控制台&#10;server:&#10;  port: 8080" onChange={event => { setDirty(true); setContent(event.target.value) }} />
+            </label>
+          </section>
+        )}
+      </div>
+    </div>
+  )
+
+  const panel = (
+    <>
+      <div className="settingsMeta">
+        <span className="settingsMetaLabel">配置文件</span>
+        <code>{path || 'configs/ops.yaml'}</code>
+        <span className="settingsMetaHint">{editMode === 'form' ? '表单模式' : 'YAML 模式'}</span>
+      </div>
+      {body}
+      <div className="settingsFooter">
+        <span className={statusClass} role="status">{statusText}</span>
+        <div className="settingsFooterActions">
+          <button className="secondary" disabled={saving} onClick={onBack}>{modalMode ? '关闭' : '返回'}</button>
+          {editMode === 'form' ? (
+            <button className="secondary" disabled={loading || saving} onClick={switchToYaml}>高级编辑（YAML）</button>
+          ) : (
+            <button className="secondary" disabled={loading || saving} onClick={switchToForm}>返回表单</button>
+          )}
+          <button className="primary" disabled={loading || saving} onClick={saveConfig}>保存设置</button>
+        </div>
+      </div>
+    </>
+  )
+
+  if (!modalMode) {
+    return (
+      <div className="grid">
+        <section className="card pluginConfigCard platformSettingsPanel">
           <div className="cardHeader">
             <div>
               <h3>框架设置</h3>
-              <p>{path} - 定义应用名称、插件路径、服务器端口等框架设置</p>
+              <p>定义应用名称、插件路径、服务器端口等框架设置</p>
             </div>
           </div>
-        )}
-        <div className="pluginConfigEditor">
-          <div className="empty small">配置文件路径：{path || 'configs/ops.yaml'}</div>
+          {panel}
+        </section>
+      </div>
+    )
+  }
+  return <div className="platformSettingsPanel">{panel}</div>
 
-          {editMode === 'form' ? (
-            <div className="form">
-              <fieldset>
-                <legend>应用信息</legend>
-                <label>
-                  <span>应用名称</span>
-                  <input type="text" value={formData.appName} disabled={loading || saving} placeholder="运维控制台" onChange={e => updateFormField('appName', e.target.value)} />
-                </label>
-                <label>
-                  <span>应用描述</span>
-                  <input type="text" value={formData.appDescription} disabled={loading || saving} placeholder="运维工具执行控制台" onChange={e => updateFormField('appDescription', e.target.value)} />
-                </label>
-                <label>
-                  <span>应用版本</span>
-                  <input type="text" value={formData.appVersion} disabled={loading || saving} placeholder="0.1.0" onChange={e => updateFormField('appVersion', e.target.value)} />
-                </label>
-              </fieldset>
-
-              <fieldset>
-                <legend>服务器配置</legend>
-                <label className="checkboxLabel">
-                  <input type="checkbox" checked={formData.serverEnabled} disabled={loading || saving} onChange={e => updateFormField('serverEnabled', e.target.checked)} />
-                  <span>启用服务器</span>
-                </label>
-                <label>
-                  <span>监听地址</span>
-                  <input type="text" value={formData.serverHost} disabled={loading || saving} placeholder="127.0.0.1" onChange={e => updateFormField('serverHost', e.target.value)} />
-                </label>
-                <label>
-                  <span>监听端口</span>
-                  <input type="number" value={formData.serverPort} disabled={loading || saving} placeholder="8080" onChange={e => updateFormField('serverPort', parseInt(e.target.value) || 8080)} />
-                </label>
-              </fieldset>
-
-              <fieldset>
-                <legend>插件配置</legend>
-                <label>
-                  <span>插件目录（逗号分隔）</span>
-                  <input type="text" value={formData.pluginsPaths} disabled={loading || saving} placeholder="plugins" onChange={e => updateFormField('pluginsPaths', e.target.value)} />
-                </label>
-                <label className="checkboxLabel">
-                  <input type="checkbox" checked={formData.pluginsStrict} disabled={loading || saving} onChange={e => updateFormField('pluginsStrict', e.target.checked)} />
-                  <span>严格模式（插件加载失败时中断启动）</span>
-                </label>
-                <label>
-                  <span>允许 PATH 命令（每行一个命令）</span>
-                  <textarea className="smallTextarea" value={formData.pluginsAllowedCommands} disabled={loading || saving} placeholder="java&#10;ansible-playbook" onChange={e => updateFormField('pluginsAllowedCommands', e.target.value)} />
-                </label>
-                <div className="empty small">仅裸 command 命中此白名单时，才会通过运行环境 PATH 执行；带路径 command 仍必须位于插件目录内，参数请继续通过 args 数组声明。</div>
-              </fieldset>
-
-              <fieldset>
-                <legend>插件市场</legend>
-                <div className="platformMarketSources">
-                  {marketSourcesLoading ? (
-                    <div className="empty small">正在读取市场来源...</div>
-                  ) : marketSourcesError ? (
-                    <div className="marketSourceError">{marketSourcesError}</div>
-                  ) : marketSources.length === 0 ? (
-                    <div className="empty small">还没有配置市场来源。</div>
-                  ) : (
-                    <div className="platformMarketSourceList">
-                      {marketSources.map(source => (
-                        <div className="platformMarketSourceItem" key={source.id}>
-                          <div className="platformMarketSourceHead">
-                            <strong>{source.name || source.id}</strong>
-                            <span className={`marketSourceType ${source.type}`}>{source.type === 'nexus' ? 'Nexus' : source.type === 'remote' ? '远程市场' : '本地市场'}</span>
-                            {!source.enabled && <span className="marketBadge">已禁用</span>}
-                            <span className={`marketBadge ${source.ready ? 'installed' : ''}`}>{source.ready ? '可用' : '待完善'}</span>
-                          </div>
-                          <small>
-                            {source.url}
-                            {source.type === 'nexus' && source.repository ? ` · ${source.repository}` : ''}
-                            {' · '}
-                            {source.auth_type === 'basic' ? `账号：${source.username || '-'}` : '匿名访问'}
-                          </small>
-                        </div>
-                      ))}
+  function renderSection() {
+    switch (activeSection) {
+      case 'server':
+        return (
+          <section className="settingsCard">
+            <div className="settingsCardHead">
+              <h4>服务与端口</h4>
+              <p>控制 Web 控制台与 API 的监听地址、端口。修改后需重启服务生效。</p>
+            </div>
+            <div className="settingsGrid">
+              <label className="checkboxLabel settingsWide settingsToggle">
+                <input type="checkbox" checked={formData.serverEnabled} disabled={loading || saving} onChange={e => updateFormField('serverEnabled', e.target.checked)} />
+                <span>启用内置服务器</span>
+              </label>
+              <label className="settingsField">
+                <span>监听地址</span>
+                <input type="text" value={formData.serverHost} disabled={loading || saving} placeholder="127.0.0.1" onChange={e => updateFormField('serverHost', e.target.value)} />
+              </label>
+              <label className="settingsField">
+                <span>监听端口</span>
+                <input type="number" value={formData.serverPort} disabled={loading || saving} placeholder="8080" onChange={e => updateFormField('serverPort', parseInt(e.target.value) || 8080)} />
+              </label>
+              <p className="settingsHint settingsWide">127.0.0.1 仅本机可访问；需要局域网访问时改为 0.0.0.0，并注意暴露风险。</p>
+            </div>
+          </section>
+        )
+      case 'plugins':
+        return (
+          <section className="settingsCard">
+            <div className="settingsCardHead">
+              <h4>插件与命令</h4>
+              <p>插件扫描目录、加载策略以及允许通过 PATH 调用的外部命令。</p>
+            </div>
+            <div className="settingsGrid">
+              <label className="settingsField settingsWide">
+                <span>插件目录（逗号分隔）</span>
+                <input type="text" value={formData.pluginsPaths} disabled={loading || saving} placeholder="plugins" onChange={e => updateFormField('pluginsPaths', e.target.value)} />
+              </label>
+              <label className="checkboxLabel settingsWide settingsToggle">
+                <input type="checkbox" checked={formData.pluginsStrict} disabled={loading || saving} onChange={e => updateFormField('pluginsStrict', e.target.checked)} />
+                <span>严格模式：插件加载失败时中断启动</span>
+              </label>
+              <label className="settingsField settingsWide">
+                <span>允许 PATH 命令（每行一个命令）</span>
+                <textarea className="settingsTextarea" value={formData.pluginsAllowedCommands} disabled={loading || saving} placeholder="java&#10;ansible-playbook" onChange={e => updateFormField('pluginsAllowedCommands', e.target.value)} />
+              </label>
+              <p className="settingsHint settingsWide">仅裸 command 命中此白名单时，才会通过运行环境 PATH 执行；带路径 command 仍必须位于插件目录内，参数请继续通过 args 数组声明。</p>
+            </div>
+          </section>
+        )
+      case 'market':
+        return (
+          <section className="settingsCard">
+            <div className="settingsCardHead">
+              <h4>插件市场</h4>
+              <p>平台从以下来源拉取插件清单与安装包，来源的增删改在独立面板中维护。</p>
+            </div>
+            <div className="platformMarketSources">
+              {marketSourcesLoading ? (
+                <div className="empty small">正在读取市场来源...</div>
+              ) : marketSourcesError ? (
+                <div className="marketSourceError">{marketSourcesError}</div>
+              ) : marketSources.length === 0 ? (
+                <div className="empty small">还没有配置市场来源。</div>
+              ) : (
+                <div className="platformMarketSourceList">
+                  {marketSources.map(source => (
+                    <div className="platformMarketSourceItem" key={source.id}>
+                      <div className="platformMarketSourceHead">
+                        <strong>{source.name || source.id}</strong>
+                        <span className={`marketSourceType ${source.type}`}>{source.type === 'nexus' ? 'Nexus' : source.type === 'remote' ? '远程市场' : '本地市场'}</span>
+                        {!source.enabled && <span className="marketBadge">已禁用</span>}
+                        <span className={`marketBadge ${source.ready ? 'installed' : ''}`}>{source.ready ? '可用' : '待完善'}</span>
+                      </div>
+                      <small>
+                        {source.url}
+                        {source.type === 'nexus' && source.repository ? ` · ${source.repository}` : ''}
+                        {' · '}
+                        {source.auth_type === 'basic' ? `账号：${source.username || '-'}` : '匿名访问'}
+                      </small>
                     </div>
-                  )}
-                  <div className="buttonRow compactButtonRow">
-                    <button className="secondary" type="button" onClick={() => setMarketSourcesOpen(true)}>管理市场来源</button>
-                  </div>
+                  ))}
                 </div>
-                {marketSourcesOpen && (
-                  <MarketSourcesModal onClose={() => setMarketSourcesOpen(false)} onChanged={loadMarketSources} />
-                )}
-              </fieldset>
-
-              <fieldset>
-                <legend>路径配置</legend>
-                <label>
-                  <span>运行目录</span>
-                  <input type="text" value={formData.pathsRuns} disabled={loading || saving} placeholder="runs" onChange={e => updateFormField('pathsRuns', e.target.value)} />
-                </label>
-                <label>
-                  <span>日志目录</span>
-                  <input type="text" value={formData.pathsLogs} disabled={loading || saving} placeholder="runs/logs" onChange={e => updateFormField('pathsLogs', e.target.value)} />
-                </label>
-                <div className="runCleanupBox">
-                  <div>
-                    <strong>运行日志清理</strong>
-                    <span>清理工具和工作流的旧运行记录，支持包导出目录会保留。</span>
-                  </div>
-                  <label className="inlineNumberField">
-                    <span>保留最近</span>
-                    <input type="number" min="0" value={cleanupKeep} disabled={loading || saving || cleanupRunning} onChange={e => setCleanupKeep(e.target.value)} />
-                    <span>条</span>
-                  </label>
-                  <div className="buttonRow compactButtonRow">
-                    <button className="secondary" type="button" disabled={loading || saving || cleanupRunning} onClick={() => cleanupRuns(true)}>预览清理</button>
-                    <button className="secondary danger" type="button" disabled={loading || saving || cleanupRunning} onClick={() => cleanupRuns(false)}>清理旧记录</button>
-                  </div>
-                  <pre className="runCleanupResult" aria-live="polite">{cleanupMessage}</pre>
-                </div>
-              </fieldset>
-
-              <fieldset>
-                <legend>界面设置</legend>
-                <label>
-                  <span>日志字体大小</span>
-                  <input type="number" min="12" max="20" value={formData.uiLogFontSize} disabled={loading || saving} placeholder="14" onChange={e => updateFormField('uiLogFontSize', e.target.value)} />
-                </label>
-                <div className="empty small">日志终端字体大小，支持 12-20；非法值保存时会回退为 14。</div>
-              </fieldset>
-
-              <fieldset>
-                <legend>宿主配置文件白名单</legend>
-                <label>
-                  <span>允许目录（每行一个绝对目录）</span>
-                  <textarea value={formData.hostConfigAllowedDirs} disabled={loading || saving} placeholder="/etc/myapp&#10;C:\ProgramData\Vendor" onChange={e => updateFormField('hostConfigAllowedDirs', e.target.value)} />
-                </label>
-                <div className="empty small">仅允许目录白名单；宿主 mapping 的 config_dir 必须落在这些目录内。</div>
-              </fieldset>
+              )}
+              <div className="settingsCardActions">
+                <button className="secondary" type="button" onClick={() => setMarketSourcesOpen(true)}>管理市场来源</button>
+              </div>
             </div>
-          ) : (
-            <label>
-              <span>配置内容（YAML 格式）</span>
-              <textarea value={content} disabled={loading || saving} placeholder="app:&#10;  name: 运维控制台&#10;server:&#10;  port: 8080" onChange={event => setContent(event.target.value)} />
-            </label>
-          )}
-
-          <div className="buttonRow">
-            <button className="primary" disabled={loading || saving} onClick={saveConfig}>保存设置</button>
-            {editMode === 'form' ? (
-              <button className="secondary" disabled={loading || saving} onClick={switchToYaml}>高级编辑（YAML）</button>
-            ) : (
-              <button className="secondary" disabled={loading || saving} onClick={switchToForm}>返回表单</button>
+            {marketSourcesOpen && (
+              <MarketSourcesModal onClose={() => setMarketSourcesOpen(false)} onChanged={loadMarketSources} />
             )}
-            <button className="secondary" disabled={saving} onClick={onBack}>{modalMode ? '关闭' : '返回'}</button>
-          </div>
-          <pre className="modalResult">{message}</pre>
-        </div>
-      </section>
-    </div>
-  )
+          </section>
+        )
+      case 'paths':
+        return (
+          <section className="settingsCard">
+            <div className="settingsCardHead">
+              <h4>路径与清理</h4>
+              <p>运行记录、日志的落盘目录，以及旧记录的批量清理策略。</p>
+            </div>
+            <div className="settingsGrid">
+              <label className="settingsField">
+                <span>运行目录</span>
+                <input type="text" value={formData.pathsRuns} disabled={loading || saving} placeholder="runs" onChange={e => updateFormField('pathsRuns', e.target.value)} />
+              </label>
+              <label className="settingsField">
+                <span>日志目录</span>
+                <input type="text" value={formData.pathsLogs} disabled={loading || saving} placeholder="runs/logs" onChange={e => updateFormField('pathsLogs', e.target.value)} />
+              </label>
+              <div className="runCleanupBox settingsWide">
+                <div>
+                  <strong>运行日志清理</strong>
+                  <span>清理工具和工作流的旧运行记录，支持包导出目录会保留。</span>
+                </div>
+                <label className="inlineNumberField">
+                  <span>保留最近</span>
+                  <input type="number" min="0" value={cleanupKeep} disabled={loading || saving || cleanupRunning} onChange={e => setCleanupKeep(e.target.value)} />
+                  <span>条</span>
+                </label>
+                <div className="settingsCardActions">
+                  <button className="secondary" type="button" disabled={loading || saving || cleanupRunning} onClick={() => cleanupRuns(true)}>预览清理</button>
+                  <button className="secondary danger" type="button" disabled={loading || saving || cleanupRunning} onClick={() => cleanupRuns(false)}>清理旧记录</button>
+                </div>
+                <pre className="runCleanupResult" aria-live="polite">{cleanupMessage}</pre>
+              </div>
+            </div>
+          </section>
+        )
+      case 'ui':
+        return (
+          <section className="settingsCard">
+            <div className="settingsCardHead">
+              <h4>界面</h4>
+              <p>控制台展示偏好，仅影响当前浏览器的呈现效果。</p>
+            </div>
+            <div className="settingsGrid">
+              <label className="settingsField">
+                <span>日志字体大小（px）</span>
+                <input type="number" min="12" max="20" value={formData.uiLogFontSize} disabled={loading || saving} placeholder="14" onChange={e => updateFormField('uiLogFontSize', e.target.value)} />
+              </label>
+              <p className="settingsHint settingsWide">日志终端字体大小，支持 12-20；非法值保存时会回退为 14。</p>
+            </div>
+          </section>
+        )
+      case 'host':
+        return (
+          <section className="settingsCard">
+            <div className="settingsCardHead">
+              <h4>宿主配置文件白名单</h4>
+              <p>限定宿主 mapping 可读取的配置文件范围，未命中白名单的目录会被拒绝访问。</p>
+            </div>
+            <div className="settingsGrid">
+              <label className="settingsField settingsWide">
+                <span>允许目录（每行一个绝对目录）</span>
+                <textarea className="settingsTextarea settingsTextareaHost" value={formData.hostConfigAllowedDirs} disabled={loading || saving} placeholder="/etc/myapp&#10;C:\ProgramData\Vendor" onChange={e => updateFormField('hostConfigAllowedDirs', e.target.value)} />
+              </label>
+              <p className="settingsHint settingsWide">仅允许目录白名单；宿主 mapping 的 config_dir 必须落在这些目录内。</p>
+            </div>
+          </section>
+        )
+      default:
+        return (
+          <section className="settingsCard">
+            <div className="settingsCardHead">
+              <h4>应用信息</h4>
+              <p>控制台名称、描述与版本，会显示在侧栏和页面标题中。</p>
+            </div>
+            <div className="settingsGrid">
+              <label className="settingsField">
+                <span>应用名称</span>
+                <input type="text" value={formData.appName} disabled={loading || saving} placeholder="运维控制台" onChange={e => updateFormField('appName', e.target.value)} />
+              </label>
+              <label className="settingsField">
+                <span>应用版本</span>
+                <input type="text" value={formData.appVersion} disabled={loading || saving} placeholder="0.1.0" onChange={e => updateFormField('appVersion', e.target.value)} />
+              </label>
+              <label className="settingsField settingsWide">
+                <span>应用描述</span>
+                <input type="text" value={formData.appDescription} disabled={loading || saving} placeholder="运维工具执行控制台" onChange={e => updateFormField('appDescription', e.target.value)} />
+              </label>
+            </div>
+          </section>
+        )
+    }
+  }
 }
 
 function GlobalEnvConfigPanel({onBack, onSaved, modalMode = false}) {
@@ -2571,8 +2995,9 @@ function WorkflowConfigFilesPanel({workflowID, onBack, onSaved}) {
   )
 }
 
-function WorkflowConfigPanel({workflow, onBack, onSaved}) {
+function WorkflowConfigPanel({workflow, onBack, onSaved, onOpenPluginConfig}) {
   const workflowID = workflow?.id || ''
+  const referencedPlugins = workflow?.referencedPlugins || []
 
   return (
     <div className="grid">
@@ -2585,6 +3010,41 @@ function WorkflowConfigPanel({workflow, onBack, onSaved}) {
         </div>
         <WorkflowConfigFilesPanel workflowID={workflowID} onBack={onBack} onSaved={onSaved} />
       </section>
+      {referencedPlugins.length > 0 && (
+        <section className="card pluginConfigCard">
+          <div className="cardHeader">
+            <div>
+              <h3>引用的插件配置</h3>
+              <p>工作流节点用到了 {referencedPlugins.length} 个带配置文件的插件。文件仍由插件持有，点击可跳转到插件配置修改。</p>
+            </div>
+          </div>
+          <div className="list">
+            {referencedPlugins.map(plugin => (
+              <button
+                key={plugin.id}
+                className={plugin.disabled ? 'listItem pluginDisabled' : 'listItem'}
+                onClick={() => onOpenPluginConfig?.({id: plugin.id, name: plugin.name || plugin.id})}
+                title={`打开插件 ${plugin.name || plugin.id} 的配置文件`}
+              >
+                <div>
+                  <strong>{plugin.name || plugin.id}</strong>
+                  <small className="configTypeLabel">插件</small>
+                  {plugin.disabled && <small>状态：插件已禁用</small>}
+                  {plugin.tools?.length > 0 && <small>引用工具：{plugin.tools.join('、')}</small>}
+                  <div className="configFilePaths">
+                    {plugin.files.map((file, index) => (
+                      <small key={index} className="configFilePath">
+                        {file.label && <span className="fileLabel">{file.label}：</span>}
+                        {file.path}
+                      </small>
+                    ))}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   )
 }

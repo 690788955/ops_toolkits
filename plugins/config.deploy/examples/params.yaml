@@ -1,0 +1,23 @@
+# config.deploy 插件参数示例
+# 用法: ./opsctl.exe run tool config.deploy.push --params plugins/config.deploy/examples/params.yaml --no-prompt
+
+# 目标文件绝对路径
+target_path: /etc/myapp/app.conf
+
+# 插件 config 目录内的源配置文件
+source: app.conf
+
+# 目标父目录不存在时是否自动创建
+create_dirs: "yes"
+
+# 目标文件已存在时是否先备份
+backup: "yes"
+
+# 内容一致时是否跳过写入
+if_changed: "yes"
+
+# 写入后权限位，留空沿用原权限
+mode: "0644"
+
+# 写入后属主，留空不修改
+owner: ""

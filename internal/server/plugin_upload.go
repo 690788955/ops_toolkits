@@ -38,6 +38,7 @@ type pluginUploadResult struct {
 	Status          string           `json:"status"`
 	Existing        bool             `json:"existing"`
 	ExistingVersion string           `json:"existing_version,omitempty"`
+	SameVersion     bool             `json:"same_version,omitempty"`
 	Warnings        []plugin.Warning `json:"warnings,omitempty"`
 }
 
@@ -69,6 +70,43 @@ func pluginUploadHandler(state *serverState) http.HandlerFunc {
 var errPluginDuplicate = errors.New("插件已存在")
 var errPluginNotFound = errors.New("插件不存在")
 var errPluginNotDisabled = errors.New("插件未禁用")
+
+// pluginRescanHandler 按磁盘重建插件注册表。
+// 插件目录被外部改动（拷贝目录、直接改清单、替换整个插件包）时，服务内存里的注册表会滞后，
+// 表现为插件列表看不到、版本号仍是旧值。该接口让用户在插件管理里手动同步，无需重启服务。
+func pluginRescanHandler(state *serverState) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		newReg, err := registry.Load(state.reg.BaseDir)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, response{Error: fmt.Sprintf("重新扫描插件目录失败: %v", err)})
+			return
+		}
+		state.reg = newReg
+		plugins := map[string]bool{}
+		for _, tool := range newReg.Tools {
+			if tool.Source.Type == "plugin" && tool.Source.PluginID != "" {
+				plugins[tool.Source.PluginID] = true
+			}
+		}
+		for _, workflow := range newReg.Workflows {
+			if workflow.Source.Type == "plugin" && workflow.Source.PluginID != "" {
+				plugins[workflow.Source.PluginID] = true
+			}
+		}
+		writeJSON(w, http.StatusOK, response{Status: "rescanned", Data: map[string]interface{}{
+			"plugins":   len(plugins),
+			"tools":     len(newReg.Tools),
+			"workflows": len(newReg.Workflows),
+			"warnings":  len(newReg.Warnings),
+		}})
+	}
+}
 
 type pluginActionResult struct {
 	PluginID string `json:"plugin_id"`
@@ -356,14 +394,28 @@ func installPluginArchive(state *serverState, data []byte, replace bool, expecte
 	pluginsRoot := firstPluginRoot(reg)
 	installDir := filepath.Join(reg.BaseDir, filepath.FromSlash(pluginsRoot), pkg.Manifest.ID)
 	if existing, ok := existingPlugin(reg, pkg.Manifest.ID); ok {
+		// 磁盘上存在该插件、但内存注册表里没有（目录在服务启动后被外部拷贝或整体替换），
+		// 会出现“插件列表看不到、上传时却提示已存在”的矛盾。此处先按磁盘重建注册表再判定，
+		// 让“已安装列表 / 已安装版本 / 上传结果”三者始终来自同一份数据。
+		if !registryKnowsPlugin(reg, existing) {
+			if fresh, loadErr := registry.Load(reg.BaseDir); loadErr == nil {
+				state.reg = fresh
+				reg = fresh
+				pluginsRoot = firstPluginRoot(reg)
+				installDir = filepath.Join(reg.BaseDir, filepath.FromSlash(pluginsRoot), pkg.Manifest.ID)
+			}
+		}
 		result.Existing = true
 		result.ExistingVersion = existing.Manifest.Version
 		if !replace {
 			result.Status = "duplicate"
 			return result, fmt.Errorf("%w，是否更新？", errPluginDuplicate)
 		}
-		if compareVersions(pkg.Manifest.Version, existing.Manifest.Version) <= 0 {
-			return result, fmt.Errorf("插件 %s 已安装版本为 %s，上传版本 %s 不高于已安装版本", pkg.Manifest.ID, existing.Manifest.Version, pkg.Manifest.Version)
+		versionOrder := compareVersions(pkg.Manifest.Version, existing.Manifest.Version)
+		result.SameVersion = versionOrder == 0
+		// 同版本允许覆盖（等同重装，用于修复本机插件目录被改动的情况），仅拒绝降级。
+		if versionOrder < 0 {
+			return result, fmt.Errorf("插件 %s 已安装版本为 %s，上传版本 %s 低于已安装版本；如需降级，请先在插件管理中禁用并删除已安装插件后再上传", pkg.Manifest.ID, existing.Manifest.Version, pkg.Manifest.Version)
 		}
 		if err := replacePlugin(reg, state, pkgDir, installDir); err != nil {
 			return result, err
@@ -975,7 +1027,7 @@ func catalogPluginEntries(reg *registry.Registry) []pluginCatalogEntry {
 		if !registryKnowsPlugin(reg, pkg) {
 			continue
 		}
-		entries = append(entries, pluginCatalogEntry{ID: pkg.Manifest.ID, Name: pkg.Manifest.Name, Version: pkg.Manifest.Version, Description: pkg.Manifest.Description, Disabled: false, Warnings: reg.PluginWarnings(pkg.Manifest.ID)})
+		entries = append(entries, pluginCatalogEntry{ID: pkg.Manifest.ID, Name: pkg.Manifest.Name, Version: pkg.Manifest.Version, Description: pkg.Manifest.Description, Disabled: false, Categories: ownedPluginCategories(pkg), Warnings: reg.PluginWarnings(pkg.Manifest.ID)})
 		seen[pkg.Manifest.ID] = true
 	}
 	for _, pkg := range installedAnyPluginPackages(reg) {
@@ -987,6 +1039,20 @@ func catalogPluginEntries(reg *registry.Registry) []pluginCatalogEntry {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
 	return entries
+}
+
+func ownedPluginCategories(pkg plugin.Package) []config.Category {
+	out := make([]config.Category, 0, len(pkg.Manifest.Contributes.Categories))
+	for _, category := range pkg.Manifest.Contributes.Categories {
+		if strings.TrimSpace(category.ID) == "" {
+			continue
+		}
+		out = append(out, category)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func installedPlugin(reg *registry.Registry, id string) (plugin.Package, bool) {

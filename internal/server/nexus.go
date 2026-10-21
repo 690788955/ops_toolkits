@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -145,7 +146,6 @@ func nexusUploadHandler(state *serverState) http.HandlerFunc {
 			methodNotAllowed(w)
 			return
 		}
-		replace := req.URL.Query().Get("replace") == "true" || req.URL.Query().Get("replace") == "1"
 		reg := state.registry()
 		_, cfg, err := nexusConfigForRequest(reg, req)
 		if err != nil {
@@ -157,107 +157,111 @@ func nexusUploadHandler(state *serverState) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
 			return
 		}
-		pkg, cleanup, err := loadPluginZipPackage(data)
+		result, status, err := pushPluginZipToNexus(req.Context(), state, reg, cfg, data, nexusReplaceRequested(req))
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
+			writeJSON(w, status, response{Error: err.Error(), Data: result})
 			return
 		}
-		defer cleanup()
-		if err := plugin.ValidatePackageWithConfig(pkg, reg.Root.Plugins); err != nil {
-			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
-			return
-		}
-		assetPath, err := cfg.PackagePath(pkg.Manifest.ID, pkg.Manifest.Version)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, response{Error: err.Error()})
-			return
-		}
-		entry := market.PluginEntry(pkg.Manifest)
-		sum := sha256.Sum256(data)
-		entry.Package = market.Package{
-			URL:    nexus.RelativeAssetURL(cfg.IndexPath, assetPath),
-			SHA256: hex.EncodeToString(sum[:]),
-			Size:   int64(len(data)),
-		}
-		result := nexusUploadResult{
-			PluginID:    pkg.Manifest.ID,
-			Version:     pkg.Manifest.Version,
-			PackagePath: assetPath,
-			PackageURL:  entry.Package.URL,
-			Size:        entry.Package.Size,
-			SHA256:      entry.Package.SHA256,
-			Warnings:    plugin.PackageWarnings(pkg),
-		}
-
-		state.nexusMu.Lock()
-		defer state.nexusMu.Unlock()
-		ctx, cancel := context.WithTimeout(req.Context(), 2*time.Minute)
-		defer cancel()
-		client := nexus.NewClient(cfg)
-		index, _, err := client.FetchIndex(ctx)
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, response{Error: err.Error(), Data: result})
-			return
-		}
-		position, indexed := nexus.FindPlugin(index, entry.ID, entry.Version)
-		var previousPath string
-		if indexed {
-			result.Existing = true
-			if previousPath, err = nexus.ResolveAssetPath(cfg.IndexPath, index.Plugins[position].Package.URL); err != nil {
-				previousPath = ""
-			}
-		}
-		exists, err := client.AssetExists(ctx, assetPath)
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, response{Error: err.Error(), Data: result})
-			return
-		}
-		if (indexed || exists) && !replace {
-			result.Existing = true
-			message := fmt.Sprintf("Nexus 仓库中已存在插件 %s@%s，是否覆盖？", entry.ID, entry.Version)
-			if indexed && previousPath != "" && previousPath != assetPath {
-				message = fmt.Sprintf("市场索引中已存在插件 %s@%s（包 %s），是否覆盖？", entry.ID, entry.Version, previousPath)
-			}
-			writeJSON(w, http.StatusConflict, response{Error: message, Data: result})
-			return
-		}
-		if err := client.UploadPackage(ctx, assetPath, data); err != nil {
-			writeJSON(w, http.StatusBadGateway, response{Error: err.Error(), Data: result})
-			return
-		}
-		result.Replaced = nexus.UpsertPlugin(index, entry)
-		if index.SchemaVersion == 0 {
-			index.SchemaVersion = market.SchemaVersion
-		}
-		if strings.TrimSpace(index.Name) == "" {
-			index.Name = cfg.SourceName
-		}
-		index.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
-		if err := client.PutIndex(ctx, index); err != nil {
-			result.IndexUpdated = false
-			writeJSON(w, http.StatusBadGateway, response{
-				Error: fmt.Sprintf("插件包已上传，但更新索引失败：%v。可在市场来源配置的 Nexus 来源中点击“重建索引”修复。", err),
-				Data:  result,
-			})
-			return
-		}
-		result.IndexUpdated = true
-		if indexed && previousPath != "" && previousPath != assetPath {
-			result.PreviousPackage = previousPath
-			if _, err := client.DeleteAsset(ctx, previousPath); err != nil {
-				result.Warnings = append(result.Warnings, plugin.Warning{
-					Code:    "NEXUS_OLD_PACKAGE",
-					Message: fmt.Sprintf("旧插件包 %s 删除失败: %v", previousPath, err),
-				})
-			}
-		}
-		state.market.ClearCache()
-		status := "uploaded"
+		action := "uploaded"
 		if result.Replaced {
-			status = "replaced"
+			action = "replaced"
 		}
-		writeJSON(w, http.StatusOK, response{Status: status, Data: result})
+		writeJSON(w, http.StatusOK, response{Status: action, Data: result})
 	}
+}
+
+func nexusReplaceRequested(req *http.Request) bool {
+	value := req.URL.Query().Get("replace")
+	return value == "true" || value == "1"
+}
+
+// pushPluginZipToNexus 校验插件 ZIP 并写入 Nexus 仓库（插件包 + 索引），
+// 返回建议的 HTTP 状态码，便于上传与分享两类入口复用同一套写入逻辑。
+func pushPluginZipToNexus(ctx context.Context, state *serverState, reg *registry.Registry, cfg nexus.Config, data []byte, replace bool) (nexusUploadResult, int, error) {
+	pkg, cleanup, err := loadPluginZipPackage(data)
+	if err != nil {
+		return nexusUploadResult{}, http.StatusBadRequest, err
+	}
+	defer cleanup()
+	if err := plugin.ValidatePackageWithConfig(pkg, reg.Root.Plugins); err != nil {
+		return nexusUploadResult{}, http.StatusBadRequest, err
+	}
+	assetPath, err := cfg.PackagePath(pkg.Manifest.ID, pkg.Manifest.Version)
+	if err != nil {
+		return nexusUploadResult{}, http.StatusBadRequest, err
+	}
+	entry := market.PluginEntry(pkg.Manifest)
+	sum := sha256.Sum256(data)
+	entry.Package = market.Package{
+		URL:    nexus.RelativeAssetURL(cfg.IndexPath, assetPath),
+		SHA256: hex.EncodeToString(sum[:]),
+		Size:   int64(len(data)),
+	}
+	result := nexusUploadResult{
+		PluginID:    pkg.Manifest.ID,
+		Version:     pkg.Manifest.Version,
+		PackagePath: assetPath,
+		PackageURL:  entry.Package.URL,
+		Size:        entry.Package.Size,
+		SHA256:      entry.Package.SHA256,
+		Warnings:    plugin.PackageWarnings(pkg),
+	}
+
+	state.nexusMu.Lock()
+	defer state.nexusMu.Unlock()
+	pushCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	client := nexus.NewClient(cfg)
+	index, _, err := client.FetchIndex(pushCtx)
+	if err != nil {
+		return result, http.StatusBadGateway, err
+	}
+	position, indexed := nexus.FindPlugin(index, entry.ID, entry.Version)
+	var previousPath string
+	if indexed {
+		result.Existing = true
+		if previousPath, err = nexus.ResolveAssetPath(cfg.IndexPath, index.Plugins[position].Package.URL); err != nil {
+			previousPath = ""
+		}
+	}
+	exists, err := client.AssetExists(pushCtx, assetPath)
+	if err != nil {
+		return result, http.StatusBadGateway, err
+	}
+	if (indexed || exists) && !replace {
+		result.Existing = true
+		message := fmt.Sprintf("Nexus 仓库中已存在插件 %s@%s，是否覆盖？", entry.ID, entry.Version)
+		if indexed && previousPath != "" && previousPath != assetPath {
+			message = fmt.Sprintf("市场索引中已存在插件 %s@%s（包 %s），是否覆盖？", entry.ID, entry.Version, previousPath)
+		}
+		return result, http.StatusConflict, errors.New(message)
+	}
+	if err := client.UploadPackage(pushCtx, assetPath, data); err != nil {
+		return result, http.StatusBadGateway, err
+	}
+	result.Replaced = nexus.UpsertPlugin(index, entry)
+	if index.SchemaVersion == 0 {
+		index.SchemaVersion = market.SchemaVersion
+	}
+	if strings.TrimSpace(index.Name) == "" {
+		index.Name = cfg.SourceName
+	}
+	index.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := client.PutIndex(pushCtx, index); err != nil {
+		return result, http.StatusBadGateway, fmt.Errorf("插件包已上传，但更新索引失败：%v。可在市场来源配置的 Nexus 来源中点击“重建索引”修复。", err)
+	}
+	result.IndexUpdated = true
+	if indexed && previousPath != "" && previousPath != assetPath {
+		result.PreviousPackage = previousPath
+		if _, err := client.DeleteAsset(pushCtx, previousPath); err != nil {
+			result.Warnings = append(result.Warnings, plugin.Warning{
+				Code:    "NEXUS_OLD_PACKAGE",
+				Message: fmt.Sprintf("旧插件包 %s 删除失败: %v", previousPath, err),
+			})
+		}
+	}
+	state.market.ClearCache()
+	return result, http.StatusOK, nil
 }
 
 func nexusDeleteHandler(state *serverState) http.HandlerFunc {

@@ -198,6 +198,7 @@ type WorkflowConfig struct {
 	Version     string          `yaml:"version" json:"version"`
 	Category    string          `yaml:"category" json:"category"`
 	Tags        []string        `yaml:"tags" json:"tags"`
+	SharedWith  []string        `yaml:"shared_with,omitempty" json:"shared_with,omitempty"`
 	Parameters  []Parameter     `yaml:"parameters" json:"parameters"`
 	ConfigFiles []ConfigFileRef `yaml:"config_files" json:"config_files"`
 	Nodes       []WorkflowNode  `yaml:"nodes" json:"nodes"`
