@@ -1,6 +1,7 @@
 import React from 'react'
 import {Handle, Position} from '@xyflow/react'
-import {conditionBranchRows, conditionOperators, defaultCondition, normalizeExtractConfig} from './model.js'
+import {conditionBranchRows, conditionOperators, defaultCondition, normalizeExtractConfig, normalizeHttpRequestConfig} from './model.js'
+import {controlNodeCategory, controlNodeHelp, controlNodeMeta} from './catalog.js'
 
 function FlowchartShape({kind, marker}) {
   return (
@@ -10,40 +11,32 @@ function FlowchartShape({kind, marker}) {
   )
 }
 
-function controlShapeKind(type) {
-  if (type === 'condition') return 'decision'
-  if (type === 'parallel' || type === 'join' || type === 'loop' || type === 'upload' || type === 'extract_config') return `gateway ${type}`
-  return 'planned'
+// 节点的形状、符号、分类全部来自 catalog.js，组件不再按 type 写分支。
+function controlShape(type) {
+  const meta = controlNodeMeta(type)
+  const category = controlNodeCategory(type)
+  return {
+    meta,
+    category,
+    shape: meta?.shape || category.shape || 'gateway',
+    symbol: meta?.symbol || '·'
+  }
 }
 
 function controlShapeMarker(type) {
-  if (type === 'condition') return '?'
-  if (type === 'parallel') return '+'
-  if (type === 'join') return '∧'
-  if (type === 'loop') return '↻'
-  if (type === 'upload') return '↑'
-  if (type === 'extract_config') return '⇩'
-  return '·'
+  return controlShape(type).symbol
 }
 
 function controlShapeLabel(type) {
-  if (type === 'condition') return 'Decision 条件判断'
-  if (type === 'parallel') return 'Gateway 并行分支'
-  if (type === 'join') return 'Gateway 合流'
-  if (type === 'loop') return 'Loop 固定次数循环'
-  if (type === 'upload') return 'Upload 上传文件'
-  if (type === 'extract_config') return 'Extract Config 提取配置'
-  return '流程节点'
+  const meta = controlNodeMeta(type)
+  if (!meta) return '流程节点'
+  return `${meta.secondary} ${meta.title}`
 }
 
-function controlNodeHelp(type) {
-  if (type === 'condition') return '根据上游输出或工作流参数选择后续分支'
-  if (type === 'parallel') return '将后续任务拆分为多个分支路径'
-  if (type === 'join') return '等待多个上游分支完成后继续流程'
-  if (type === 'loop') return '按固定次数重复执行一个内嵌选择的插件工具'
-  if (type === 'upload') return '运行前上传本地文件、批量文件或目录到平台目录'
-  if (type === 'extract_config') return '从上传结果提取文件到工作流配置中心'
-  return '编排控制节点'
+function CategoryChip({category, title}) {
+  return (
+    <span className={`nodeCategoryChip ${category.id}`} title={title || category.description}>{category.label}</span>
+  )
 }
 
 function conditionSummary(condition) {
@@ -148,10 +141,11 @@ function ConditionNode({id, data, selected}) {
   const condition = data.condition || defaultCondition()
   const status = conditionNodeStatus(condition)
   const branches = conditionBranchRows(condition)
+  const category = controlNodeCategory('condition')
   const runTitle = formatNodeRunTitle(data.run)
-  const nodeTitle = [data.name || id, conditionSummary(condition), conditionCaseSummary(condition), status.label, runTitle].filter(Boolean).join('\n')
+  const nodeTitle = [data.name || id, category.label, conditionSummary(condition), conditionCaseSummary(condition), status.label, runTitle].filter(Boolean).join('\n')
   return (
-    <div className={nodeRunClass('conditionNode', selected, data.run)} title={nodeTitle}>
+    <div className={nodeRunClass(`conditionNode cat-${category.id}`, selected, data.run)} title={nodeTitle}>
       <Handle type="target" position={Position.Left} />
       <RunStatusBadge run={data.run} />
       <NodeDeleteButton id={id} onRemove={data.onRemove} />
@@ -162,6 +156,7 @@ function ConditionNode({id, data, selected}) {
           <strong>{data.name || id}</strong>
         </div>
         <div className="conditionInfoCard">
+          <CategoryChip category={category} title="条件节点：按输入值选择后续分支" />
           <div className="conditionInputSummary">{conditionSummary(condition)}</div>
           <small>{conditionCaseSummary(condition)}</small>
           <small className={status.ready ? 'conditionState ready' : 'conditionState warning'}>{status.label}</small>
@@ -194,6 +189,9 @@ function ConditionNode({id, data, selected}) {
   )
 }
 function ControlNode({id, data, selected}) {
+  const type = data.controlType
+  const {category, shape, symbol} = controlShape(type)
+  const typeLabel = controlShapeLabel(type)
   const loop = data.loop || {}
   const loopSummary = loop.tool ? `工具 ${loop.tool} × ${loop.max_iterations || 0}` : '未配置循环工具'
   const runLoopSummary = data.run?.loopIterations ? `实际迭代 ${data.run.loopIterations} 次` : ''
@@ -206,27 +204,35 @@ function ControlNode({id, data, selected}) {
     : extractConfig.target_path
       ? `${extractConfig.file_name || '未填源文件'} → ${extractConfig.target_path}`
       : '未配置提取映射'
-  const helpText = data.controlType === 'loop'
+  const httpRequest = normalizeHttpRequestConfig(data.http || {})
+  const httpURL = httpRequest.url.length > 46 ? `${httpRequest.url.slice(0, 46)}…` : httpRequest.url
+  const httpSummary = httpURL
+    ? `${httpRequest.method} ${httpURL}`
+    : '未配置请求 URL'
+  const helpText = type === 'loop'
     ? [loopSummary, runLoopSummary].filter(Boolean).join('；')
-    : data.controlType === 'upload'
+    : type === 'upload'
       ? uploadSummary
-      : data.controlType === 'extract_config'
+      : type === 'extract_config'
         ? extractSummary
-      : controlNodeHelp(data.controlType)
+        : type === 'http_request'
+          ? httpSummary
+          : controlNodeHelp(type)
   const runTitle = formatNodeRunTitle(data.run)
-  const nodeTitle = [data.name || id, controlShapeLabel(data.controlType), helpText, data.hostLabel, runTitle].filter(Boolean).join('\n')
+  const nodeTitle = [data.name || id, category.label, typeLabel, helpText, data.hostLabel, runTitle].filter(Boolean).join('\n')
   return (
-    <div className={nodeRunClass(`controlNode ${data.controlType || ''}`, selected, data.run)} title={nodeTitle}>
+    <div className={nodeRunClass(`controlNode cat-${category.id} ${type || ''}`, selected, data.run)} title={nodeTitle}>
       <Handle type="target" position={Position.Left} />
       <RunStatusBadge run={data.run} />
       <NodeDeleteButton id={id} onRemove={data.onRemove} />
       <NodeRerunButton id={id} onRerun={data.onRerun} disabled={data.rerunDisabled} />
       <div className="nodeTopBar controlTopBar">
-        <FlowchartShape kind={controlShapeKind(data.controlType)} marker={controlShapeMarker(data.controlType)} />
+        <FlowchartShape kind={`${shape} ${category.id}`} marker={symbol} />
         <strong>{data.name || id}</strong>
       </div>
       <div className="controlNodeText">
-        <small>{controlShapeLabel(data.controlType)} · {helpText}</small>
+        <CategoryChip category={category} />
+        <small>{typeLabel} · {helpText}</small>
         {data.hostLabel && <small className="nodeHostLine">{data.hostLabel}</small>}
       </div>
       <Handle type="source" position={Position.Right} />

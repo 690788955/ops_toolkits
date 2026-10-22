@@ -62,11 +62,69 @@ function click(element) {
   })
 }
 
+describe('RunHistoryPanel cleanup preview', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      const path = String(url)
+      if (path === '/api/runs/cleanup') {
+        const payload = JSON.parse(options.body || '{}')
+        return jsonResponse({
+          data: {
+            keep: payload.keep,
+            dry_run: payload.dry_run,
+            total: 2,
+            deleted: 1,
+            deleted_ids: ['run-old'],
+            kept_ids: ['run-new'],
+            candidates: [{id: 'run-old', kind: 'tool', target: 'demo.old', status: 'succeeded', started_at: '2026-06-14T09:00:00Z'}]
+          }
+        })
+      }
+      if (path === '/api/runs/' || path.startsWith('/api/runs/?')) {
+        return jsonResponse({data: {runs: [], total: 0}})
+      }
+      return jsonResponse({data: {}})
+    }))
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    document.body.innerHTML = ''
+  })
+
+  it('lists preview candidates and runs cleanup from the preview', async () => {
+    const {host, root} = await renderPanel()
+    click([...host.querySelectorAll('button')].find(button => button.textContent === '清理'))
+    await vi.waitFor(() => expect(host.querySelector('.runCleanupModal')).not.toBeNull())
+
+    const keepInput = host.querySelector('.runCleanupModal input[type="number"]')
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(keepInput, '1')
+      keepInput.dispatchEvent(new Event('input', {bubbles: true}))
+    })
+    click([...host.querySelectorAll('.runCleanupModal button')].find(button => button.textContent === '开始预演'))
+    await vi.waitFor(() => expect(host.querySelector('.runCleanupCandidateList')).not.toBeNull())
+    expect(host.querySelector('.runCleanupCandidateList').textContent).toContain('demo.old')
+    expect(host.querySelector('.runCleanupCandidateList').textContent).toContain('run-old')
+
+    click([...host.querySelectorAll('.runCleanupPreview button')].find(button => button.textContent === '确认清理以上记录'))
+    await vi.waitFor(() => {
+      const cleanupCalls = fetch.mock.calls.filter(call => String(call[0]) === '/api/runs/cleanup')
+      expect(cleanupCalls).toHaveLength(2)
+      expect(JSON.parse(cleanupCalls[1][1].body)).toEqual({keep: 1, dry_run: false})
+    })
+    await vi.waitFor(() => expect(host.textContent).toContain('已清理 1 条运行记录'))
+
+    await act(async () => root.unmount())
+  })
+})
+
 describe('RunHistoryPanel canvas view', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn(url => {
       const path = String(url)
-      if (path === '/api/runs/') {
+      if (path === '/api/runs/' || path.startsWith('/api/runs/?')) {
         return jsonResponse({
           data: {
             runs: [

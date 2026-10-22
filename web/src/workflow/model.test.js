@@ -8,6 +8,7 @@ import {
   defaultExtractConfig,
   defaultUpload,
   normalizeExtractConfig,
+  normalizeHttpRequestConfig,
   normalizeLoopConfig,
   validateConditionDraft,
   validateControlDraft,
@@ -508,5 +509,156 @@ describe("workflow model", () => {
     });
     expect(draft.nodes[0]).not.toHaveProperty("outputs");
     expect(draft.nodes[0]).not.toHaveProperty("toolMeta");
+  });
+});
+
+describe("HTTP 节点配置", () => {
+  it("把画布节点序列化为 http 配置，并丢弃空 Header", () => {
+    const nodes = [
+      {
+        id: "call_api",
+        type: "controlNode",
+        data: {
+          controlType: "http_request",
+          name: "调用发布接口",
+          http: {
+            method: "post",
+            url: "https://api.example.com/deploy",
+            headers: [
+              { name: "Authorization", value: "Bearer {{ .token }}" },
+              { name: "", value: "" },
+            ],
+            body_type: "json",
+            body: '{"env":"{{ .env }}"}',
+            expect_status: [200, 201],
+            save_response: "response.json",
+            fail_on_error: false,
+            timeout: "15s",
+          },
+        },
+      },
+    ];
+    const draft = buildWorkflowDraft({ id: "demo.http" }, nodes, [], "global", []);
+    expect(draft.nodes[0]).toEqual({
+      id: "call_api",
+      type: "http_request",
+      name: "调用发布接口",
+      http: {
+        method: "POST",
+        url: "https://api.example.com/deploy",
+        headers: { Authorization: "Bearer {{ .token }}" },
+        body_type: "json",
+        body: '{"env":"{{ .env }}"}',
+        expect_status: [200, 201],
+        save_response: "response.json",
+        fail_on_error: false,
+        timeout: "15s",
+      },
+    });
+  });
+
+  it("兼容后端 yaml 里的 headers 对象写法与字符串状态码", () => {
+    const http = normalizeHttpRequestConfig({
+      method: "get",
+      url: " https://example.com/health ",
+      headers: { "X-Token": "abc" },
+      expect_status: "200, 201, 200, 999",
+      fail_on_error: false,
+    });
+    expect(http.method).toBe("GET");
+    expect(http.url).toBe("https://example.com/health");
+    expect(http.headers).toEqual([{ name: "X-Token", value: "abc" }]);
+    expect(http.expect_status).toEqual([200, 201]);
+    expect(http.body_type).toBe("none");
+    expect(http.fail_on_error).toBe(false);
+  });
+
+  it("校验必填 URL、协议、GET 请求体与超时格式", () => {
+    const base = {
+      id: "call",
+      type: "controlNode",
+      data: {
+        controlType: "http_request",
+        http: { method: "GET", url: "", body_type: "none" },
+      },
+    };
+    expect(
+      validateControlDraft([base], []).some((item) =>
+        item.includes("请输入请求 URL"),
+      ),
+    ).toBe(true);
+
+    const fileScheme = {
+      ...base,
+      data: {
+        controlType: "http_request",
+        http: { method: "GET", url: "file:///etc/passwd" },
+      },
+    };
+    expect(
+      validateControlDraft([fileScheme], []).some((item) =>
+        item.includes("http:// 或 https://"),
+      ),
+    ).toBe(true);
+
+    const getWithBody = {
+      ...base,
+      data: {
+        controlType: "http_request",
+        http: {
+          method: "GET",
+          url: "https://example.com",
+          body_type: "json",
+          body: '{"a":1}',
+        },
+      },
+    };
+    expect(
+      validateControlDraft([getWithBody], []).some((item) =>
+        item.includes("GET 请求不能配置请求体"),
+      ),
+    ).toBe(true);
+
+    const badTimeout = {
+      ...base,
+      data: {
+        controlType: "http_request",
+        http: { url: "https://example.com", timeout: "30 秒" },
+      },
+    };
+    expect(
+      validateControlDraft([badTimeout], []).some((item) =>
+        item.includes("超时时间格式无效"),
+      ),
+    ).toBe(true);
+
+    const escapingPath = {
+      ...base,
+      data: {
+        controlType: "http_request",
+        http: { url: "https://example.com", save_response: "../x.json" },
+      },
+    };
+    expect(
+      validateControlDraft([escapingPath], []).some((item) =>
+        item.includes("响应保存路径无效"),
+      ),
+    ).toBe(true);
+
+    const ok = {
+      ...base,
+      data: {
+        controlType: "http_request",
+        http: {
+          method: "POST",
+          url: "{{ .base_url }}/health",
+          body_type: "json",
+          body: '{"a":1}',
+          save_response: "response/health.json",
+          timeout: "10s",
+        },
+      },
+    };
+    expect(validateControlDraft([ok], [])).toEqual([]);
   });
 });

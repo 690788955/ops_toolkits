@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {Background, Controls, MiniMap, ReactFlow, reconnectEdge, useEdgesState, useNodesState} from '@xyflow/react'
 import {deleteJSON, fetchJSON, fetchRunDetail, postJSON, postRunUploadNodeChunked} from '../api.js'
 import {filterEntries, readableAPIError, summarizeAPIResponse} from '../utils.js'
-import {controlNodeCatalog, controlNodeHelp, controlNodeTitle} from './catalog.js'
+import {allNodeCategories, controlNodeCatalog, controlNodeHelp, controlNodeTitle, countNodesByCategory, flowNodeCategoryID, groupControlsByCategory, isControlReady} from './catalog.js'
 import * as workflowModel from './model.js'
 import {controlShapeMarker, nodeTypes, normalizeRunStatus, runStatusLabel} from './nodes.jsx'
 import {EdgeConfigModal, NodeConfigEditor, NodeConfigModal, ValidationSummary} from './inspectors.jsx'
@@ -17,8 +17,17 @@ const UNCATEGORIZED_WORKFLOW_CATEGORY = '__uncategorized__'
 const RUN_TARGET_FOLLOW = 'follow_nodes'
 const RUN_TARGET_LOCAL = 'local'
 
-export default function WorkflowEditor({catalog, activeCategory = '', hosts = [], setResult, refreshCatalog, resultPanel = null}) {
+export default function WorkflowEditor({catalog, activeCategory = '', hosts = [], setResult: setAppResult, refreshCatalog, resultPanel = null}) {
   const [workflow, setWorkflow] = useState(emptyWorkflow())
+  const [editorNotice, setEditorNotice] = useState('')
+  const setResult = useCallback(payload => {
+    if (typeof payload === 'function') {
+      setAppResult(payload)
+      return
+    }
+    if (payload?.message) setEditorNotice(payload.message)
+    setAppResult(payload)
+  }, [setAppResult])
   const workflowOptions = useMemo(() => catalog.workflows || [], [catalog.workflows])
   const toolOptions = useMemo(() => catalog.tools || [], [catalog.tools])
   const [workflowCategoryFilter, setWorkflowCategoryFilter] = useState(activeCategory || '')
@@ -40,6 +49,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   const [executeStep, setExecuteStep] = useState('params')
   const [runParamsModalOpen, setRunParamsModalOpen] = useState(false)
   const [nodeParamsText, setNodeParamsText] = useState('{}')
+  const [nodeConfigDraft, setNodeConfigDraft] = useState(null)
   const [editorValidation, setEditorValidation] = useState(null)
   const [saveModalOpen, setSaveModalOpen] = useState(false)
   const [saveModalErrors, setSaveModalErrors] = useState([])
@@ -53,6 +63,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   const [pendingInsertEdge, setPendingInsertEdge] = useState(null)
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
+  const flowHistory = useFlowHistory(nodes, edges, setNodes, setEdges)
   const [canvasRunState, setCanvasRunState] = useState(() => emptyCanvasRunState())
   const [activeRun, setActiveRun] = useState(null)
   const [lastRun, setLastRun] = useState(null)
@@ -63,6 +74,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   const [canvasRunDetail, setCanvasRunDetail] = useState(null)
   const [canvasLogNodeID, setCanvasLogNodeID] = useState('')
   const [canvasLogMinimized, setCanvasLogMinimized] = useState(false)
+  const [nodeCategoryFocus, setNodeCategoryFocus] = useState('')
   const canvasRunVersionRef = useRef(0)
 
   const clearCanvasRunOverlay = useCallback(() => {
@@ -99,13 +111,15 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     setSelectedWorkflowID('')
     setNodes([])
     setEdges([])
-  }, [selectedWorkflowID, workflowOptions, setNodes, setEdges])
+    flowHistory.resetHistory([], [])
+  }, [selectedWorkflowID, workflowOptions, setNodes, setEdges, flowHistory.resetHistory])
 
   const selectedNode = useMemo(() => nodes.find(node => node.id === selectedNodeID), [nodes, selectedNodeID])
   const selectedEdge = useMemo(() => edges.find(edge => edge.id === selectedEdgeID), [edges, selectedEdgeID])
+  const configNode = nodeConfigDraft || selectedNode
   const toolMap = useMemo(() => new Map((catalog.tools || []).map(tool => [tool.id, tool])), [catalog.tools])
-  const selectedTool = useMemo(() => (catalog.tools || []).find(tool => tool.id === selectedNode?.data.tool), [catalog.tools, selectedNode])
-  const selectedLoopTool = useMemo(() => (catalog.tools || []).find(tool => tool.id === selectedNode?.data.loop?.tool), [catalog.tools, selectedNode])
+  const selectedTool = useMemo(() => (catalog.tools || []).find(tool => tool.id === configNode?.data.tool), [catalog.tools, configNode])
+  const selectedLoopTool = useMemo(() => (catalog.tools || []).find(tool => tool.id === configNode?.data.loop?.tool), [catalog.tools, configNode])
   const nodePickerToolOptions = useMemo(() => filterEntries(toolOptions, nodePickerSearchText, ''), [toolOptions, nodePickerSearchText])
   const workflowOwnerOptions = useMemo(
     () => (catalog.plugins || []).filter(item => item.id && item.id !== 'user.workflows' && !item.disabled),
@@ -198,7 +212,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   const selectedNodeSources = mappingSources
   const isEditingCanvas = canvasMode === 'edit'
   const workflowConfirm = effectiveWorkflowConfirm(workflow, selectedWorkflowID, catalog.workflows || [])
-  const canDeleteWorkflow = Boolean(selectedWorkflowID)
+  const canDeleteWorkflow = Boolean(selectedWorkflowID) && !workflowOwnerLocked
   const rerunnableRun = activeRun || lastRun
   const activeRunID = rerunnableRun?.id || ''
   const activeRunStatus = normalizeRunStatus(activeRun?.status || lastRun?.status || canvasRunState.status)
@@ -215,6 +229,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     hosts
   ), [nodes, canvasRunState, catalog.tools, isEditingCanvas, isActiveRunRunning, activeRunID, rerunWorkflowNode, hosts])
   const displayEdges = useMemo(() => buildDisplayEdges(edges, displayNodes, canvasRunState), [edges, displayNodes, canvasRunState])
+  const categoryCounts = useMemo(() => countNodesByCategory(nodes), [nodes])
   const currentDraftSignature = useMemo(
     () => workflowDraftSignature(workflow, nodes, edges, '', workflowParamsText, workflowOwnerID),
     [workflow, nodes, edges, workflowParamsText, workflowOwnerID]
@@ -258,16 +273,15 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   }, [selectedEdge])
 
   useEffect(() => {
-    if (!selectedNode) {
-      setNodeParamsText('{}')
-      setNodeConfigModalOpen(false)
-      return
-    }
-    setNodeParamsText(JSON.stringify(selectedNode.data.params || {}, null, 2))
+    if (selectedNode) return
+    setNodeConfigModalOpen(false)
+    setNodeConfigDraft(null)
+    setNodeParamsText('{}')
   }, [selectedNode])
 
   const closeNodeConfigModal = useCallback(() => {
     setNodeConfigModalOpen(false)
+    setNodeConfigDraft(null)
   }, [])
 
   function openNodeConfigModal(nodeID) {
@@ -275,8 +289,12 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       closeNodePicker()
       return
     }
+    const node = nodes.find(item => item.id === nodeID)
+    if (!node) return
     setSelectedNodeID(nodeID)
     setSelectedEdgeID('')
+    setNodeConfigDraft(cloneNodeConfigDraft(node))
+    setNodeParamsText(JSON.stringify(node.data.params || {}, null, 2))
     setNodeConfigModalOpen(true)
     setEdgeConfigModalOpen(false)
     closeNodePicker()
@@ -303,6 +321,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     setSelectedEdgeID(edgeID)
     setSelectedNodeID('')
     setNodeConfigModalOpen(false)
+    setNodeConfigDraft(null)
     setEdgeConfigModalOpen(true)
     closeNodePicker()
   }
@@ -367,10 +386,10 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     }
   }
 
-  const selectedNodeKindLabel = selectedNode?.type === 'conditionNode'
+  const selectedNodeKindLabel = configNode?.type === 'conditionNode'
     ? '条件分支'
-    : selectedNode?.type === 'controlNode'
-      ? controlNodeTitle(selectedNode.data.controlType)
+    : configNode?.type === 'controlNode'
+      ? controlNodeTitle(configNode.data.controlType)
       : '工具节点'
 
   const onConnect = useCallback(
@@ -412,11 +431,13 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       const layoutNodes = workflowModel.autoLayoutNodes(flowNodes, flowEdges)
       setNodes(layoutNodes)
       setEdges(flowEdges)
+      flowHistory.resetHistory(layoutNodes, flowEdges)
       setSavedDraftSignature(workflowDraftSignature(config, layoutNodes, flowEdges, '', JSON.stringify(config.parameters || []), ownerID))
       setSelectedWorkflowID(id)
       setSelectedNodeID('')
       setSelectedEdgeID('')
       setNodeConfigModalOpen(false)
+      setNodeConfigDraft(null)
       setEdgeConfigModalOpen(false)
       setUploadNodeFiles({})
       closeNodePicker()
@@ -468,12 +489,14 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     setRunParamsText('{}')
     setNodes([])
     setEdges([])
+    flowHistory.resetHistory([], [])
     setSelectedWorkflowID('')
     setWorkflowOwnerID('user.workflows')
     setWorkflowOwnerLocked(false)
     setSelectedNodeID('')
     setSelectedEdgeID('')
     setNodeConfigModalOpen(false)
+    setNodeConfigDraft(null)
     setEdgeConfigModalOpen(false)
     setEditorValidation(null)
     setSavedDraftSignature(workflowDraftSignature(next, [], [], '', '[]', 'user.workflows'))
@@ -532,6 +555,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     setResult({message: `已移除节点 ${id}`})
     setSelectedNodeID(current => current === id ? '' : current)
     setNodeConfigModalOpen(false)
+    setNodeConfigDraft(null)
     setEdgeConfigModalOpen(false)
     setSelectedEdgeID('')
   }, [canvasMode, clearCanvasRunOverlay, setEdges, setNodes, setResult])
@@ -561,7 +585,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       return
     }
     clearCanvasRunOverlay()
-    const control = controlNodeCatalog.find(item => item.type === controlType && item.enabled)
+    const control = controlNodeCatalog.find(item => item.type === controlType && isControlReady(item))
     if (!control) return
     const nodeID = uniqueNodeID(controlType, nodes)
     const nextPosition = position || {x: 80 + nodes.length * 220, y: 120 + (nodes.length % 3) * 90}
@@ -603,6 +627,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     closeNodePicker()
     setPendingInsertEdge(null)
     setNodeConfigModalOpen(false)
+    setNodeConfigDraft(null)
     setEdgeConfigModalOpen(false)
     setUploadNodeFiles({})
   }
@@ -622,6 +647,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     setSelectedNodeID('')
     setSelectedEdgeID('')
     setNodeConfigModalOpen(false)
+    setNodeConfigDraft(null)
     setEdgeConfigModalOpen(false)
     const insertEdge = options.insertEdge || null
     setPendingInsertEdge(insertEdge)
@@ -767,45 +793,41 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     fitCanvasViewAfterLayout()
   }
 
-  function updateSelectedNodeName(nextName) {
-    clearCanvasRunOverlay()
-    setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, name: nextName}} : node))
+  function updateDraftNodeData(patch) {
+    setNodeConfigDraft(current => current ? {...current, data: {...current.data, ...patch}} : current)
     setEditorValidation(null)
+  }
+
+  function updateSelectedNodeName(nextName) {
+    updateDraftNodeData({name: nextName})
   }
 
   function updateSelectedNodeHost(nextHost) {
-    clearCanvasRunOverlay()
-    setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, host: nextHost}} : node))
-    setEditorValidation(null)
+    updateDraftNodeData({host: nextHost})
   }
 
   function updateSelectedNodeCondition(nextCondition) {
-    clearCanvasRunOverlay()
-    setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, condition: nextCondition}} : node))
-    syncConditionEdgeLabels(selectedNodeID, nextCondition)
-    setEditorValidation(null)
+    updateDraftNodeData({condition: nextCondition})
   }
 
   function updateSelectedNodeLoop(nextLoop) {
-    clearCanvasRunOverlay()
-    setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, loop: normalizeLoopConfig(nextLoop)}} : node))
-    setEditorValidation(null)
+    updateDraftNodeData({loop: normalizeLoopConfig(nextLoop)})
   }
 
   function updateSelectedNodeUpload(nextUpload) {
-    clearCanvasRunOverlay()
-    setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, upload: workflowModel.normalizeUploadConfig(nextUpload)}} : node))
-    setEditorValidation(null)
+    updateDraftNodeData({upload: workflowModel.normalizeUploadConfig(nextUpload)})
   }
 
   function updateSelectedNodeExtractConfig(nextExtractConfig) {
-    clearCanvasRunOverlay()
-    setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, extract_config: workflowModel.normalizeExtractConfig(nextExtractConfig)}} : node))
-    setEditorValidation(null)
+    updateDraftNodeData({extract_config: workflowModel.normalizeExtractConfig(nextExtractConfig)})
+  }
+
+  function updateSelectedNodeHttpRequest(nextHttpRequest) {
+    updateDraftNodeData({http: workflowModel.normalizeHttpRequestConfig(nextHttpRequest)})
   }
 
   function updateSelectedLoopParam(name, value) {
-    const loop = normalizeLoopConfig(selectedNode?.data.loop || defaultLoop())
+    const loop = normalizeLoopConfig(configNode?.data.loop || defaultLoop())
     updateSelectedNodeLoop({...loop, params: {...(loop.params || {}), [name]: value}})
   }
 
@@ -904,6 +926,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
 
   function clearSelection() {
     setNodeConfigModalOpen(false)
+    setNodeConfigDraft(null)
     setEdgeConfigModalOpen(false)
     setSelectedNodeID('')
     setSelectedEdgeID('')
@@ -913,33 +936,137 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     setCanvasMode('execute')
     closeNodePicker()
     setNodeConfigModalOpen(false)
+    setNodeConfigDraft(null)
     setEdgeConfigModalOpen(false)
     setSelectedNodeID('')
     setSelectedEdgeID('')
   }
 
-  function applyNodeParams() {
-    if (!selectedNodeID) return false
+  const undoFlowEdit = useCallback(() => {
+    if (!isEditingCanvas) return
+    if (!flowHistory.undo()) {
+      setEditorNotice('没有可撤销的编辑操作。')
+      return
+    }
+    setSelectedNodeID('')
+    setSelectedEdgeID('')
+    setNodeConfigModalOpen(false)
+    setNodeConfigDraft(null)
+    setEdgeConfigModalOpen(false)
+    setEditorValidation(null)
+    setEditorNotice('已撤销上一步画布编辑。')
+  }, [isEditingCanvas, flowHistory.undo])
+
+  const redoFlowEdit = useCallback(() => {
+    if (!isEditingCanvas) return
+    if (!flowHistory.redo()) {
+      setEditorNotice('没有可重做的编辑操作。')
+      return
+    }
+    setSelectedNodeID('')
+    setSelectedEdgeID('')
+    setNodeConfigModalOpen(false)
+    setNodeConfigDraft(null)
+    setEdgeConfigModalOpen(false)
+    setEditorValidation(null)
+    setEditorNotice('已重做上一步画布编辑。')
+  }, [isEditingCanvas, flowHistory.redo])
+
+  useEffect(() => {
+    function handleHistoryShortcut(event) {
+      if (!(event.ctrlKey || event.metaKey)) return
+      const key = String(event.key || '').toLowerCase()
+      if (key === 's' && isEditingCanvas) {
+        event.preventDefault()
+        openSaveModal()
+        return
+      }
+      const target = event.target
+      const tag = target?.tagName
+      if (!isEditingCanvas || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) return
+      if (key === 'z' && !event.shiftKey) {
+        event.preventDefault()
+        undoFlowEdit()
+      } else if (key === 'y' || (key === 'z' && event.shiftKey)) {
+        event.preventDefault()
+        redoFlowEdit()
+      }
+    }
+    window.addEventListener('keydown', handleHistoryShortcut)
+    return () => window.removeEventListener('keydown', handleHistoryShortcut)
+  }, [isEditingCanvas, undoFlowEdit, redoFlowEdit, workflowAction])
+
+  function parseNodeParamsText() {
     try {
-      updateSelectedNodeParams(JSON.parse(nodeParamsText || '{}'))
-      setResult({message: `已更新节点 ${selectedNodeID} 参数`})
-      return true
+      const parsed = JSON.parse(nodeParamsText || '{}')
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        setResult({message: '参数 JSON 必须是对象。'})
+        return null
+      }
+      return parsed
     } catch (err) {
-      setResult({message: `参数（JSON） 无效: ${err.message}`})
-      return false
+      setResult({message: `参数（JSON）无效：${err.message}`})
+      return null
     }
   }
 
+  function applyNodeParams() {
+    if (!configNode) return false
+    const params = parseNodeParamsText()
+    if (params === null) return false
+    updateSelectedNodeParams(params)
+    setResult({message: `已应用节点 ${configNode.id} 的参数草稿，保存配置后生效。`})
+    return true
+  }
+
   function updateSelectedNodeParams(nextParams) {
-    clearCanvasRunOverlay()
-    setNodes(current => current.map(node => node.id === selectedNodeID ? {...node, data: {...node.data, params: nextParams}} : node))
+    setNodeConfigDraft(current => current ? {...current, data: {...current.data, params: nextParams}} : current)
     setNodeParamsText(JSON.stringify(nextParams, null, 2))
     setEditorValidation(null)
   }
 
   function updateMappedParam(name, value) {
-    const nextParams = {...(selectedNode?.data.params || {}), [name]: value}
+    const nextParams = {...(configNode?.data.params || {}), [name]: value}
     updateSelectedNodeParams(nextParams)
+  }
+
+  function saveNodeConfig() {
+    if (!configNode || !selectedNodeID) {
+      closeNodeConfigModal()
+      return false
+    }
+    const data = configNode.data
+    let nextParams = data.params
+    if (configNode.type === 'toolNode') {
+      const parsed = parseNodeParamsText()
+      if (parsed === null) return false
+      nextParams = parsed
+    }
+    clearCanvasRunOverlay()
+    setNodes(current => current.map(node => {
+      if (node.id !== selectedNodeID) return node
+      const nextData = {...node.data, name: data.name}
+      if (node.type === 'toolNode') {
+        nextData.host = data.host || ''
+        nextData.params = nextParams || {}
+      } else if (node.type === 'conditionNode') {
+        nextData.condition = data.condition
+      } else if (node.type === 'controlNode') {
+        if (data.controlType === 'loop') {
+          nextData.host = data.host || ''
+          nextData.loop = normalizeLoopConfig(data.loop || defaultLoop())
+        }
+        if (data.controlType === 'upload') nextData.upload = workflowModel.normalizeUploadConfig(data.upload)
+        if (data.controlType === 'extract_config') nextData.extract_config = workflowModel.normalizeExtractConfig(data.extract_config)
+        if (data.controlType === 'http_request') nextData.http = workflowModel.normalizeHttpRequestConfig(data.http)
+      }
+      return {...node, data: nextData}
+    }))
+    if (configNode.type === 'conditionNode') syncConditionEdgeLabels(selectedNodeID, data.condition)
+    setEditorValidation(null)
+    closeNodeConfigModal()
+    setResult({message: `已保存节点 ${selectedNodeID} 的配置。`})
+    return true
   }
 
   function showEditorValidation(status) {
@@ -1102,6 +1229,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       setRunParamsText('{}')
       setNodes([])
       setEdges([])
+      flowHistory.resetHistory([], [])
       setSelectedWorkflowID('')
       setWorkflowOwnerID('user.workflows')
       setWorkflowOwnerLocked(false)
@@ -1109,6 +1237,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       setSelectedNodeID('')
       setSelectedEdgeID('')
       setNodeConfigModalOpen(false)
+      setNodeConfigDraft(null)
       setEdgeConfigModalOpen(false)
       setEditorValidation(null)
       setSavedDraftSignature(workflowDraftSignature(next, [], [], '', '[]', 'user.workflows'))
@@ -1377,28 +1506,35 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       </small>
     </section>
   )
-  const addControlNodeGrid = (
-    <div className="canvasHoverToolbarGrid">
-      {controlNodeCatalog.map(control => {
-        const disabled = !control.enabled
-        return (
-          <button
-            key={control.type}
-            type="button"
-            draggable={!disabled}
-            disabled={disabled}
-            aria-disabled={disabled}
-            onDragStart={disabled ? undefined : event => handleControlDragStart(event, control)}
-            onClick={disabled ? undefined : () => addControlNode(control.type)}
-            title={`${control.title}\n${control.secondary}\n${control.help || control.description}${disabled ? '\n规划中' : ''}`}
-          >
-            <span className={`paletteShape ${control.type}`} data-symbol={controlShapeMarker(control.type)} aria-hidden="true" />
-            <span>{control.title}</span>
-          </button>
-        )
-      })}
+  const addControlNodeGrid = groupControlsByCategory(controlNodeCatalog).map(({category, controls}) => (
+    <div key={category.id} className={`canvasHoverToolbarSection cat-${category.id}`} title={category.description}>
+      <span>
+        <i className={`catDot ${category.id}`} aria-hidden="true" />
+        {category.label}
+      </span>
+      <div className="canvasHoverToolbarGrid">
+        {controls.map(control => {
+          const disabled = !isControlReady(control)
+          return (
+            <button
+              key={control.type}
+              type="button"
+              className={disabled ? 'planned' : undefined}
+              draggable={!disabled}
+              disabled={disabled}
+              aria-disabled={disabled}
+              onDragStart={disabled ? undefined : event => handleControlDragStart(event, control)}
+              onClick={disabled ? undefined : () => addControlNode(control.type)}
+              title={`${control.title}\n${control.secondary}\n${control.help || control.description}${disabled ? '\n规划中' : ''}`}
+            >
+              <span className={`paletteShape ${control.shape} cat-${control.category}`} data-symbol={controlShapeMarker(control.type)} aria-hidden="true" />
+              <span>{control.title}</span>
+            </button>
+          )
+        })}
+      </div>
     </div>
-  )
+  ))
   const addToolNodeGrid = (
     <div className="canvasHoverToolbarGrid tools">
       {quickToolOptions.map(tool => (
@@ -1410,6 +1546,40 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       {quickToolOptions.length === 0 && <button type="button" onClick={() => openNodePicker()}>搜索插件工具</button>}
     </div>
   )
+  const canvasCategoryLegend = isEditingCanvas && nodes.length > 0 ? (
+    <div className="canvasCategoryLegend nodrag nopan" onMouseDown={event => event.stopPropagation()} role="group" aria-label="按节点分类高亮">
+      <button
+        type="button"
+        className={nodeCategoryFocus ? '' : 'active'}
+        aria-pressed={!nodeCategoryFocus}
+        title="显示全部节点"
+        onClick={() => setNodeCategoryFocus('')}
+      >
+        全部<span className="categoryLegendCount">{nodes.length}</span>
+      </button>
+      {allNodeCategories.map(category => {
+        const count = categoryCounts[category.id] || 0
+        const active = nodeCategoryFocus === category.id
+        return (
+          <button
+            key={category.id}
+            type="button"
+            className={`${active ? 'active' : ''}${count === 0 ? ' empty' : ''}`.trim()}
+            disabled={count === 0}
+            aria-pressed={active}
+            title={count === 0
+              ? `${category.label}：当前画布没有这类节点`
+              : `${category.description}。当前 ${count} 个，点击仅高亮这一类，再点取消`}
+            onClick={() => setNodeCategoryFocus(active ? '' : category.id)}
+          >
+            <i className={`catDot ${category.id}`} aria-hidden="true" />
+            {category.label}
+            <span className="categoryLegendCount">{count}</span>
+          </button>
+        )
+      })}
+    </div>
+  ) : null
   const canvasHoverToolbar = isEditingCanvas ? (
     <section className="canvasHoverToolbar nodrag nopan" onMouseDown={event => event.stopPropagation()} aria-label="画布节点工具栏">
       <div className="canvasHoverToolbarPanel">
@@ -1417,12 +1587,12 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
           <strong>添加节点</strong>
           <button type="button" onClick={() => openNodePicker()}>搜索全部</button>
         </div>
-        <div className="canvasHoverToolbarSection">
-          <span>编排节点</span>
-          {addControlNodeGrid}
-        </div>
-        <div className="canvasHoverToolbarSection">
-          <span>插件工具</span>
+        {addControlNodeGrid}
+        <div className="canvasHoverToolbarSection cat-tool">
+          <span>
+            <i className="catDot tool" aria-hidden="true" />
+            插件工具
+          </span>
           {addToolNodeGrid}
         </div>
       </div>
@@ -1453,11 +1623,16 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
           <strong>{draftStatus.title}</strong>
           <span>{draftStatus.detail}</span>
         </div>
+        {editorNotice && <div className="workflowEditorNotice" role="status" aria-live="polite">{editorNotice}</div>}
         <div className="buttonRow">
           <button className="secondary" type="button" onClick={createWorkflow} disabled={Boolean(workflowAction)}>新建</button>
           <button className="secondary" type="button" onClick={validateDraft} disabled={Boolean(workflowAction)}>{workflowAction === 'validating' ? '校验中...' : '校验'}</button>
-          <button className="primary" type="button" onClick={openSaveModal} disabled={Boolean(workflowAction)}>保存</button>
-          <button className="secondary danger" type="button" onClick={deleteWorkflow} disabled={!canDeleteWorkflow || Boolean(workflowAction)}>删除工作流</button>
+          <button className="primary" type="button" onClick={openSaveModal} disabled={Boolean(workflowAction)} title="保存（Ctrl+S）">保存</button>
+          <button className="secondary danger" type="button" onClick={deleteWorkflow} disabled={!canDeleteWorkflow || Boolean(workflowAction)} title={workflowOwnerLocked ? '内置工作流不支持在此删除' : undefined}>删除工作流</button>
+        </div>
+        <div className="buttonRow">
+          <button className="secondary" type="button" onClick={undoFlowEdit} disabled={!flowHistory.canUndo} title="撤销（Ctrl+Z）">撤销</button>
+          <button className="secondary" type="button" onClick={redoFlowEdit} disabled={!flowHistory.canRedo} title="重做（Ctrl+Y 或 Ctrl+Shift+Z）">重做</button>
         </div>
         <div className="buttonRow">
           <button className="secondary danger" type="button" onClick={removeSelectedNode} disabled={!selectedNode}>删除节点</button>
@@ -1735,7 +1910,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     </div>
   ) : null
   const workflowCanvas = (
-    <section className="card canvasCard" ref={canvasCardRef} onDragOver={handleCanvasDragOver} onDrop={handleCanvasDrop} onDoubleClick={handlePaneDoubleClick}>
+    <section className={`card canvasCard${nodeCategoryFocus ? ` cat-focus-${nodeCategoryFocus}` : ''}`} ref={canvasCardRef} onDragOver={handleCanvasDragOver} onDrop={handleCanvasDrop} onDoubleClick={handlePaneDoubleClick}>
       {executeViewSwitch}
       <ReactFlow
         nodes={displayNodes}
@@ -1788,6 +1963,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
           />
         )}
         {canvasHoverToolbar}
+        {canvasCategoryLegend}
         {!isEditingCanvas && canvasLogNodeID && (
           <CanvasNodeLogPanel
             nodeID={canvasLogNodeID}
@@ -2024,18 +2200,15 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
         </div>
       )}
 
-      {isEditingCanvas && nodeConfigModalOpen && selectedNode && (
+      {isEditingCanvas && nodeConfigModalOpen && configNode && (
         <NodeConfigModal
-          node={selectedNode}
+          node={configNode}
           kindLabel={selectedNodeKindLabel}
           onClose={closeNodeConfigModal}
-          onSave={() => {
-            if (selectedNode.type === 'toolNode' && !applyNodeParams()) return
-            closeNodeConfigModal()
-          }}
+          onSave={saveNodeConfig}
         >
           <NodeConfigEditor
-            node={selectedNode}
+            node={configNode}
             tool={selectedTool}
             hosts={hosts}
             sources={selectedNodeSources}
@@ -2046,6 +2219,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
             onLoopChange={updateSelectedNodeLoop}
             onUploadChange={updateSelectedNodeUpload}
             onExtractConfigChange={updateSelectedNodeExtractConfig}
+            onHttpChange={updateSelectedNodeHttpRequest}
             onHostChange={updateSelectedNodeHost}
             loopTool={selectedLoopTool}
             nodes={nodes}
@@ -2911,10 +3085,13 @@ export function buildDisplayNodes(nodes, runState, tools = [], onAddDownstream =
     const hostID = node.data?.host || ''
     const host = hostID ? hostMap.get(hostID) : null
     const hostLabel = hostID ? `操作机 ${host?.name || hostID}${host?.enabled === false ? '（已停用）' : ''}` : ''
+    const categoryID = flowNodeCategoryID(node)
     return {
       ...node,
+      className: [node.className, 'cat-node', `cat-${categoryID}`].filter(Boolean).join(' '),
       data: {
         ...node.data,
+        categoryID,
         run: nodeRun,
         hostLabel,
         onRemove: canRemove ? node.data?.onRemove : null,
@@ -3031,6 +3208,7 @@ function newControlFlowNode(control, id, position, onRemove) {
   if (control.type === 'loop') data.loop = defaultLoop()
   if (control.type === 'upload') data.upload = workflowModel.defaultUpload()
   if (control.type === 'extract_config') data.extract_config = workflowModel.defaultExtractConfig()
+  if (control.type === 'http_request') data.http = workflowModel.defaultHttpRequest()
   return {
     id,
     type: 'controlNode',
@@ -3168,7 +3346,7 @@ export function workflowNodeToFlowNode(node, index, onRemove, workflowNodes = []
       position: {x: 80 + index * 220, y: 120 + (index % 3) * 90}
     }
   }
-  if (nodeType === 'parallel' || nodeType === 'join' || nodeType === 'loop' || nodeType === 'upload' || nodeType === 'extract_config') {
+  if (nodeType === 'parallel' || nodeType === 'join' || nodeType === 'loop' || nodeType === 'upload' || nodeType === 'extract_config' || nodeType === 'http_request') {
     const control = controlNodeCatalog.find(item => item.type === nodeType) || {type: nodeType, title: controlNodeTitle(nodeType)}
     const flowNode = newControlFlowNode(control, node.id, {x: 80 + index * 220, y: 120 + (index % 3) * 90}, onRemove)
     flowNode.data.name = node.name || node.id
@@ -3186,6 +3364,7 @@ export function workflowNodeToFlowNode(node, index, onRemove, workflowNodes = []
     }
     if (nodeType === 'upload') flowNode.data.upload = normalizeUploadConfig(node.upload || defaultUpload())
     if (nodeType === 'extract_config') flowNode.data.extract_config = normalizeExtractConfig(node.extract_config || defaultExtractConfig())
+    if (nodeType === 'http_request') flowNode.data.http = workflowModel.normalizeHttpRequestConfig(node.http || workflowModel.defaultHttpRequest())
     return flowNode
   }
   return {
@@ -3315,7 +3494,7 @@ function autoLayoutNodeSize(node) {
     const branchCount = conditionBranchRows(node.data.condition || defaultCondition()).length
     return {width: 440, height: Math.max(156, 72 + branchCount * 42)}
   }
-  if (node.type === 'controlNode') return {width: 250, height: 82}
+  if (node.type === 'controlNode') return {width: 250, height: 104}
   return {width: 210, height: 74}
 }
 
@@ -3350,6 +3529,154 @@ function uniqueNodeID(toolID, nodes) {
     id = `${base}_${index}`
   }
   return id
+}
+
+function cloneNodeConfigDraft(node) {
+  return {
+    ...node,
+    data: {
+      ...node.data,
+      params: node.data.params ? clonePlainValue(node.data.params) : node.data.params,
+      condition: node.data.condition ? clonePlainValue(node.data.condition) : node.data.condition,
+      loop: node.data.loop ? clonePlainValue(node.data.loop) : node.data.loop,
+      upload: node.data.upload ? clonePlainValue(node.data.upload) : node.data.upload,
+      extract_config: node.data.extract_config ? clonePlainValue(node.data.extract_config) : node.data.extract_config,
+      http: node.data.http ? clonePlainValue(node.data.http) : node.data.http
+    }
+  }
+}
+
+function clonePlainValue(value) {
+  try {
+    return JSON.parse(JSON.stringify(value))
+  } catch {
+    return value
+  }
+}
+
+const FLOW_HISTORY_LIMIT = 60
+const FLOW_HISTORY_SETTLE_MS = 320
+
+function useFlowHistory(nodes, edges, setNodes, setEdges) {
+  const [availability, setAvailability] = useState({canUndo: false, canRedo: false})
+  const stateRef = useRef({past: [], future: [], last: null, pending: null, timer: null, skip: false, skipTimer: null})
+  const nodesRef = useRef(nodes)
+  const edgesRef = useRef(edges)
+  nodesRef.current = nodes
+  edgesRef.current = edges
+
+  const syncAvailability = useCallback(() => {
+    const state = stateRef.current
+    const canUndo = state.past.length > 0
+    const canRedo = state.future.length > 0
+    setAvailability(current => current.canUndo === canUndo && current.canRedo === canRedo ? current : {canUndo, canRedo})
+  }, [])
+
+  const commitPending = useCallback(() => {
+    const state = stateRef.current
+    if (!state.pending) return
+    state.past.push(state.pending)
+    if (state.past.length > FLOW_HISTORY_LIMIT) state.past.shift()
+    state.future = []
+    state.pending = null
+  }, [])
+
+  const flushPending = useCallback(() => {
+    const state = stateRef.current
+    if (state.timer) {
+      window.clearTimeout(state.timer)
+      state.timer = null
+    }
+    if (!state.pending) return
+    commitPending()
+    state.last = {nodes: nodesRef.current, edges: edgesRef.current}
+    syncAvailability()
+  }, [commitPending, syncAvailability])
+
+  useEffect(() => {
+    const state = stateRef.current
+    const current = {nodes, edges}
+    if (!state.last) {
+      state.last = current
+      return
+    }
+    if (state.skip) {
+      state.skip = false
+      state.last = current
+      return
+    }
+    if (state.last.nodes === nodes && state.last.edges === edges) return
+    if (!state.pending) state.pending = state.last
+    if (state.timer) window.clearTimeout(state.timer)
+    state.timer = window.setTimeout(() => {
+      const latest = stateRef.current
+      commitPending()
+      latest.last = {nodes: nodesRef.current, edges: edgesRef.current}
+      latest.timer = null
+      syncAvailability()
+    }, FLOW_HISTORY_SETTLE_MS)
+  }, [nodes, edges, commitPending, syncAvailability])
+
+  useEffect(() => () => {
+    const state = stateRef.current
+    if (state.timer) window.clearTimeout(state.timer)
+    if (state.skipTimer) window.clearTimeout(state.skipTimer)
+  }, [])
+
+  const restore = useCallback(snapshot => {
+    const state = stateRef.current
+    state.skip = true
+    if (state.skipTimer) window.clearTimeout(state.skipTimer)
+    state.skipTimer = window.setTimeout(() => {
+      stateRef.current.skip = false
+    }, 0)
+    state.last = snapshot
+    setNodes(snapshot.nodes)
+    setEdges(snapshot.edges)
+  }, [setNodes, setEdges])
+
+  const undo = useCallback(() => {
+    flushPending()
+    const state = stateRef.current
+    if (state.past.length === 0) return false
+    const snapshot = state.past.pop()
+    state.future.push({nodes: nodesRef.current, edges: edgesRef.current})
+    if (state.future.length > FLOW_HISTORY_LIMIT) state.future.shift()
+    restore(snapshot)
+    syncAvailability()
+    return true
+  }, [flushPending, restore, syncAvailability])
+
+  const redo = useCallback(() => {
+    flushPending()
+    const state = stateRef.current
+    if (state.future.length === 0) return false
+    const snapshot = state.future.pop()
+    state.past.push({nodes: nodesRef.current, edges: edgesRef.current})
+    if (state.past.length > FLOW_HISTORY_LIMIT) state.past.shift()
+    restore(snapshot)
+    syncAvailability()
+    return true
+  }, [flushPending, restore, syncAvailability])
+
+  const resetHistory = useCallback((nextNodes, nextEdges) => {
+    const state = stateRef.current
+    if (state.timer) window.clearTimeout(state.timer)
+    if (state.skipTimer) window.clearTimeout(state.skipTimer)
+    state.past = []
+    state.future = []
+    state.pending = null
+    state.timer = null
+    state.skip = false
+    state.skipTimer = null
+    state.last = {
+      nodes: nextNodes === undefined ? nodesRef.current : nextNodes,
+      edges: nextEdges === undefined ? edgesRef.current : nextEdges
+    }
+    syncAvailability()
+  }, [syncAvailability])
+
+  return {canUndo: availability.canUndo, canRedo: availability.canRedo, undo, redo, resetHistory}
 }
 
 function workflowDraftSignature(workflow, nodes, edges, fallbackCategory, workflowParamsText, ownerID = '') {

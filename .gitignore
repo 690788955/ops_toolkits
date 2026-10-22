@@ -1,11 +1,13 @@
 bin/
 dist/
 runs/
+node_modules/
 web/node_modules/
 /opsctl
 /opsctl.exe
 /opsctl.exe~
 /serve.log
+*.log
 graphify-out/
 .claude/worktrees/
 /workflows/
@@ -16,8 +18,6 @@ graphify-out/
 .ace-tool/
 .agents/
 .codex/
-.tmp-build/go-cache/README
-.tmp-build/go-cache/trim.txt
-.tmp-build/go-cache/
-.tmp-build/gocache/
+.tmp-build/
+.tmp-serve*.log
 .trellis/spec/backend/workflow-conditional-nodes.md

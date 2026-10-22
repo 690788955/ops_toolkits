@@ -1,6 +1,7 @@
-import React, {useEffect, useMemo, useState} from 'react'
+import React, {useEffect, useMemo, useRef, useState} from 'react'
 import {postPluginShare} from './api.js'
 import {readableAPIError} from './utils.js'
+import {useModalEscape} from './useModalEscape.js'
 
 function formatBytes(value) {
   const size = Number(value || 0)
@@ -16,6 +17,7 @@ function shortSHA(value) {
 }
 
 export default function PluginShareModal({plugin, targets, onClose, onShared}) {
+  const shareRef = useRef(null)
   const availableTargets = useMemo(() => (targets || []).filter(item => item?.id), [targets])
   const [sourceID, setSourceID] = useState(availableTargets[0]?.id || '')
   const [replace, setReplace] = useState(false)
@@ -23,6 +25,13 @@ export default function PluginShareModal({plugin, targets, onClose, onShared}) {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [result, setResult] = useState(null)
+
+  function requestClose() {
+    if (sharing) return
+    onClose()
+  }
+
+  useModalEscape(requestClose, shareRef)
 
   useEffect(() => {
     if (sourceID && availableTargets.some(item => item.id === sourceID)) return
@@ -58,14 +67,14 @@ export default function PluginShareModal({plugin, targets, onClose, onShared}) {
   }
 
   return (
-    <div className="modalBackdrop modalBackdropNested" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-      <div className="modal pluginOperationModal pluginShareModal" role="dialog" aria-modal="true" aria-labelledby="plugin-share-title">
+    <div className="modalBackdrop modalBackdropNested" onMouseDown={event => { if (event.target === event.currentTarget) requestClose() }}>
+      <div className="modal pluginOperationModal pluginShareModal" ref={shareRef} role="dialog" aria-modal="true" aria-labelledby="plugin-share-title">
         <div className="modalHeader">
           <div>
             <h3 id="plugin-share-title">分享插件</h3>
             <p>把本机插件打包后直接上传到远程插件市场（Nexus），其他环境即可在市场里安装。</p>
           </div>
-          <button className="modalClose" type="button" onClick={onClose} aria-label="关闭">×</button>
+          <button className="modalClose" type="button" onClick={requestClose} aria-label="关闭">×</button>
         </div>
         <div className="pluginUploadForm">
           <div className="pluginShareTargetCard">
@@ -107,7 +116,7 @@ export default function PluginShareModal({plugin, targets, onClose, onShared}) {
             </div>
           )}
           <div className="modalFooter pluginShareFooter">
-            <button className="secondary" type="button" onClick={onClose}>{result ? '完成' : '取消'}</button>
+            <button className="secondary" type="button" disabled={sharing} onClick={requestClose}>{result ? '完成' : '取消'}</button>
             <button
               className="primary"
               type="button"

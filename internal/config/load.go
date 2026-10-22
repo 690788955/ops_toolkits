@@ -337,6 +337,18 @@ func NormalizeWorkflow(cfg *WorkflowConfig) {
 				cfg.Nodes[i].Type = WorkflowNodeTypeLoop
 			} else if cfg.Nodes[i].Upload.TargetDir != "" {
 				cfg.Nodes[i].Type = WorkflowNodeTypeUpload
+			} else if cfg.Nodes[i].Extract.SourceType != "" || cfg.Nodes[i].Extract.FileName != "" || cfg.Nodes[i].Extract.SourceNode != "" || cfg.Nodes[i].Extract.SourceDir != "" || cfg.Nodes[i].Extract.SourcePath != "" || cfg.Nodes[i].Extract.TargetPath != "" || len(cfg.Nodes[i].Extract.Files) > 0 {
+				cfg.Nodes[i].Type = WorkflowNodeTypeExtractConfig
+			} else if strings.TrimSpace(cfg.Nodes[i].HTTP.URL) != "" {
+				cfg.Nodes[i].Type = WorkflowNodeTypeHTTP
+			}
+		}
+		if cfg.Nodes[i].Type == WorkflowNodeTypeHTTP {
+			if method, err := NormalizeHTTPMethod(cfg.Nodes[i].HTTP.Method); err == nil {
+				cfg.Nodes[i].HTTP.Method = method
+			}
+			if bodyType, err := NormalizeHTTPBodyType(cfg.Nodes[i].HTTP.BodyType, cfg.Nodes[i].HTTP.Body); err == nil {
+				cfg.Nodes[i].HTTP.BodyType = bodyType
 			}
 		}
 		if cfg.Nodes[i].OnFailure == "" {

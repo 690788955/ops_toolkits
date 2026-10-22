@@ -339,6 +339,46 @@ market:
 
 “配置”页的“工作流配置”里，除工作流自身的配置文件外，还会列出该工作流节点引用到的插件配置（`referenced_plugins`）。这些文件仍由插件持有、按插件路径编辑，工作流侧只做展示与跳转，不复制文件，避免同一份配置出现两个来源。
 
+画布节点分为两类：内置编排节点与插件工具节点。内置编排节点按用途再分三族，颜色与形状一一对应，选择面板和悬浮工具栏也按族分区：
+
+| 分类 | 形状 | 现有节点 |
+| --- | --- | --- |
+| 流程控制 `flow` | 菱形 | 条件分支、并行、合流、循环 |
+| 数据与文件 `data` | 文件块 | 上传文件、提取配置 |
+| 内置能力 `builtin` | 圆形 | HTTP 调用（CURL，已上线）、Shell 脚本与消息通知（规划中，面板内禁用） |
+
+节点的分类、形状、符号、标题和帮助文案集中在 `web/src/workflow/catalog.js` 的 `controlNodeCatalog`。新增内置节点时只需在该表追加一条元数据并把 `status` 改为 `ready`，画布渲染、选择面板分组、悬浮工具栏分区与搜索会自动跟随；运行侧再补对应的执行器与 Go 侧 `config.WorkflowNodeType*` 常量即可。
+
+### 内置 HTTP 调用节点
+
+`http_request` 节点等价于一条可参数化的 `curl`：在本机（不走操作机）发起请求，URL、Header 与 Body 都支持运行期模板，响应写入节点运行目录并进入工作流上下文。
+
+```yaml
+nodes:
+  - id: deploy
+    type: http_request
+    name: 触发发布
+    http:
+      method: POST
+      url: "{{ .base_url }}/api/deploy"
+      headers:
+        Authorization: "Bearer {{ .token }}"
+      body_type: json
+      body: '{"env":"{{ .env }}"}'
+      expect_status: [200, 201]
+      fail_on_error: true
+      save_response: response/deploy.json
+      timeout: 15s
+```
+
+- 方法支持 GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS，GET 不允许携带请求体；URL 只允许 `http://` 或 `https://`。
+- `expect_status` 留空时按 2xx 判定；`fail_on_error: false` 时状态码不符只记录不中断，节点仍记为成功。
+- `save_response` 只能是节点运行目录下的相对路径；响应体本身始终写入 `stdout.log`。
+- 下游可引用：`{{ .steps.<id>.stdout }}`（响应体）、`{{ .steps.<id>.http.status }}`、`{{ .steps.<id>.http.duration_ms }}`、`{{ .steps.<id>.http.saved_path }}`。
+- 校验在 `config.ValidateHTTPConfig`（`internal/config/types.go`），执行器在 `internal/runner/http.go`，Go 测试覆盖请求渲染、状态码失败与容错分支。
+
+选择面板中每个分类分组可点击标题折叠，默认全部展开，输入搜索词时强制展开。画布左上角的分类图例显示各类节点数量，点击某一类会在画布上仅高亮该类、其余节点淡化（再点取消）；该高亮只作用于显示层，不修改节点数据与连线。
+
 ```bash
 npm install --prefix web
 npm run dev --prefix web

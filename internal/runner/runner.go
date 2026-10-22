@@ -93,6 +93,7 @@ type StepRecord struct {
 	SkippedReason  string    `json:"skipped_reason,omitempty"`
 	LoopTarget     string    `json:"loop_target,omitempty"`
 	LoopIterations int       `json:"loop_iterations,omitempty"`
+	HTTPStatus     int       `json:"http_status,omitempty"`
 }
 
 func New(reg *registry.Registry) *Runner {
@@ -578,6 +579,35 @@ func (r *Runner) executeWorkflowNodes(ctx context.Context, wf *config.WorkflowCo
 			activatePlainBranches(node.ID, edgesByFrom, active)
 			continue
 		}
+		if nodeType == config.WorkflowNodeTypeHTTP {
+			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "running", StartedAt: time.Now()}
+			stepRunDir := filepath.Join(runDir, node.ID)
+			stepIndex := appendStepRecord(record, stepRecord)
+			_ = r.saveRecord(runDir, record)
+			meta, httpErr := r.executeHTTPNode(ctx, node, workflowContext, stepRunDir, out, errOut)
+			stepRecord.HTTPStatus = meta.Status
+			stepRecord.EndedAt = time.Now()
+			if httpErr != nil {
+				if errors.Is(httpErr, context.Canceled) {
+					stepRecord.Status = "cancelled"
+					stepRecord.Error = "运行已取消"
+				} else {
+					stepRecord.Status = "failed"
+					stepRecord.Error = httpErr.Error()
+				}
+				record.Steps[stepIndex] = stepRecord
+				_ = r.saveRecord(runDir, record)
+				err = httpErr
+				break
+			}
+			addStepContext(workflowContext, node.ID, nil, stepRunDir, nil)
+			addHTTPContext(workflowContext, node.ID, meta)
+			stepRecord.Status = "succeeded"
+			record.Steps[stepIndex] = stepRecord
+			_ = r.saveRecord(runDir, record)
+			activatePlainBranches(node.ID, edgesByFrom, active)
+			continue
+		}
 		if nodeType == config.WorkflowNodeTypeLoop {
 			loopHostID := loopNodeHostID(node, nodeByID)
 			host, hostErr := r.remoteHost(loopHostID)
@@ -735,6 +765,14 @@ func (r *Runner) rebuildWorkflowContextFromSteps(context map[string]string, step
 		case config.WorkflowNodeTypeLoop:
 			addLoopContext(context, step.ID, node.Loop.MaxIterations, runDir)
 			activatePlainBranches(step.ID, edgesByFrom, active)
+		case config.WorkflowNodeTypeHTTP:
+			meta, metaErr := readHTTPResponseMeta(filepath.Join(runDir, step.ID, httpResponseMetaFile))
+			if metaErr != nil {
+				meta.Status = step.HTTPStatus
+			}
+			addStepContext(context, step.ID, nil, filepath.Join(runDir, step.ID), nil)
+			addHTTPContext(context, step.ID, meta)
+			activatePlainBranches(step.ID, edgesByFrom, active)
 		default:
 			outputs := r.outputsForWorkflowStep(node)
 			addStepContext(context, step.ID, nil, filepath.Join(runDir, step.ID), outputs)
@@ -824,6 +862,9 @@ func workflowNodeType(node config.WorkflowNode) string {
 	}
 	if node.Extract.SourceType != "" || node.Extract.FileName != "" || node.Extract.SourceNode != "" || node.Extract.SourceDir != "" || node.Extract.SourcePath != "" || node.Extract.TargetPath != "" || node.Extract.Label != "" || node.Extract.Replace || len(node.Extract.Files) > 0 {
 		return config.WorkflowNodeTypeExtractConfig
+	}
+	if strings.TrimSpace(node.HTTP.URL) != "" || strings.TrimSpace(node.HTTP.Method) != "" || len(node.HTTP.Headers) > 0 || strings.TrimSpace(node.HTTP.Body) != "" || strings.TrimSpace(node.HTTP.SaveResponse) != "" || len(node.HTTP.ExpectStatus) > 0 {
+		return config.WorkflowNodeTypeHTTP
 	}
 	return ""
 }

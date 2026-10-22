@@ -5,7 +5,6 @@ import React from 'react'
 import {createRoot} from 'react-dom/client'
 import {act} from 'react'
 import {NodePickerPanel} from './picker.jsx'
-
 const tools = [
   {id: 'docker.exec.run', name: '容器内执行命令', source: {plugin_id: 'docker.exec', plugin_name: 'Docker'}},
   {id: 'docker.exec.shell', name: '执行宿主机 Shell 脚本', source: {plugin_id: 'docker.exec', plugin_name: 'Docker'}},
@@ -53,6 +52,93 @@ describe('NodePickerPanel plugin/tool selection', () => {
       addButton.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
     })
     expect(onAddTool).toHaveBeenCalledWith(tools[2])
+
+    await act(async () => { root.unmount() })
+    host.remove()
+  })
+})
+
+describe('NodePickerPanel 节点分类折叠', () => {
+  it('按分类分组，内置能力默认可直接添加 HTTP 调用，规划节点保持禁用', async () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const onAddControl = vi.fn()
+    const root = createRoot(host)
+    await act(async () => {
+      root.render(
+        <NodePickerPanel
+          searchText=""
+          setSearchText={() => {}}
+          tools={[]}
+          totalTools={0}
+          position={null}
+          panelPosition={null}
+          onAddTool={() => {}}
+          onAddControl={onAddControl}
+          onClose={() => {}}
+        />
+      )
+    })
+
+    const groups = host.querySelectorAll('.nodePickerCategory')
+    expect(groups).toHaveLength(3)
+    expect(Array.from(groups).map(group => group.className.includes('cat-flow'))).toEqual([true, false, false])
+
+    const builtin = host.querySelector('.nodePickerCategory.cat-builtin')
+    const builtinHead = builtin.querySelector('.nodePickerCategoryHead')
+    expect(builtinHead.getAttribute('aria-expanded')).toBe('true')
+
+    const flowItems = host.querySelectorAll('.nodePickerCategory.cat-flow .nodePickerItem')
+    expect(flowItems).toHaveLength(4)
+
+    const builtinItems = host.querySelectorAll('.nodePickerCategory.cat-builtin .nodePickerItem')
+    expect(builtinItems).toHaveLength(3)
+    expect(Array.from(builtinItems).map(item => item.disabled)).toEqual([false, true, true])
+
+    await act(async () => {
+      builtinItems[0].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+    })
+    expect(onAddControl).toHaveBeenCalledWith('http_request')
+
+    await act(async () => {
+      builtinItems[1].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+    })
+    expect(onAddControl).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      builtinHead.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+    })
+    const collapsedHead = host.querySelector('.nodePickerCategory.cat-builtin .nodePickerCategoryHead')
+    expect(collapsedHead.getAttribute('aria-expanded')).toBe('false')
+    expect(host.querySelectorAll('.nodePickerCategory.cat-builtin .nodePickerItem')).toHaveLength(0)
+
+    await act(async () => { root.unmount() })
+    host.remove()
+  })
+
+  it('搜索时强制展开所有命中分类', async () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    await act(async () => {
+      root.render(
+        <NodePickerPanel
+          searchText="HTTP"
+          setSearchText={() => {}}
+          tools={[]}
+          totalTools={0}
+          position={null}
+          panelPosition={null}
+          onAddTool={() => {}}
+          onAddControl={() => {}}
+          onClose={() => {}}
+        />
+      )
+    })
+
+    const builtinItems = host.querySelectorAll('.nodePickerCategory.cat-builtin .nodePickerItem')
+    expect(builtinItems).toHaveLength(1)
+    expect(builtinItems[0].textContent).toContain('HTTP 调用')
 
     await act(async () => { root.unmount() })
     host.remove()

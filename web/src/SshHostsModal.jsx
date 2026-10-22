@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { deleteJSON, postJSON, putJSON } from './api.js'
 import { readableAPIError } from './utils.js'
+import { useModalEscape } from './useModalEscape.js'
 
 const STATUS_LABELS = {
   online: '在线',
@@ -81,37 +82,78 @@ function formatCheckedAt(value) {
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
 
+function hostFormSnapshot(form) {
+  if (!form) return ''
+  return JSON.stringify({...form, port: String(form.port ?? '')})
+}
+
 export default function SshHostsModal({data, error, onClose, onRefresh}) {
   const [message, setMessage] = useState('')
   const [settings, setSettings] = useState({interval: '60', timeout: '8'})
+  const [settingsBaseline, setSettingsBaseline] = useState({interval: '60', timeout: '8'})
   const [savingSettings, setSavingSettings] = useState(false)
   const [checkingAll, setCheckingAll] = useState(false)
   const [form, setForm] = useState(null)
+  const [formBaseline, setFormBaseline] = useState('')
   const [saving, setSaving] = useState(false)
   const [checkingId, setCheckingId] = useState('')
+  const modalRef = useRef(null)
 
   useEffect(() => {
     if (!data) return
-    setSettings({
+    const nextSettings = {
       interval: String(data.interval_seconds || 60),
       timeout: String(data.timeout_seconds || 8)
-    })
+    }
+    setSettings(nextSettings)
+    setSettingsBaseline(nextSettings)
   }, [data?.interval_seconds, data?.timeout_seconds])
 
   const hosts = data?.hosts || []
+  const formDirty = Boolean(form) && hostFormSnapshot(form) !== formBaseline
+  const settingsDirty = settings.interval !== settingsBaseline.interval || settings.timeout !== settingsBaseline.timeout
+
+  const requestClose = useCallback(() => {
+    if (saving || savingSettings) return
+    const dirtyParts = []
+    if (formDirty) dirtyParts.push('操作机表单')
+    if (settingsDirty) dirtyParts.push('巡检设置')
+    if (dirtyParts.length > 0 && !window.confirm(`${dirtyParts.join('和')}还有未保存的修改，确认关闭并丢弃？`)) return
+    onClose()
+  }, [formDirty, onClose, saving, savingSettings, settingsDirty])
+
+  useModalEscape(requestClose, modalRef)
 
   function updateField(field, value) {
     setForm(current => current ? {...current, [field]: value} : current)
   }
 
-  function startCreate() {
+  function discardCurrentForm() {
+    setForm(null)
+    setFormBaseline('')
+  }
+
+  function openForm(nextForm) {
+    if (formDirty && !window.confirm('当前操作机表单有未保存的修改，确认放弃并切换到其他操作机？')) return false
     setMessage('')
-    setForm(emptyForm())
+    setForm(nextForm)
+    setFormBaseline(hostFormSnapshot(nextForm))
+    return true
+  }
+
+  function startCreate() {
+    openForm(emptyForm())
   }
 
   function startEdit(host) {
-    setMessage('')
-    setForm(hostToForm(host))
+    openForm(hostToForm(host))
+  }
+
+  function cancelForm() {
+    if (saving) return
+    if (formDirty && !window.confirm('操作机表单还有未保存的修改，确认放弃？')) return
+    discardCurrentForm()
+    setMessage('已取消编辑。')
   }
 
   async function handleRefresh() {
@@ -137,12 +179,14 @@ export default function SshHostsModal({data, error, onClose, onRefresh}) {
     setMessage('正在保存巡检设置...')
     try {
       const body = await putJSON('/api/ssh/settings', {interval_seconds: interval, timeout_seconds: timeout})
-      if (body?.data) {
-        setSettings({
-          interval: String(body.data.interval_seconds || interval),
-          timeout: String(body.data.timeout_seconds || timeout)
-        })
-      }
+      const savedSettings = body?.data
+        ? {
+            interval: String(body.data.interval_seconds || interval),
+            timeout: String(body.data.timeout_seconds || timeout)
+          }
+        : {interval: String(interval), timeout: String(timeout)}
+      setSettings(savedSettings)
+      setSettingsBaseline(savedSettings)
       setMessage('巡检设置已保存，新的巡检周期会立即生效。')
       await handleRefresh()
     } catch (err) {
@@ -209,7 +253,7 @@ export default function SshHostsModal({data, error, onClose, onRefresh}) {
         ? await putJSON(`/api/ssh/hosts/${encodeURIComponent(form.id)}`, payload)
         : await postJSON('/api/ssh/hosts', payload)
       setMessage(body?.data?.name ? `操作机 ${body.data.name} 已保存。` : '操作机已保存。')
-      setForm(null)
+      discardCurrentForm()
       await handleRefresh()
     } catch (err) {
       setMessage(readableAPIError(err, '保存操作机失败。'))
@@ -224,7 +268,7 @@ export default function SshHostsModal({data, error, onClose, onRefresh}) {
     try {
       await deleteJSON(`/api/ssh/hosts/${encodeURIComponent(host.id)}`)
       setMessage('操作机已删除。')
-      if (form?.id === host.id) setForm(null)
+      if (form?.id === host.id) discardCurrentForm()
       await handleRefresh()
     } catch (err) {
       setMessage(readableAPIError(err, '删除操作机失败。'))
@@ -251,14 +295,14 @@ export default function SshHostsModal({data, error, onClose, onRefresh}) {
   }
 
   return (
-    <div className="modalBackdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-      <div className="modal sshModal" role="dialog" aria-modal="true" aria-labelledby="ssh-hosts-title">
+    <div className="modalBackdrop" onMouseDown={event => { if (event.target === event.currentTarget) requestClose() }}>
+      <div className="modal sshModal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="ssh-hosts-title">
         <div className="modalHeader">
           <div>
             <h3 id="ssh-hosts-title">操作机</h3>
             <p>通过 SSH 管理可下发命令的远程机器。后台按巡检间隔自动探活，并把连接状态同步到右上角指示灯。</p>
           </div>
-          <button className="modalClose" type="button" onClick={onClose} aria-label="关闭">×</button>
+          <button className="modalClose" type="button" onClick={requestClose} aria-label="关闭">×</button>
         </div>
 
         {error && <div className="sshAlert danger">{error}</div>}
@@ -356,7 +400,7 @@ export default function SshHostsModal({data, error, onClose, onRefresh}) {
             </div>
             <div className="buttonRow compactButtonRow">
               <button className="primary" type="button" disabled={saving} onClick={saveHost}>{saving ? '保存中...' : '保存操作机'}</button>
-              <button className="secondary" type="button" disabled={saving} onClick={() => setForm(null)}>取消</button>
+              <button className="secondary" type="button" disabled={saving} onClick={cancelForm}>取消</button>
             </div>
           </section>
         )}

@@ -37,13 +37,22 @@ type CleanupOptions struct {
 	DryRun bool `json:"dry_run"`
 }
 
+type CleanupCandidate struct {
+	ID        string    `json:"id"`
+	Kind      string    `json:"kind"`
+	Target    string    `json:"target"`
+	Status    string    `json:"status"`
+	StartedAt time.Time `json:"started_at"`
+}
+
 type CleanupResult struct {
-	Keep       int      `json:"keep"`
-	DryRun     bool     `json:"dry_run"`
-	Total      int      `json:"total"`
-	Deleted    int      `json:"deleted"`
-	DeletedIDs []string `json:"deleted_ids"`
-	KeptIDs    []string `json:"kept_ids"`
+	Keep       int                `json:"keep"`
+	DryRun     bool               `json:"dry_run"`
+	Total      int                `json:"total"`
+	Deleted    int                `json:"deleted"`
+	DeletedIDs []string           `json:"deleted_ids"`
+	KeptIDs    []string           `json:"kept_ids"`
+	Candidates []CleanupCandidate `json:"candidates"`
 }
 
 func List(reg *registry.Registry) ([]Summary, error) {
@@ -91,6 +100,13 @@ func Cleanup(reg *registry.Registry, opts CleanupOptions) (CleanupResult, error)
 			continue
 		}
 		result.DeletedIDs = append(result.DeletedIDs, item.ID)
+		result.Candidates = append(result.Candidates, CleanupCandidate{
+			ID:        item.ID,
+			Kind:      item.Kind,
+			Target:    item.Target,
+			Status:    item.Status,
+			StartedAt: item.StartedAt,
+		})
 		if opts.DryRun {
 			continue
 		}

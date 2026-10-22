@@ -1,4 +1,4 @@
-import React, {useEffect, useState} from 'react'
+import React, {useEffect, useMemo, useState} from 'react'
 import {deleteNexusPlugin, fetchNexusPlugins, nexusDownloadURL, postNexusPluginZip, rebuildNexusIndex} from './api.js'
 import {readableAPIError} from './utils.js'
 
@@ -30,14 +30,25 @@ export default function NexusRepositoryManager({source, onChanged}) {
   const [file, setFile] = useState(null)
   const [fileInputKey, setFileInputKey] = useState(0)
   const [uploading, setUploading] = useState(false)
+  const [uploadProgress, setUploadProgress] = useState(null)
   const [duplicate, setDuplicate] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
   const [rebuildResult, setRebuildResult] = useState(null)
   const [deletingKey, setDeletingKey] = useState('')
+  const [pluginSearch, setPluginSearch] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
 
   const ready = Boolean(source?.ready)
+  const filteredPlugins = useMemo(() => {
+    const keyword = pluginSearch.trim().toLowerCase()
+    if (!keyword) return plugins
+    return plugins.filter(item => [item.id, item.name, item.version, item.description]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+      .includes(keyword))
+  }, [plugins, pluginSearch])
 
   useEffect(() => {
     setPlugins([])
@@ -74,11 +85,14 @@ export default function NexusRepositoryManager({source, onChanged}) {
       return
     }
     setUploading(true)
+    setUploadProgress(0)
     setError('')
     setDuplicate(false)
     setMessage(replace ? '正在覆盖 Nexus 插件包...' : '正在上传插件到 Nexus...')
     try {
-      const body = await postNexusPluginZip(source.id, file, replace)
+      const body = await postNexusPluginZip(source.id, file, replace, progress => {
+        if (progress.total > 0) setUploadProgress(Math.round(progress.loaded / progress.total * 100))
+      })
       const data = body.data || {}
       setMessage(`插件 ${data.plugin_id || ''}@${data.version || ''} 已${body.status === 'replaced' ? '覆盖' : '上传'}到 Nexus（${formatBytes(data.size)}）。`)
       setFile(null)
@@ -96,6 +110,7 @@ export default function NexusRepositoryManager({source, onChanged}) {
       }
     } finally {
       setUploading(false)
+      setUploadProgress(null)
     }
   }
 
@@ -195,6 +210,10 @@ export default function NexusRepositoryManager({source, onChanged}) {
         </div>
       </div>
       <div className="nexusIndexURL">{indexInfo.index_url || source.index_url}</div>
+      <div className="pluginInstalledToolbar">
+        <input value={pluginSearch} onChange={event => setPluginSearch(event.target.value)} placeholder="搜索仓库插件名称、ID、版本..." aria-label="搜索仓库插件" />
+        <span className="marketHint">{pluginSearch.trim() ? `匹配 ${filteredPlugins.length} / ${plugins.length} 个插件版本` : `共 ${plugins.length} 个插件版本`}</span>
+      </div>
       <div className="nexusUploadRow">
         <label>
           <span>上传插件 ZIP</span>
@@ -209,7 +228,9 @@ export default function NexusRepositoryManager({source, onChanged}) {
             }}
           />
         </label>
-        <button className="primary" type="button" disabled={!file || uploading} onClick={() => uploadPlugin(false)}>{uploading ? '上传中...' : '上传到 Nexus'}</button>
+        <button className="primary" type="button" disabled={!file || uploading} onClick={() => uploadPlugin(false)}>
+          {uploading ? (uploadProgress === null ? '上传中...' : uploadProgress >= 100 ? '服务端处理中...' : `上传中 ${uploadProgress}%`) : '上传到 Nexus'}
+        </button>
         {duplicate && <button className="secondary" type="button" disabled={uploading} onClick={() => uploadPlugin(true)}>确认覆盖</button>}
       </div>
       <small className="marketHint">上传前会校验插件清单和工具配置；同名同版本插件需要确认后覆盖。插件市场页可直接安装这些插件。</small>
@@ -222,11 +243,14 @@ export default function NexusRepositoryManager({source, onChanged}) {
       {error && <div className="marketSourceError">{error}</div>}
       {message && <small className="nexusMessage">{message}</small>}
       <div className="nexusPluginList">
-        {plugins.map(pluginRow)}
+        {filteredPlugins.map(pluginRow)}
         {!pluginsLoading && plugins.length === 0 && (
           <div className="empty small">
             {indexInfo.index_exists ? '仓库索引中还没有插件，上传一个 ZIP 或点击“重建索引”即可。' : '仓库中还没有索引，上传插件或点击“重建索引”后自动创建。'}
           </div>
+        )}
+        {!pluginsLoading && plugins.length > 0 && filteredPlugins.length === 0 && (
+          <div className="empty small">没有匹配的仓库插件。</div>
         )}
       </div>
     </section>

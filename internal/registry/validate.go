@@ -66,6 +66,9 @@ func (r *Registry) ValidateWorkflow(wf *config.WorkflowConfig) error {
 }
 
 func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType string, nodes map[string]config.WorkflowNode) error {
+	if nodeType != config.WorkflowNodeTypeHTTP && hasHTTPConfig(node.HTTP) {
+		return fmt.Errorf("节点 %s 的类型 %s 不能配置 http", node.ID, nodeType)
+	}
 	switch nodeType {
 	case config.WorkflowNodeTypeTool:
 		if node.Tool == "" {
@@ -220,6 +223,25 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		if node.Loop.MaxIterations < 1 || node.Loop.MaxIterations > 20 {
 			return fmt.Errorf("循环节点 %s 的 loop.max_iterations 必须在 1..20 之间", node.ID)
 		}
+	case config.WorkflowNodeTypeHTTP:
+		if node.Tool != "" {
+			return fmt.Errorf("HTTP 节点 %s 不能配置 tool", node.ID)
+		}
+		if node.Condition.Input != "" || len(node.Condition.Cases) > 0 || node.Condition.DefaultCase != "" {
+			return fmt.Errorf("HTTP 节点 %s 不能配置 condition", node.ID)
+		}
+		if hasLoopConfig(node.Loop) {
+			return fmt.Errorf("HTTP 节点 %s 不能配置 loop", node.ID)
+		}
+		if hasUploadConfig(node.Upload) {
+			return fmt.Errorf("HTTP 节点 %s 不能配置 upload", node.ID)
+		}
+		if hasExtractConfig(node.Extract) {
+			return fmt.Errorf("HTTP 节点 %s 不能配置 extract_config", node.ID)
+		}
+		if _, err := config.ValidateHTTPConfig(node.ID, node.HTTP); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("节点 %s 使用未知类型: %s", node.ID, nodeType)
 	}
@@ -229,8 +251,12 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 func validateWorkflowConfigFiles(wf *config.WorkflowConfig) error {
 	seen := map[string]bool{}
 	for _, entry := range wf.ConfigFiles {
-		if entry.Scope != "" && entry.Scope != config.ConfigFileScopePlugin {
-			return fmt.Errorf("工作流配置文件 %s 只支持 plugin scope", entry.ID)
+		scope := strings.TrimSpace(entry.Scope)
+		if scope == "" {
+			scope = config.ConfigFileScopePlugin
+		}
+		if scope != config.ConfigFileScopePlugin && scope != config.ConfigFileScopeHostAbsolute {
+			return fmt.Errorf("工作流配置文件 %s 的 scope 只支持 plugin 或 host_absolute", entry.ID)
 		}
 		if entry.Access != "" && entry.Access != config.ConfigFileAccessRead && entry.Access != config.ConfigFileAccessReadWrite {
 			return fmt.Errorf("工作流配置文件 %s access 只支持 read 或 read_write", entry.ID)
@@ -245,8 +271,15 @@ func validateWorkflowConfigFiles(wf *config.WorkflowConfig) error {
 		if err := validateWorkflowRelativePath(entry.Path); err != nil {
 			return fmt.Errorf("工作流配置文件 %s 的 path 不安全: %w", entry.ID, err)
 		}
-		if strings.TrimSpace(entry.ConfigDir) != "" && strings.TrimSpace(entry.ConfigDir) != "." {
-			if err := validateWorkflowRelativePath(entry.ConfigDir); err != nil {
+		configDir := strings.TrimSpace(entry.ConfigDir)
+		if scope == config.ConfigFileScopeHostAbsolute {
+			if !filepath.IsAbs(configDir) {
+				return fmt.Errorf("工作流配置文件 %s 的 host_absolute config_dir 必须是绝对目录", entry.ID)
+			}
+			continue
+		}
+		if configDir != "" && configDir != "." {
+			if err := validateWorkflowRelativePath(configDir); err != nil {
 				return fmt.Errorf("工作流配置文件 %s 的 config_dir 不安全: %w", entry.ID, err)
 			}
 		}
@@ -343,7 +376,14 @@ func effectiveNodeType(node config.WorkflowNode) string {
 	if hasExtractConfig(node.Extract) {
 		return config.WorkflowNodeTypeExtractConfig
 	}
+	if hasHTTPConfig(node.HTTP) {
+		return config.WorkflowNodeTypeHTTP
+	}
 	return ""
+}
+
+func hasHTTPConfig(item config.WorkflowHTTP) bool {
+	return strings.TrimSpace(item.URL) != "" || strings.TrimSpace(item.Method) != "" || len(item.Headers) > 0 || strings.TrimSpace(item.Body) != "" || strings.TrimSpace(item.SaveResponse) != "" || len(item.ExpectStatus) > 0
 }
 
 func hasLoopConfig(loop config.WorkflowLoop) bool {

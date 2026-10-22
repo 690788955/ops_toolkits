@@ -386,6 +386,28 @@ describe('workflow node run status', () => {
     expect(node.data.extract_config.target_path).toBe('everisk-deployment/config.yaml')
   })
 
+  it('loads http_request workflow nodes as control nodes', () => {
+    const node = workflowNodeToFlowNode({
+      id: 'call_api',
+      type: 'http_request',
+      name: '调用接口',
+      http: {
+        method: 'post',
+        url: 'https://api.example.com/deploy',
+        headers: {'X-Token': 'abc'},
+        body_type: 'json',
+        body: '{"env":"prod"}',
+        expect_status: [201]
+      }
+    }, 0, () => {})
+
+    expect(node.type).toBe('controlNode')
+    expect(node.data.controlType).toBe('http_request')
+    expect(node.data.http.method).toBe('POST')
+    expect(node.data.http.headers).toEqual([{name: 'X-Token', value: 'abc'}])
+    expect(node.data.http.expect_status).toEqual([201])
+  })
+
   it('filters the workflow loader by the active category', async () => {
     const workflows = [
       {id: 'docker-flow', name: 'Docker 巡检', category: 'docker', parameters: [], nodes: [], edges: []},

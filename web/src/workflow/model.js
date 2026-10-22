@@ -27,6 +27,129 @@ export function normalizeUploadConfig(upload) {
   };
 }
 
+export const httpMethods = [
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "HEAD",
+  "OPTIONS",
+];
+
+export const httpBodyTypes = [
+  { value: "none", label: "无请求体" },
+  { value: "json", label: "JSON" },
+  { value: "text", label: "纯文本" },
+  { value: "form", label: "表单（已编码）" },
+];
+
+export function defaultHttpRequest() {
+  return {
+    method: "GET",
+    url: "",
+    headers: [],
+    body_type: "none",
+    body: "",
+    expect_status: [],
+    save_response: "",
+    fail_on_error: true,
+    timeout: "",
+  };
+}
+
+export function normalizeHttpMethod(value) {
+  const method = String(value || "").trim().toUpperCase();
+  return httpMethods.includes(method) ? method : "GET";
+}
+
+export function normalizeHttpBodyType(value, body = "") {
+  const bodyType = String(value || "").trim().toLowerCase();
+  if (httpBodyTypes.some((item) => item.value === bodyType)) return bodyType;
+  return String(body || "").trim() ? "json" : "none";
+}
+
+// 兼容 "200,201"、[200, 201] 与数字三种写法，范围限定 100..599 且去重。
+export function normalizeHTTPStatusList(value) {
+  const raw = Array.isArray(value)
+    ? value
+    : String(value || "").split(/[,，\s]+/);
+  const out = [];
+  raw.forEach((item) => {
+    const code = Number.parseInt(String(item).trim(), 10);
+    if (!Number.isFinite(code) || code < 100 || code > 599) return;
+    if (!out.includes(code)) out.push(code);
+  });
+  return out;
+}
+
+export function formatHTTPStatusList(list) {
+  return (list || []).join(", ");
+}
+
+export function normalizeHttpRequestConfig(http) {
+  const source = http && typeof http === "object" ? http : {};
+  const rawHeaders = source.headers;
+  const headerRows = Array.isArray(rawHeaders)
+    ? rawHeaders
+    : rawHeaders && typeof rawHeaders === "object"
+      ? Object.entries(rawHeaders).map(([name, value]) => ({ name, value }))
+      : [];
+  const body = String(source.body || "");
+  return {
+    method: normalizeHttpMethod(source.method),
+    url: String(source.url || "").trim(),
+    headers: headerRows
+      .map((item) => ({
+        name: String(item?.name ?? item?.key ?? "").trim(),
+        value: String(item?.value ?? ""),
+      }))
+      .filter((item) => item.name || item.value),
+    body_type: normalizeHttpBodyType(source.body_type || source.bodyType, body),
+    body,
+    expect_status: normalizeHTTPStatusList(
+      source.expect_status || source.expectStatus,
+    ),
+    save_response: String(
+      source.save_response || source.saveResponse || "",
+    ).trim(),
+    fail_on_error: source.fail_on_error !== false,
+    timeout: String(source.timeout || "").trim(),
+  };
+}
+
+export function serializeHttpRequest(http) {
+  const normalized = normalizeHttpRequestConfig(http);
+  const out = {
+    method: normalized.method,
+    url: normalized.url,
+  };
+  const headers = {};
+  (normalized.headers || []).forEach((item) => {
+    if (item.name) headers[item.name] = item.value;
+  });
+  if (Object.keys(headers).length > 0) out.headers = headers;
+  if (normalized.body_type !== "none") {
+    out.body_type = normalized.body_type;
+    out.body = normalized.body;
+  }
+  if (normalized.expect_status.length > 0)
+    out.expect_status = normalized.expect_status;
+  if (normalized.fail_on_error === false) out.fail_on_error = false;
+  if (normalized.save_response) out.save_response = normalized.save_response;
+  if (normalized.timeout) out.timeout = normalized.timeout;
+  return out;
+}
+
+// 返回空字符串表示 URL 合法；模板 URL 在运行期才能校验，这里只做静态检查。
+export function httpUrlError(value) {
+  const url = String(value || "").trim();
+  if (!url) return "请输入请求 URL。";
+  if (url.includes("{{")) return "";
+  if (!/^https?:\/\//i.test(url)) return "URL 只支持 http:// 或 https://。";
+  return "";
+}
+
 export function defaultExtractConfig() {
   return {
     source_type: "file",
@@ -326,6 +449,10 @@ export function buildWorkflowDraft(
           draftNode.extract_config = serializeExtractConfig(
             node.data.extract_config || defaultExtractConfig(),
           );
+        if (node.data.controlType === "http_request")
+          draftNode.http = serializeHttpRequest(
+            node.data.http || defaultHttpRequest(),
+          );
         return draftNode;
       }
       return {
@@ -378,7 +505,8 @@ function isLinearFlowNode(node) {
     node?.type === "controlNode" &&
     (node.data?.controlType === "loop" ||
       node.data?.controlType === "upload" ||
-      node.data?.controlType === "extract_config")
+      node.data?.controlType === "extract_config" ||
+      node.data?.controlType === "http_request")
   );
 }
 
@@ -507,7 +635,7 @@ export function autoLayoutNodeSize(node) {
     ).length;
     return { width: 440, height: Math.max(156, 72 + branchCount * 42) };
   }
-  if (node.type === "controlNode") return { width: 250, height: 82 };
+  if (node.type === "controlNode") return { width: 250, height: 104 };
   return { width: 210, height: 74 };
 }
 
@@ -670,6 +798,46 @@ export function validateControlDraft(nodes, edges, tools = []) {
             );
         }
       }
+      if (node.data.controlType === "http_request") {
+        const http = normalizeHttpRequestConfig(node.data.http || {});
+        const urlError = httpUrlError(http.url);
+        if (urlError) errors.push(`HTTP 节点 ${node.id}：${urlError}`);
+        if (
+          http.body_type !== "none" &&
+          !String(http.body || "").trim()
+        )
+          errors.push(
+            `HTTP 节点 ${node.id} 选择了 ${http.body_type} 请求体，但内容为空。`,
+          );
+        if (http.body_type !== "none" && http.method === "GET")
+          errors.push(
+            `HTTP 节点 ${node.id} 的 GET 请求不能配置请求体，请改用 POST/PUT/PATCH。`,
+          );
+        (http.headers || []).forEach((item, index) => {
+          if (!item.name)
+            errors.push(
+              `HTTP 节点 ${node.id} 的第 ${index + 1} 个 Header 缺少名称。`,
+            );
+          if (/[\r\n]/.test(item.name) || /[\r\n]/.test(item.value))
+            errors.push(
+              `HTTP 节点 ${node.id} 的第 ${index + 1} 个 Header 不能包含换行。`,
+            );
+        });
+        if (http.save_response) {
+          const saved = normalizeRelativeConfigPath(
+            http.save_response,
+            "响应保存路径",
+          );
+          if (saved.error)
+            errors.push(
+              `HTTP 节点 ${node.id} 的响应保存路径无效：${saved.error}`,
+            );
+        }
+        if (http.timeout && !/^\d+(\.\d+)?(ms|s|m|h)$/.test(http.timeout))
+          errors.push(
+            `HTTP 节点 ${node.id} 的超时时间格式无效，例如 30s、2m。`,
+          );
+      }
       if (
         node.data.controlType === "parallel" &&
         !edges.some((edge) => edge.source === node.id)
@@ -817,6 +985,20 @@ export function buildMappingSources(
       label: `${nodeID} / 错误输出 stderr`,
       value: `{{ .steps.${nodeID}.stderr }}`,
     });
+    if (node.type === "controlNode" && node.data?.controlType === "http_request") {
+      sources.push({
+        label: `${nodeID} / HTTP 状态码`,
+        value: `{{ .steps.${nodeID}.http.status }}`,
+      });
+      sources.push({
+        label: `${nodeID} / HTTP 耗时（毫秒）`,
+        value: `{{ .steps.${nodeID}.http.duration_ms }}`,
+      });
+      sources.push({
+        label: `${nodeID} / 响应保存路径`,
+        value: `{{ .steps.${nodeID}.http.saved_path }}`,
+      });
+    }
     if (node.type === "controlNode" && node.data?.controlType === "upload") {
       sources.push({
         label: `${nodeID} / 首个上传文件名`,

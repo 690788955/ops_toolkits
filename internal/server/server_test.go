@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -3114,6 +3115,28 @@ func TestRunsCleanupAPIKeepsNewestRuns(t *testing.T) {
 	}
 }
 
+func TestRunsCleanupDryRunReturnsCandidates(t *testing.T) {
+	reg := testRegistry(t)
+	writeRunFixture(t, reg.BaseDir, "run-old", `{"id":"run-old","kind":"tool","target":"demo.old","status":"succeeded","started_at":"2026-06-14T09:00:00Z"}`)
+	writeRunFixture(t, reg.BaseDir, "run-new", `{"id":"run-new","kind":"workflow","target":"demo.new","status":"succeeded","started_at":"2026-06-14T11:00:00Z"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/cleanup", strings.NewReader(`{"keep":1,"dry_run":true}`))
+	res := httptest.NewRecorder()
+
+	NewHandler(reg).ServeHTTP(res, req)
+
+	body := res.Body.String()
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, body)
+	}
+	if !strings.Contains(body, `"dry_run":true`) || !strings.Contains(body, `"candidates"`) || !strings.Contains(body, `"id":"run-old"`) || !strings.Contains(body, `"target":"demo.old"`) || !strings.Contains(body, `"started_at":"2026-06-14T09:00:00Z"`) {
+		t.Fatalf("response missing cleanup candidates: %s", body)
+	}
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "runs", "logs", "run-old", "result.json")); err != nil {
+		t.Fatalf("dry run should keep old run: %v", err)
+	}
+}
+
 func TestRunSupportZipAPI(t *testing.T) {
 	reg := testRegistry(t)
 	writeRunFixture(t, reg.BaseDir, "run-1", `{"id":"run-1","kind":"tool","target":"demo.hello","status":"failed","params":{"api.token":"secret"},"error":"boom"}`)
@@ -3319,6 +3342,319 @@ func TestWorkflowConfigFilesUseRealMountedUploadPath(t *testing.T) {
 	if got := string(data); got != "updated=true\n" {
 		t.Fatalf("upload config content = %q", got)
 	}
+}
+
+func TestWorkflowConfigFilesBindExistingPath(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	saveReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.bindexisting/save", strings.NewReader(`{"workflow":{"id":"demo.bindexisting","name":"绑定已有配置","category":"demo","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`))
+	saveRes := httptest.NewRecorder()
+	handler.ServeHTTP(saveRes, saveReq)
+	if saveRes.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", saveRes.Code, saveRes.Body.String())
+	}
+	scannedPath := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "config", "workflows", "demo.bindexisting", "local.conf")
+	if err := os.MkdirAll(filepath.Dir(scannedPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(scannedPath, []byte("local=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	boundPath := filepath.Join(reg.BaseDir, "runs", "uploads", "upload-1", "app.conf")
+	if err := os.MkdirAll(filepath.Dir(boundPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(boundPath, []byte("initial=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bindRes := httptest.NewRecorder()
+	handler.ServeHTTP(bindRes, httptest.NewRequest(http.MethodPost, "/api/workflows/demo.bindexisting/files", strings.NewReader(`{"path":"runs/uploads/upload-1/app.conf","label":"应用配置"}`)))
+	if bindRes.Code != http.StatusOK || !strings.Contains(bindRes.Body.String(), `"id":"runs/uploads/upload-1/app.conf"`) || !strings.Contains(bindRes.Body.String(), `"label":"应用配置"`) || !strings.Contains(bindRes.Body.String(), `"exists":true`) || !strings.Contains(bindRes.Body.String(), `"managed":false`) {
+		t.Fatalf("bind status = %d, body = %s", bindRes.Code, bindRes.Body.String())
+	}
+
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/workflows/demo.bindexisting/files", nil))
+	listBody := listRes.Body.String()
+	if listRes.Code != http.StatusOK || !strings.Contains(listBody, `"id":"local.conf"`) || !strings.Contains(listBody, `"id":"runs/uploads/upload-1/app.conf"`) {
+		t.Fatalf("list status = %d, body = %s", listRes.Code, listBody)
+	}
+
+	putRes := httptest.NewRecorder()
+	handler.ServeHTTP(putRes, httptest.NewRequest(http.MethodPut, "/api/workflows/demo.bindexisting/files/runs/uploads/upload-1/app.conf", strings.NewReader(`{"content":"updated=true\n"}`)))
+	if putRes.Code != http.StatusOK {
+		t.Fatalf("put status = %d, body = %s", putRes.Code, putRes.Body.String())
+	}
+	data, err := os.ReadFile(boundPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "updated=true\n" {
+		t.Fatalf("bound config content = %q", got)
+	}
+
+	workflowData, err := os.ReadFile(filepath.Join(reg.BaseDir, "plugins", "user.workflows", "workflows", "demo.bindexisting.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflowData)
+	if !strings.Contains(text, "path: runs/uploads/upload-1/app.conf") || !strings.Contains(text, "config_dir: .") || !strings.Contains(text, "path: plugins/user.workflows/config/workflows/demo.bindexisting/local.conf") {
+		t.Fatalf("workflow config declarations missing canonical paths: %s", text)
+	}
+
+	deleteRes := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRes, httptest.NewRequest(http.MethodDelete, "/api/workflows/demo.bindexisting/files/runs/uploads/upload-1/app.conf", nil))
+	if deleteRes.Code != http.StatusOK || !strings.Contains(deleteRes.Body.String(), `"file_removed":false`) {
+		t.Fatalf("unbind status = %d, body = %s", deleteRes.Code, deleteRes.Body.String())
+	}
+	if _, err := os.Stat(boundPath); err != nil {
+		t.Fatalf("externally bound file should be kept after unbind: %v", err)
+	}
+}
+
+func TestWorkflowConfigFileUploadAndBind(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	saveReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.uploadbind/save", strings.NewReader(`{"workflow":{"id":"demo.uploadbind","name":"上传绑定","category":"demo","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`))
+	saveRes := httptest.NewRecorder()
+	handler.ServeHTTP(saveRes, saveReq)
+	if saveRes.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", saveRes.Code, saveRes.Body.String())
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("subdir", "release"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("label", "部署配置"); err != nil {
+		t.Fatal(err)
+	}
+	part, err := writer.CreateFormFile("file", "deployment.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("replicas: 2\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	uploadReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.uploadbind/files/upload", &body)
+	uploadReq.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadRes := httptest.NewRecorder()
+	handler.ServeHTTP(uploadRes, uploadReq)
+	if uploadRes.Code != http.StatusOK || !strings.Contains(uploadRes.Body.String(), `"id":"release/deployment.yaml"`) || !strings.Contains(uploadRes.Body.String(), `"label":"部署配置"`) || !strings.Contains(uploadRes.Body.String(), `"managed":true`) {
+		t.Fatalf("upload status = %d, body = %s", uploadRes.Code, uploadRes.Body.String())
+	}
+
+	targetPath := filepath.Join(reg.BaseDir, "plugins", "user.workflows", "config", "workflows", "demo.uploadbind", "release", "deployment.yaml")
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "replicas: 2\n" {
+		t.Fatalf("uploaded config content = %q", got)
+	}
+
+	listRes := httptest.NewRecorder()
+	handler.ServeHTTP(listRes, httptest.NewRequest(http.MethodGet, "/api/workflows/demo.uploadbind/files", nil))
+	listBody := listRes.Body.String()
+	if listRes.Code != http.StatusOK || !strings.Contains(listBody, `"path":"plugins/user.workflows/config/workflows/demo.uploadbind/release/deployment.yaml"`) || !strings.Contains(listBody, `"exists":true`) {
+		t.Fatalf("list status = %d, body = %s", listRes.Code, listBody)
+	}
+
+	getRes := httptest.NewRecorder()
+	handler.ServeHTTP(getRes, httptest.NewRequest(http.MethodGet, "/api/workflows/demo.uploadbind/files/release/deployment.yaml", nil))
+	if getRes.Code != http.StatusOK || !strings.Contains(getRes.Body.String(), "replicas: 2") {
+		t.Fatalf("get status = %d, body = %s", getRes.Code, getRes.Body.String())
+	}
+
+	workflowData, err := os.ReadFile(filepath.Join(reg.BaseDir, "plugins", "user.workflows", "workflows", "demo.uploadbind.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflowData)
+	if !strings.Contains(text, "path: plugins/user.workflows/config/workflows/demo.uploadbind/release/deployment.yaml") || !strings.Contains(text, "config_dir: .") {
+		t.Fatalf("workflow config declaration missing uploaded path: %s", text)
+	}
+
+	deleteRes := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRes, httptest.NewRequest(http.MethodDelete, "/api/workflows/demo.uploadbind/files/release/deployment.yaml", nil))
+	if deleteRes.Code != http.StatusOK || !strings.Contains(deleteRes.Body.String(), `"file_removed":true`) {
+		t.Fatalf("delete status = %d, body = %s", deleteRes.Code, deleteRes.Body.String())
+	}
+	if _, err := os.Stat(targetPath); !os.IsNotExist(err) {
+		t.Fatalf("managed workflow config should be removed, stat err = %v", err)
+	}
+}
+
+func TestWorkflowConfigBindRejectsEscapingPaths(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	saveReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.bindunsafe/save", strings.NewReader(`{"workflow":{"id":"demo.bindunsafe","name":"安全绑定","category":"demo","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`))
+	saveRes := httptest.NewRecorder()
+	handler.ServeHTTP(saveRes, saveReq)
+	if saveRes.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", saveRes.Code, saveRes.Body.String())
+	}
+
+	bindRes := httptest.NewRecorder()
+	handler.ServeHTTP(bindRes, httptest.NewRequest(http.MethodPost, "/api/workflows/demo.bindunsafe/files", strings.NewReader(`{"path":"../secret.conf"}`)))
+	if bindRes.Code != http.StatusBadRequest {
+		t.Fatalf("escape bind status = %d, body = %s", bindRes.Code, bindRes.Body.String())
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("subdir", "../escape"); err != nil {
+		t.Fatal(err)
+	}
+	part, err := writer.CreateFormFile("file", "escape.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("escape=true\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	uploadReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.bindunsafe/files/upload", &body)
+	uploadReq.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadRes := httptest.NewRecorder()
+	handler.ServeHTTP(uploadRes, uploadReq)
+	if uploadRes.Code != http.StatusBadRequest {
+		t.Fatalf("escape upload status = %d, body = %s", uploadRes.Code, uploadRes.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "plugins", "user.workflows", "config", "escape.conf")); !os.IsNotExist(err) {
+		t.Fatalf("upload escaped workflow config dir: %v", err)
+	}
+}
+
+func TestWorkflowConfigBindHostAbsolutePath(t *testing.T) {
+	reg := testRegistry(t)
+	handler := NewHandler(reg)
+	saveReq := httptest.NewRequest(http.MethodPost, "/api/workflows/demo.hostbind/save", strings.NewReader(`{"workflow":{"id":"demo.hostbind","name":"宿主配置绑定","category":"demo","nodes":[{"id":"first","tool":"demo.hello"}],"edges":[]}}`))
+	saveRes := httptest.NewRecorder()
+	handler.ServeHTTP(saveRes, saveReq)
+	if saveRes.Code != http.StatusOK {
+		t.Fatalf("save status = %d, body = %s", saveRes.Code, saveRes.Body.String())
+	}
+
+	hostDir := t.TempDir()
+	hostPath := filepath.Join(hostDir, "nginx.conf")
+	if err := os.WriteFile(hostPath, []byte("worker_processes 1;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]string{"path": hostPath, "label": "Nginx 配置"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rejectedRes := httptest.NewRecorder()
+	handler.ServeHTTP(rejectedRes, httptest.NewRequest(http.MethodPost, "/api/workflows/demo.hostbind/files", bytes.NewReader(payload)))
+	if rejectedRes.Code != http.StatusBadRequest || !strings.Contains(rejectedRes.Body.String(), "host_config_files.allowed_dirs") {
+		t.Fatalf("unconfigured whitelist bind status = %d, body = %s", rejectedRes.Code, rejectedRes.Body.String())
+	}
+
+	reg.Root.HostConfigFiles.AllowedDirs = []string{hostDir}
+	outsideDir := t.TempDir()
+	outsidePath := filepath.Join(outsideDir, "outside.conf")
+	if err := os.WriteFile(outsidePath, []byte("outside=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outsidePayload, err := json.Marshal(map[string]string{"path": outsidePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outsideRes := httptest.NewRecorder()
+	handler.ServeHTTP(outsideRes, httptest.NewRequest(http.MethodPost, "/api/workflows/demo.hostbind/files", bytes.NewReader(outsidePayload)))
+	if outsideRes.Code != http.StatusBadRequest || !strings.Contains(outsideRes.Body.String(), "白名单") {
+		t.Fatalf("outside whitelist bind status = %d, body = %s", outsideRes.Code, outsideRes.Body.String())
+	}
+
+	bindRes := httptest.NewRecorder()
+	handler.ServeHTTP(bindRes, httptest.NewRequest(http.MethodPost, "/api/workflows/demo.hostbind/files", bytes.NewReader(payload)))
+	if bindRes.Code != http.StatusOK {
+		t.Fatalf("bind status = %d, body = %s", bindRes.Code, bindRes.Body.String())
+	}
+	var bindBody struct {
+		Data struct {
+			File struct {
+				ID        string `json:"id"`
+				Scope     string `json:"scope"`
+				ConfigDir string `json:"config_dir"`
+				Path      string `json:"path"`
+				Managed   bool   `json:"managed"`
+			} `json:"file"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(bindRes.Body.Bytes(), &bindBody); err != nil {
+		t.Fatal(err)
+	}
+	file := bindBody.Data.File
+	expectedDir, err := filepath.EvalSymlinks(hostDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Scope != config.ConfigFileScopeHostAbsolute || file.Path != "nginx.conf" || !sameWorkflowConfigPath(file.ConfigDir, expectedDir) || file.Managed {
+		t.Fatalf("unexpected host binding: %+v", file)
+	}
+	if file.ID == "" {
+		t.Fatalf("host binding ID should not be empty")
+	}
+
+	fileURL := workflowFileAPIURL("demo.hostbind", file.ID)
+	getRes := httptest.NewRecorder()
+	handler.ServeHTTP(getRes, httptest.NewRequest(http.MethodGet, fileURL, nil))
+	if getRes.Code != http.StatusOK || !strings.Contains(getRes.Body.String(), "worker_processes 1;") {
+		t.Fatalf("get status = %d, body = %s", getRes.Code, getRes.Body.String())
+	}
+
+	putRes := httptest.NewRecorder()
+	handler.ServeHTTP(putRes, httptest.NewRequest(http.MethodPut, fileURL, strings.NewReader(`{"content":"worker_processes 2;\n"}`)))
+	if putRes.Code != http.StatusOK {
+		t.Fatalf("put status = %d, body = %s", putRes.Code, putRes.Body.String())
+	}
+	data, err := os.ReadFile(hostPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "worker_processes 2;\n" {
+		t.Fatalf("host config content = %q", got)
+	}
+
+	workflowData, err := os.ReadFile(filepath.Join(reg.BaseDir, "plugins", "user.workflows", "workflows", "demo.hostbind.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflowData)
+	if !strings.Contains(text, "scope: host_absolute") || !strings.Contains(text, "path: nginx.conf") {
+		t.Fatalf("workflow config declaration missing host_absolute entry: %s", text)
+	}
+
+	reg.Root.HostConfigFiles.AllowedDirs = nil
+	deleteRes := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRes, httptest.NewRequest(http.MethodDelete, fileURL, nil))
+	if deleteRes.Code != http.StatusOK || !strings.Contains(deleteRes.Body.String(), `"file_removed":false`) {
+		t.Fatalf("unbind status = %d, body = %s", deleteRes.Code, deleteRes.Body.String())
+	}
+	if _, err := os.Stat(hostPath); err != nil {
+		t.Fatalf("host-bound file should be kept after unbind: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(reg.BaseDir, "plugins", "user.workflows", "config", "workflows", "demo.hostbind")); !os.IsNotExist(err) {
+		t.Fatalf("unbind should not create managed workflow files, stat err = %v", err)
+	}
+}
+
+func workflowFileAPIURL(workflowID, fileID string) string {
+	segments := strings.Split(fileID, "/")
+	for index, segment := range segments {
+		segments[index] = url.PathEscape(segment)
+	}
+	return "/api/workflows/" + url.PathEscape(workflowID) + "/files/" + strings.Join(segments, "/")
 }
 
 func TestWorkflowConfigFilesWithDeclarationsHideScannedFiles(t *testing.T) {

@@ -1,7 +1,8 @@
-import React, {useEffect, useState} from 'react'
+import React, {useEffect, useRef, useState} from 'react'
 import NexusRepositoryManager from './NexusPanel.jsx'
 import {createMarketSource, deleteMarketSource, fetchMarketSources, testMarketSource, updateMarketSource} from './api.js'
 import {readableAPIError} from './utils.js'
+import {useModalEscape} from './useModalEscape.js'
 
 const typeLabels = {
   local: '本地市场',
@@ -53,6 +54,10 @@ function formFromSource(source) {
   }
 }
 
+function formSnapshot(form) {
+  return JSON.stringify(payloadFromForm(form))
+}
+
 function payloadFromForm(form) {
   return {
     id: form.id.trim(),
@@ -71,35 +76,52 @@ function payloadFromForm(form) {
 }
 
 export function MarketSourcesModal({onClose, onChanged}) {
+  const [dirty, setDirty] = useState(false)
+  const modalRef = useRef(null)
+
+  function requestClose() {
+    if (dirty && !window.confirm('市场来源表单还有未保存的修改，确认关闭并丢弃？')) return
+    onClose()
+  }
+
+  useModalEscape(requestClose, modalRef)
+
   return (
-    <div className="modalBackdrop modalBackdropNested" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-      <div className="modal marketSourcesModal" role="dialog" aria-modal="true" aria-labelledby="market-sources-modal-title">
+    <div className="modalBackdrop modalBackdropNested" onMouseDown={event => { if (event.target === event.currentTarget) requestClose() }}>
+      <div className="modal marketSourcesModal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="market-sources-modal-title">
         <div className="modalHeader">
           <div>
             <h3 id="market-sources-modal-title">市场来源配置</h3>
             <p>维护本地、远程与 Nexus 来源，Nexus 支持匿名或账号密码访问。</p>
           </div>
-          <button className="modalClose" type="button" onClick={onClose} aria-label="关闭">×</button>
+          <button className="modalClose" type="button" onClick={requestClose} aria-label="关闭">×</button>
         </div>
-        <MarketSourcesPanel onChanged={onChanged} />
+        <MarketSourcesPanel onChanged={onChanged} onDirtyChange={setDirty} />
       </div>
     </div>
   )
 }
 
-export default function MarketSourcesPanel({onChanged}) {
+export default function MarketSourcesPanel({onChanged, onDirtyChange}) {
   const [sources, setSources] = useState([])
   const [configPath, setConfigPath] = useState('')
   const [loading, setLoading] = useState(true)
   const [view, setView] = useState('list')
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState(emptyForm)
+  const [baseline, setBaseline] = useState(null)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState(null)
   const [deletingID, setDeletingID] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+
+  const formDirty = view === 'editor' && baseline !== null && formSnapshot(form) !== baseline
+
+  useEffect(() => {
+    onDirtyChange?.(formDirty)
+  }, [formDirty, onDirtyChange])
 
   useEffect(() => {
     loadSources()
@@ -139,27 +161,29 @@ export default function MarketSourcesPanel({onChanged}) {
     }))
   }
 
-  function startCreate() {
-    setEditing(null)
-    setForm({...emptyForm, name: defaultName(emptyForm.type)})
+  function openEditor(nextForm, source) {
+    setEditing(source)
+    setForm(nextForm)
+    setBaseline(formSnapshot(nextForm))
     setTestResult(null)
     setMessage('')
     setError('')
     setView('editor')
+  }
+
+  function startCreate() {
+    openEditor({...emptyForm, name: defaultName(emptyForm.type)}, null)
   }
 
   function startEdit(source) {
-    setEditing(source)
-    setForm(formFromSource(source))
-    setTestResult(null)
-    setMessage('')
-    setError('')
-    setView('editor')
+    openEditor(formFromSource(source), source)
   }
 
   function backToList() {
+    if (formDirty && !window.confirm('当前市场来源有未保存的修改，确认返回列表并丢弃？')) return
     setView('list')
     setEditing(null)
+    setBaseline(null)
     setTestResult(null)
     setError('')
     setMessage('')
@@ -187,8 +211,10 @@ export default function MarketSourcesPanel({onChanged}) {
       const payload = payloadFromForm(form)
       const body = editing ? await updateMarketSource(payload) : await createMarketSource(payload)
       const data = body.data || {}
+      const savedForm = formFromSource(data)
       setEditing(data)
-      setForm(formFromSource(data))
+      setForm(savedForm)
+      setBaseline(formSnapshot(savedForm))
       setMessage(`市场来源 ${data.name || data.id} 已保存。`)
       await loadSources()
       onChanged?.()
@@ -337,7 +363,9 @@ export default function MarketSourcesPanel({onChanged}) {
                 <strong>{editing ? '编辑市场来源' : '新增市场来源'}</strong>
                 <span>{typeDescriptions[form.type]}</span>
               </div>
-              <span className={editing?.ready ? 'marketBadge installed' : 'marketBadge'}>{editing?.ready ? '已保存' : '未保存'}</span>
+              <span className={editing?.ready && !formDirty ? 'marketBadge installed' : 'marketBadge'}>
+                {formDirty ? '有未保存修改' : editing?.ready ? '已保存' : '未保存'}
+              </span>
             </div>
             <div className="nexusConfigGrid">
               <label>

@@ -40,6 +40,26 @@ export async function deleteJSON(path) {
   return readJSONResponse(res)
 }
 
+export function fetchConfigVersions() {
+  return fetchJSON('/api/config/global/versions/')
+}
+
+export function saveConfigVersion(payload) {
+  return postJSON('/api/config/global/versions/', payload)
+}
+
+export function fetchConfigVersion(version) {
+  return fetchJSON(`/api/config/global/versions/${encodeURIComponent(version)}`)
+}
+
+export function deleteConfigVersion(version) {
+  return deleteJSON(`/api/config/global/versions/${encodeURIComponent(version)}`)
+}
+
+export function setDefaultConfigVersion(version) {
+  return putJSON(`/api/config/global/versions/${encodeURIComponent(version)}/default`, {})
+}
+
 export function fetchMarket(refresh = false) {
   return fetchJSON(`/api/market${refresh ? '?refresh=1' : ''}`)
 }
@@ -83,11 +103,40 @@ export function fetchNexusPlugins(sourceID = '') {
   return fetchJSON(`/api/nexus/plugins${sourceQuery(sourceID)}`)
 }
 
-export async function postNexusPluginZip(sourceID, file, replace) {
+export async function postNexusPluginZip(sourceID, file, replace, onProgress) {
   const form = new FormData()
   form.append('file', file)
-  const res = await uploadFetch(`/api/nexus/upload${sourceQuery(sourceID, {replace: replace ? 'true' : ''})}`, form)
-  return readJSONResponse(res)
+  const path = `/api/nexus/upload${sourceQuery(sourceID, {replace: replace ? 'true' : ''})}`
+  if (!onProgress) {
+    const res = await uploadFetch(path, form)
+    return readJSONResponse(res)
+  }
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', path)
+    xhr.withCredentials = true
+    xhr.upload.onprogress = event => {
+      if (event.lengthComputable) onProgress({loaded: event.loaded, total: event.total})
+    }
+    xhr.onload = () => {
+      let body = {}
+      try {
+        body = JSON.parse(xhr.responseText || '{}')
+      } catch {
+        body = {error: xhr.statusText || '服务返回了非 JSON 响应'}
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(body)
+        return
+      }
+      const err = new Error(body.error || xhr.statusText || '上传失败')
+      err.status = xhr.status
+      err.body = body
+      reject(err)
+    }
+    xhr.onerror = () => reject(new Error('上传连接中断：文件可能超过平台或浏览器限制，或本地服务已断开。'))
+    xhr.send(form)
+  })
 }
 
 export function deleteNexusPlugin(sourceID, id, version) {
@@ -179,6 +228,18 @@ export async function postPlatformFile(file, targetDir = '') {
   appendUploadFiles(form, file)
   if (targetDir) form.append('target_dir', targetDir)
   const res = await uploadFetch('/api/files/upload', form)
+  return readJSONResponse(res)
+}
+
+export function bindWorkflowConfigPath(workflowID, payload) {
+  return postJSON(`/api/workflows/${encodeURIComponent(workflowID)}/files`, payload)
+}
+
+export async function uploadWorkflowConfigFile(workflowID, file, subdir = '') {
+  const form = new FormData()
+  form.append('file', file)
+  if (subdir) form.append('subdir', subdir)
+  const res = await uploadFetch(`/api/workflows/${encodeURIComponent(workflowID)}/files/upload`, form)
   return readJSONResponse(res)
 }
 

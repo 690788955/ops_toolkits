@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client'
 import '@xyflow/react/dist/style.css'
 import './styles.css'
 import * as yaml from 'js-yaml'
-import {deleteJSON, downloadUserWorkflowExport, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusShareTargets, fetchRunDetail, fetchRunSummary, postJSON, postMarketInstall, postPluginZip, putJSON, rescanPlugins} from './api.js'
+import {bindWorkflowConfigPath, deleteConfigVersion, deleteJSON, downloadUserWorkflowExport, fetchConfigVersion, fetchConfigVersions, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusShareTargets, fetchRunDetail, fetchRunSummary, postJSON, postMarketInstall, postPluginZip, putJSON, rescanPlugins, saveConfigVersion, setDefaultConfigVersion, uploadWorkflowConfigFile} from './api.js'
 import {buildTextDiff, countTextMatches, replaceTextDraft} from './configDiff.js'
 import {buildConfigItemCollections} from './configItems.js'
 import {filterEntries, readableAPIError, summarizeAPIResponse, tagsForEntries} from './utils.js'
@@ -13,15 +13,23 @@ import {normalizeLogFontSize} from './logUtils.js'
 import SshHostsModal, {sshHostStatusLabel, summarizeSshHosts} from './SshHostsModal.jsx'
 import PluginShareModal from './PluginShareModal.jsx'
 import {MarketSourcesModal} from './MarketSourcesPanel.jsx'
+import {useModalEscape} from './useModalEscape.js'
 
 const WorkflowEditor = React.lazy(() => import('./workflow/WorkflowEditor.jsx'))
 const LiveRunTerminal = React.lazy(() => import('./LiveRunTerminal.jsx'))
 const RunRecordCanvas = React.lazy(() => import('./workflow/RunRecordCanvas.jsx'))
 
+const APP_TABS = new Set(['tools', 'workflows', 'config', 'runs'])
+
+function activeTabFromHash() {
+  const tab = String(window.location.hash || '').replace(/^#/, '')
+  return APP_TABS.has(tab) ? tab : 'tools'
+}
+
 function App() {
   const [catalog, setCatalog] = useState(null)
   const [activeCategory, setActiveCategory] = useState('')
-  const [activeTab, setActiveTab] = useState('tools')
+  const [activeTab, setActiveTab] = useState(activeTabFromHash)
   const [workflowEditorMounted, setWorkflowEditorMounted] = useState(false)
   const [selected, setSelected] = useState(null)
   const [params, setParams] = useState({})
@@ -40,6 +48,7 @@ function App() {
   const [runHosts, setRunHosts] = useState([])
   const [runLocal, setRunLocal] = useState(true)
   const [resultExpanded, setResultExpanded] = useState(false)
+  const [cancellingToolRun, setCancellingToolRun] = useState(false)
   const runVersionRef = useRef(0)
 
   async function refreshCatalog(options = {}) {
@@ -104,6 +113,20 @@ function App() {
   useEffect(() => {
     if (activeTab === 'workflows') setWorkflowEditorMounted(true)
   }, [activeTab])
+
+  useEffect(() => {
+    const target = `#${activeTab}`
+    if (window.location.hash === target) return
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${target}`)
+  }, [activeTab])
+
+  useEffect(() => {
+    function syncTabFromHash() {
+      setActiveTab(activeTabFromHash())
+    }
+    window.addEventListener('hashchange', syncTabFromHash)
+    return () => window.removeEventListener('hashchange', syncTabFromHash)
+  }, [])
 
   const category = useMemo(() => {
     return catalog?.categories?.find(item => item.id === activeCategory)
@@ -180,6 +203,7 @@ function App() {
     setResult({message: '执行中...'})
     try {
       const body = await postJSON(`/api/tools/${selected.id}/run?async=true`, {params, confirm: Boolean(needsConfirm), include_local: runLocal, targets: runHosts.length > 0 ? runHosts : undefined})
+      if (runVersionRef.current !== runVersion) return
       if (body.data?.runs?.length) {
         const batch = {batchID: body.data.batch_id, runs: body.data.runs}
         setResult({batch, message: '执行中...'})
@@ -194,6 +218,7 @@ function App() {
       }
       setResult({message: summarizeAPIResponse(body, '执行请求已提交。'), response: body})
     } catch (err) {
+      if (runVersionRef.current !== runVersion) return
       setResult({message: readableAPIError(err, '执行失败。'), response: err.body})
     }
   }
@@ -202,11 +227,13 @@ function App() {
     while (runVersionRef.current === runVersion) {
       try {
         const detail = await fetchRunDetail(run.id)
+        if (runVersionRef.current !== runVersion) return
         const detailData = detail?.data || detail
         const status = detailData?.record?.status || run.status || 'running'
         setResult({run: {...run, status}, detail: {data: detailData}})
         if (status !== 'running') return
       } catch (err) {
+        if (runVersionRef.current !== runVersion) return
         setResult({message: readableAPIError(err, '读取运行详情失败。'), run})
         return
       }
@@ -218,6 +245,7 @@ function App() {
     while (runVersionRef.current === runVersion) {
       try {
         const summaries = await Promise.all(batch.runs.map(run => fetchRunSummary(run.id)))
+        if (runVersionRef.current !== runVersion) return
         const runs = batch.runs.map((run, index) => {
           const summary = summaries[index]?.data?.record
           return summary ? {...run, ...summary} : run
@@ -227,10 +255,33 @@ function App() {
         setResult({batch: nextBatch, message: active ? '执行中...' : batchResultMessage(runs)})
         if (!active) return
       } catch (err) {
+        if (runVersionRef.current !== runVersion) return
         setResult({message: readableAPIError(err, '读取批量运行状态失败。'), batch})
         return
       }
       await new Promise(resolve => window.setTimeout(resolve, 800))
+    }
+  }
+
+  async function cancelCurrentToolRun() {
+    const batchRuns = result?.batch?.runs || []
+    const runningRuns = batchRuns.filter(run => run.status === 'running')
+    const runIDs = runningRuns.length > 0
+      ? runningRuns.map(run => run.id)
+      : result?.run?.status === 'running' && result.run.id
+        ? [result.run.id]
+        : []
+    if (runIDs.length === 0) return
+    if (!window.confirm(`确认取消 ${runIDs.length} 个运行任务？`)) return
+    setCancellingToolRun(true)
+    setResult(current => ({...current, message: `正在取消 ${runIDs.length} 个运行任务...`}))
+    try {
+      await Promise.all(runIDs.map(runID => postJSON(`/api/runs/${encodeURIComponent(runID)}/cancel`, {})))
+      setResult(current => ({...current, message: `已发送取消请求（${runIDs.length} 个任务），状态会自动刷新。`}))
+    } catch (err) {
+      setResult(current => ({...current, message: readableAPIError(err, '取消运行任务失败。')}))
+    } finally {
+      setCancellingToolRun(false)
     }
   }
 
@@ -381,7 +432,7 @@ function App() {
             refreshCatalog={refreshCatalog}
           />
         ) : activeTab !== 'workflows' ? (
-          <RunPanel entries={entries} totalEntries={toolEntries.length} selected={selected} params={params} setParams={setParams} selectEntry={selectEntry} runSelected={runSelected} searchText={searchText} setSearchText={setSearchText} activeTag={activeTag} setActiveTag={setActiveTag} availableTags={availableTags} hosts={sshData?.hosts || []} runHosts={runHosts} setRunHosts={setRunHosts} runLocal={runLocal} setRunLocal={setRunLocal} isRunning={result?.run?.status === 'running' || (result?.batch?.runs || []).some(run => run.status === 'running')} />
+          <RunPanel entries={entries} totalEntries={toolEntries.length} selected={selected} params={params} setParams={setParams} selectEntry={selectEntry} runSelected={runSelected} searchText={searchText} setSearchText={setSearchText} activeTag={activeTag} setActiveTag={setActiveTag} availableTags={availableTags} hosts={sshData?.hosts || []} runHosts={runHosts} setRunHosts={setRunHosts} runLocal={runLocal} setRunLocal={setRunLocal} isRunning={result?.run?.status === 'running' || (result?.batch?.runs || []).some(run => run.status === 'running')} onCancelRun={cancelCurrentToolRun} isCancelling={cancellingToolRun} />
         ) : null}
 
         {activeTab === 'tools' && (
@@ -474,6 +525,11 @@ function GettingStartedCard({toolCount}) {
 
 export function RunHistoryPanel({catalog}) {
   const [runs, setRuns] = useState([])
+  const [totalRuns, setTotalRuns] = useState(0)
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
+  const [searchInput, setSearchInput] = useState('')
+  const [searchText, setSearchText] = useState('')
   const [selectedRunID, setSelectedRunID] = useState('')
   const [selectedDetail, setSelectedDetail] = useState(null)
   const [statusFilter, setStatusFilter] = useState('')
@@ -483,40 +539,67 @@ export function RunHistoryPanel({catalog}) {
   const [message, setMessage] = useState('正在加载运行记录...')
   const [loading, setLoading] = useState(false)
   const [cancellingRunID, setCancellingRunID] = useState('')
+  const [cleanupOpen, setCleanupOpen] = useState(false)
+  const [cleanupKeep, setCleanupKeep] = useState('50')
+  const [cleanupDryRun, setCleanupDryRun] = useState(true)
+  const [cleanupBusy, setCleanupBusy] = useState(false)
+  const [cleanupResult, setCleanupResult] = useState(null)
+  const listRequestRef = useRef(0)
+  const detailRequestRef = useRef(0)
+  const totalPages = Math.max(1, Math.ceil(totalRuns / pageSize))
 
   async function loadRuns({silent = false} = {}) {
+    const requestID = ++listRequestRef.current
     if (!silent) {
       setLoading(true)
       setMessage('正在加载运行记录...')
     }
     try {
-      const body = await fetchJSON('/api/runs/')
+      const query = new URLSearchParams()
+      query.set('limit', String(pageSize))
+      query.set('offset', String((page - 1) * pageSize))
+      if (statusFilter) query.set('status', statusFilter)
+      if (searchText) query.set('q', searchText)
+      const body = await fetchJSON(`/api/runs/?${query.toString()}`)
+      if (requestID !== listRequestRef.current) return
       const items = body.data?.runs || []
+      const total = Number(body.data?.total ?? items.length)
       setRuns(items)
+      setTotalRuns(Number.isFinite(total) ? total : items.length)
       if (!silent) {
-        setMessage(items.length ? `已加载 ${items.length} 条运行记录。` : '暂无运行记录。')
+        setMessage(total > 0 ? `已加载 ${items.length} 条，共 ${total} 条运行记录。` : '暂无匹配的运行记录。')
       }
     } catch (err) {
+      if (requestID !== listRequestRef.current) return
       if (!silent) {
         setMessage(readableAPIError(err, '加载运行记录失败。'))
       }
     } finally {
-      if (!silent) {
+      if (requestID === listRequestRef.current && !silent) {
         setLoading(false)
       }
     }
   }
 
   useEffect(() => {
-    loadRuns()
-  }, [])
+    const timer = window.setTimeout(() => {
+      setSearchText(searchInput.trim())
+      setPage(1)
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [searchInput])
 
-  const visibleRuns = useMemo(() => {
-    if (!statusFilter) return runs
-    return runs.filter(item => item.status === statusFilter)
-  }, [runs, statusFilter])
+  useEffect(() => {
+    loadRuns()
+  }, [page, pageSize, statusFilter, searchText])
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages)
+  }, [page, totalPages])
 
   async function refreshSelectedRun(runID, {silent = false} = {}) {
+    if (!runID) return
+    const requestID = ++detailRequestRef.current
     if (!silent) {
       setSelectedRunID(runID)
       setSelectedDetail(null)
@@ -524,11 +607,13 @@ export function RunHistoryPanel({catalog}) {
     }
     try {
       const body = await fetchRunDetail(runID)
+      if (requestID !== detailRequestRef.current) return
       setSelectedDetail(body.data)
       if (!silent) {
         setMessage(`已加载运行记录 ${runID}。`)
       }
     } catch (err) {
+      if (requestID !== detailRequestRef.current) return
       if (!silent) {
         setMessage(readableAPIError(err, '读取运行详情失败。'))
       }
@@ -576,7 +661,61 @@ export function RunHistoryPanel({catalog}) {
       }
     }, 2000)
     return () => window.clearInterval(timer)
-  }, [runs, selectedDetail?.record?.status, selectedRunID])
+  }, [runs, selectedDetail?.record?.status, selectedRunID, page, pageSize, statusFilter, searchText])
+
+  function changeStatusFilter(value) {
+    setStatusFilter(value)
+    setPage(1)
+  }
+
+  function changePageSize(value) {
+    setPageSize(Number(value))
+    setPage(1)
+  }
+
+  async function runCleanup({dryRun = cleanupDryRun, confirmed = false} = {}) {
+    const keep = Number(cleanupKeep)
+    if (!Number.isInteger(keep) || keep < 0) {
+      setCleanupResult({kind: 'error', title: '保留数量无效', detail: '请输入 0 或正整数作为保留数量。'})
+      return
+    }
+    if (!dryRun && !confirmed && !window.confirm(`确认删除除最新 ${keep} 条以外的运行记录？该操作不可撤销。`)) return
+    setCleanupBusy(true)
+    setCleanupResult(null)
+    try {
+      const body = await postJSON('/api/runs/cleanup', {keep, dry_run: dryRun})
+      const result = body.data || {}
+      setCleanupResult({
+        kind: 'ok',
+        title: dryRun ? '预演完成' : '清理完成',
+        detail: `总计 ${Number(result.total || 0)} 条，保留 ${Number(result.keep ?? keep)} 条，${dryRun ? '预演将删除' : '已删除'} ${Number(result.deleted || 0)} 条。`,
+        keep: Number(result.keep ?? keep),
+        dryRun,
+        candidates: Array.isArray(result.candidates) ? result.candidates : []
+      })
+      if (!dryRun) {
+        setCleanupDryRun(true)
+        setSelectedRunID('')
+        setSelectedDetail(null)
+        setMessage(`已清理 ${Number(result.deleted || 0)} 条运行记录。`)
+        await loadRuns({silent: true})
+      }
+    } catch (err) {
+      setCleanupResult({kind: 'error', title: '清理失败', detail: readableAPIError(err, '清理运行记录失败。')})
+    } finally {
+      setCleanupBusy(false)
+    }
+  }
+
+  function changeCleanupKeep(value) {
+    setCleanupKeep(value)
+    setCleanupResult(null)
+  }
+
+  function changeCleanupDryRun(value) {
+    setCleanupDryRun(value)
+    setCleanupResult(null)
+  }
 
   async function cancelRun(runID) {
     if (!runID) return
@@ -609,15 +748,21 @@ export function RunHistoryPanel({catalog}) {
       <section className="card runHistoryListCard">
         <div className="cardHeader">
           <h3>运行记录</h3>
-          <button className="secondary" type="button" disabled={loading} onClick={loadRuns}>刷新</button>
+          <div className="runHistoryHeaderActions">
+            <button className="secondary" type="button" onClick={() => { setCleanupOpen(true); setCleanupResult(null); setCleanupDryRun(true) }}>清理</button>
+            <button className="secondary" type="button" disabled={loading} onClick={() => loadRuns()}>{loading ? '刷新中...' : '刷新'}</button>
+          </div>
         </div>
-        <div className="tagFilters runStatusFilters">
-          {statusOptions.map(([value, label]) => (
-            <button key={value || 'all'} className={statusFilter === value ? 'tagChip active' : 'tagChip'} onClick={() => setStatusFilter(value)}>{label}</button>
-          ))}
+        <div className="runHistoryFilters">
+          <input value={searchInput} placeholder="搜索运行 ID、目标、操作机或参数" onChange={event => setSearchInput(event.target.value)} />
+          <div className="tagFilters runStatusFilters">
+            {statusOptions.map(([value, label]) => (
+              <button key={value || 'all'} className={statusFilter === value ? 'tagChip active' : 'tagChip'} onClick={() => changeStatusFilter(value)}>{label}</button>
+            ))}
+          </div>
         </div>
         <div className="runHistoryList">
-          {visibleRuns.map(item => (
+          {runs.map(item => (
             <div key={item.id} className={selectedRunID === item.id ? 'runHistoryItem active' : 'runHistoryItem'}>
               <button type="button" className="runHistorySelectButton" onClick={() => selectRun(item.id)}>
               <div>
@@ -634,9 +779,89 @@ export function RunHistoryPanel({catalog}) {
               )}
             </div>
           ))}
-          {visibleRuns.length === 0 && <div className="empty">没有匹配的运行记录。</div>}
+          {runs.length === 0 && <div className="empty">{searchText || statusFilter ? '没有匹配的运行记录。' : '暂无运行记录。'}</div>}
         </div>
-        <pre className="modalResult compactResult">{message}</pre>
+        {totalRuns > 0 && (
+          <div className="paginationBar runHistoryPagination">
+            <label>
+              <span>每页</span>
+              <select value={pageSize} onChange={event => changePageSize(event.target.value)}>
+                <option value="10">10</option>
+                <option value="20">20</option>
+                <option value="50">50</option>
+              </select>
+            </label>
+            <div className="paginationControls">
+              <button className="secondary paginationButton" disabled={page <= 1} onClick={() => setPage(current => Math.max(1, current - 1))}>上一页</button>
+              <span>{page} / {totalPages} · 共 {totalRuns} 条</span>
+              <button className="secondary paginationButton" disabled={page >= totalPages} onClick={() => setPage(current => Math.min(totalPages, current + 1))}>下一页</button>
+            </div>
+          </div>
+        )}
+        {message && <div className="runHistoryMessage" role="status" aria-live="polite">{message}</div>}
+        {cleanupOpen && (
+          <div className="modalBackdrop" onClick={() => { if (!cleanupBusy) setCleanupOpen(false) }}>
+            <section className="modal runCleanupModal" role="dialog" aria-modal="true" aria-label="清理运行记录" onClick={event => event.stopPropagation()}>
+              <div className="modalHeader">
+                <div>
+                  <h3>清理运行记录</h3>
+                  <p>保留最新记录，删除更早的运行目录。</p>
+                </div>
+                <button type="button" className="modalClose" onClick={() => setCleanupOpen(false)} disabled={cleanupBusy}>×</button>
+              </div>
+              <div className="form compact">
+                <label>
+                  <span>保留最新记录数</span>
+                  <input type="number" min="0" value={cleanupKeep} disabled={cleanupBusy} onChange={event => changeCleanupKeep(event.target.value)} />
+                </label>
+                <label className="checkboxLabel">
+                  <input type="checkbox" checked={cleanupDryRun} disabled={cleanupBusy} onChange={event => changeCleanupDryRun(event.target.checked)} />
+                  <span>仅预演，不实际删除</span>
+                </label>
+                <div className="empty small">清理会删除除最新 N 条之外的所有运行目录；运行中的记录也可能被删除，建议先预演确认。</div>
+                {cleanupResult && (
+                  <div className={`runCleanupResult ${cleanupResult.kind}`}>
+                    <strong>{cleanupResult.title}</strong>
+                    <span>{cleanupResult.detail}</span>
+                  </div>
+                )}
+                {cleanupResult?.kind === 'ok' && cleanupResult.dryRun && (
+                  cleanupResult.candidates.length > 0 ? (
+                    <div className="runCleanupPreview">
+                      <div className="runCleanupPreviewHead">
+                        <strong>将删除以下 {cleanupResult.candidates.length} 条记录</strong>
+                        <span>保留最新 {cleanupResult.keep} 条</span>
+                      </div>
+                      <ul className="runCleanupCandidateList">
+                        {cleanupResult.candidates.map(item => (
+                          <li key={item.id}>
+                            <div>
+                              <strong>{item.target || item.id}</strong>
+                              <small>{item.kind === 'workflow' ? '工作流' : item.kind === 'tool' ? '工具' : item.kind || '运行'} · {item.id}</small>
+                            </div>
+                            <div>
+                              <span className={`runStatusText ${item.status || ''}`}>{runStatusText(item.status)}</span>
+                              <time>{formatRunTime(item.started_at)}</time>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                      <button className="secondary danger" type="button" disabled={cleanupBusy} onClick={() => runCleanup({dryRun: false, confirmed: true})}>
+                        {cleanupBusy ? '处理中...' : '确认清理以上记录'}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="empty small">没有可清理的记录，无需删除。</div>
+                  )
+                )}
+              </div>
+              <div className="modalFooter">
+                <button className="secondary" type="button" onClick={() => setCleanupOpen(false)} disabled={cleanupBusy}>关闭</button>
+                <button className="primary" type="button" onClick={() => runCleanup()} disabled={cleanupBusy}>{cleanupBusy ? '处理中...' : cleanupDryRun ? '开始预演' : '确认清理'}</button>
+              </div>
+            </section>
+          </div>
+        )}
       </section>
       <section className="card runHistoryDetailCard">
         <div className="cardHeader">
@@ -856,6 +1081,7 @@ function GearIcon() {
 }
 
 export function PluginManagerModal({catalog, state, setState, onClose, onUploaded, onChanged, onRefresh}) {
+  const managerRef = useRef(null)
   const [tab, setTab] = useState('installed')
   const [uploadOpen, setUploadOpen] = useState(false)
   const [pluginActionID, setPluginActionID] = useState('')
@@ -900,6 +1126,12 @@ export function PluginManagerModal({catalog, state, setState, onClose, onUploade
   const marketSources = market?.sources || []
   const shareReady = shareTargets.length > 0
   const shareHint = shareTargetsMessage || '未配置远程插件市场（Nexus），分享功能不可用。可在「插件市场 → 来源配置」中新增 Nexus 来源。'
+
+  useModalEscape(onClose, managerRef)
+
+  useEffect(() => {
+    setState(current => (current?.message || current?.response) ? {message: ''} : current)
+  }, [setState])
 
   useEffect(() => {
     let cancelled = false
@@ -1240,7 +1472,7 @@ export function PluginManagerModal({catalog, state, setState, onClose, onUploade
   return (
     <>
     <div className="modalBackdrop" onClick={onClose}>
-      <div className="modal pluginManagerModal" onClick={event => event.stopPropagation()}>
+      <div className="modal pluginManagerModal" ref={managerRef} onClick={event => event.stopPropagation()}>
         <div className="modalHeader">
           <div>
             <h3>插件管理</h3>
@@ -1386,9 +1618,7 @@ export function PluginManagerModal({catalog, state, setState, onClose, onUploade
             onShared={() => setMarket(null)}
           />
         )}
-        {(state.response || state.message) && (
-          <pre className="modalResult">{state.response ? JSON.stringify(state.response, null, 2) : state.message}</pre>
-        )}
+        {state.message && <pre className="modalResult">{state.message}</pre>}
       </div>
     </div>
     {downloadMenu && createPortal(
@@ -1462,11 +1692,21 @@ export function PluginManagerModal({catalog, state, setState, onClose, onUploade
 }
 
 function PluginUploadModal({onClose, onUploaded, onRefresh}) {
+  const uploadRef = useRef(null)
+  const confirmRef = useRef(null)
   const [file, setFile] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [message, setMessage] = useState('')
   const [messageError, setMessageError] = useState(false)
   const [confirmDetail, setConfirmDetail] = useState(null)
+
+  function requestClose() {
+    if (uploading) return
+    onClose()
+  }
+
+  useModalEscape(requestClose, uploadRef)
+  useModalEscape(() => setConfirmDetail(null), confirmRef, Boolean(confirmDetail))
 
   function selectFile(event) {
     const nextFile = event.target.files?.[0] || null
@@ -1511,14 +1751,14 @@ function PluginUploadModal({onClose, onUploaded, onRefresh}) {
   }
 
   return (
-    <div className="modalBackdrop modalBackdropNested" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-      <div className="modal pluginOperationModal" role="dialog" aria-modal="true" aria-labelledby="plugin-upload-title">
+    <div className="modalBackdrop modalBackdropNested" onMouseDown={event => { if (event.target === event.currentTarget) requestClose() }}>
+      <div className="modal pluginOperationModal" ref={uploadRef} role="dialog" aria-modal="true" aria-labelledby="plugin-upload-title">
         <div className="modalHeader">
           <div>
             <h3 id="plugin-upload-title">安装插件</h3>
             <p>上传插件 ZIP 包，安装到本机插件目录。安装后如需更新同 ID 插件，可再次上传并确认更新。</p>
           </div>
-          <button className="modalClose" type="button" onClick={onClose} aria-label="关闭">×</button>
+          <button className="modalClose" type="button" onClick={requestClose} aria-label="关闭">×</button>
         </div>
         <div className="pluginUploadForm">
           <label>
@@ -1529,13 +1769,13 @@ function PluginUploadModal({onClose, onUploaded, onRefresh}) {
           <div className="buttonRow">
             <button className="primary" type="button" disabled={!file || uploading} onClick={() => upload(false)}>{uploading ? '正在处理...' : '上传'}</button>
             <a className="secondary downloadTemplate" href="/api/dev/toolkit.zip">下载插件模板</a>
-            <button className="secondary" type="button" onClick={onClose}>关闭</button>
+            <button className="secondary" type="button" onClick={requestClose}>关闭</button>
           </div>
         </div>
       </div>
       {confirmDetail && (
         <div className="modalBackdrop modalBackdropNested" onMouseDown={event => { if (event.target === event.currentTarget) setConfirmDetail(null) }}>
-          <div className="modal pluginOperationModal pluginConfirmModal" role="dialog" aria-modal="true" aria-labelledby="plugin-confirm-title">
+          <div className="modal pluginOperationModal pluginConfirmModal" ref={confirmRef} role="dialog" aria-modal="true" aria-labelledby="plugin-confirm-title">
             <div className="modalHeader">
               <div>
                 <h3 id="plugin-confirm-title">覆盖已安装插件</h3>
@@ -1574,6 +1814,7 @@ function uploadVersionHint(detail) {
 }
 
 function WorkflowExportModal({workflows, categories = [], onClose}) {
+  const exportRef = useRef(null)
   const [selection, setSelection] = useState(() => workflows.map(item => item.id))
   const [includePlugins, setIncludePlugins] = useState(true)
   const [exporting, setExporting] = useState(false)
@@ -1581,6 +1822,8 @@ function WorkflowExportModal({workflows, categories = [], onClose}) {
   const [messageError, setMessageError] = useState(false)
   const [activeCategory, setActiveCategory] = useState('')
   const [search, setSearch] = useState('')
+
+  useModalEscape(onClose, exportRef)
   const selectedWorkflows = useMemo(() => workflows.filter(item => selection.includes(item.id)), [workflows, selection])
   const categoryLabels = useMemo(() => new Map(categories.map(item => [item.id, item.name || item.id])), [categories])
   const categoryGroups = useMemo(() => {
@@ -1662,7 +1905,7 @@ function WorkflowExportModal({workflows, categories = [], onClose}) {
 
   return (
     <div className="modalBackdrop modalBackdropNested" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-      <div className="modal pluginOperationModal workflowExportModal" role="dialog" aria-modal="true" aria-labelledby="workflow-export-title">
+      <div className="modal pluginOperationModal workflowExportModal" ref={exportRef} role="dialog" aria-modal="true" aria-labelledby="workflow-export-title">
         <div className="modalHeader">
           <div>
             <h3 id="workflow-export-title">导出用户工作流</h3>
@@ -1751,34 +1994,54 @@ function WorkflowExportModal({workflows, categories = [], onClose}) {
 }
 
 function PlatformSettingsModal({onClose, onSaved}) {
+  const [dirty, setDirty] = useState(false)
+  const modalRef = useRef(null)
+
+  function requestClose() {
+    if (dirty && !window.confirm('平台设置还有未保存的修改，确认关闭并丢弃？')) return
+    onClose()
+  }
+
+  useModalEscape(requestClose, modalRef)
+
   return (
-    <div className="modalBackdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-      <div className="modal platformSettingsModal" role="dialog" aria-modal="true" aria-labelledby="platform-settings-title">
+    <div className="modalBackdrop" onMouseDown={event => { if (event.target === event.currentTarget) requestClose() }}>
+      <div className="modal platformSettingsModal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="platform-settings-title">
         <div className="modalHeader">
           <div>
             <h3 id="platform-settings-title">平台设置</h3>
             <p>配置平台服务、插件目录、路径和界面偏好。</p>
           </div>
-          <button className="modalClose" type="button" onClick={onClose} aria-label="关闭">×</button>
+          <button className="modalClose" type="button" onClick={requestClose} aria-label="关闭">×</button>
         </div>
-        <GlobalConfigPanel modalMode onBack={onClose} onSaved={onSaved} />
+        <GlobalConfigPanel modalMode onBack={requestClose} onDirtyChange={setDirty} onSaved={onSaved} />
       </div>
     </div>
   )
 }
 
 function GlobalEnvModal({onClose, onSaved}) {
+  const [dirty, setDirty] = useState(false)
+  const modalRef = useRef(null)
+
+  function requestClose() {
+    if (dirty && !window.confirm('全局变量还有未保存的修改，确认关闭并丢弃？')) return
+    onClose()
+  }
+
+  useModalEscape(requestClose, modalRef)
+
   return (
-    <div className="modalBackdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
-      <div className="modal platformSettingsModal" role="dialog" aria-modal="true" aria-labelledby="global-env-title">
+    <div className="modalBackdrop" onMouseDown={event => { if (event.target === event.currentTarget) requestClose() }}>
+      <div className="modal platformSettingsModal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="global-env-title">
         <div className="modalHeader">
           <div>
             <h3 id="global-env-title">全局变量</h3>
             <p>配置工具和插件脚本运行时可引用的全局变量。变量会直接导出到工具进程环境（本地与远程执行都生效），脚本也可通过 $OPS_GLOBAL_ENV_FILE 读取完整文件。</p>
           </div>
-          <button className="modalClose" type="button" onClick={onClose} aria-label="关闭">×</button>
+          <button className="modalClose" type="button" onClick={requestClose} aria-label="关闭">×</button>
         </div>
-        <GlobalEnvConfigPanel modalMode onBack={onClose} onSaved={onSaved} />
+        <GlobalEnvConfigPanel modalMode onBack={requestClose} onDirtyChange={setDirty} onSaved={onSaved} />
       </div>
     </div>
   )
@@ -1790,11 +2053,12 @@ const SETTINGS_SECTIONS = [
   {id: 'plugins', label: '插件与命令', hint: '目录、严格模式、命令白名单'},
   {id: 'market', label: '插件市场', hint: '来源、账号与接入状态'},
   {id: 'paths', label: '路径与清理', hint: '运行目录、日志与旧记录'},
+  {id: 'versions', label: '版本快照', hint: '保存、载入与回滚配置'},
   {id: 'ui', label: '界面', hint: '日志终端显示'},
   {id: 'host', label: '宿主配置白名单', hint: '允许读取的宿主目录'}
 ]
 
-function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
+function GlobalConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) {
   const [content, setContent] = useState('')
   const [path, setPath] = useState('')
   const [loading, setLoading] = useState(true)
@@ -1810,6 +2074,13 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
   const [marketSourcesLoading, setMarketSourcesLoading] = useState(false)
   const [marketSourcesError, setMarketSourcesError] = useState('')
   const [marketSourcesOpen, setMarketSourcesOpen] = useState(false)
+  const [configVersions, setConfigVersions] = useState([])
+  const [versionsLoading, setVersionsLoading] = useState(false)
+  const [versionsError, setVersionsError] = useState('')
+  const [versionMessage, setVersionMessage] = useState('')
+  const [versionName, setVersionName] = useState('')
+  const [versionDescription, setVersionDescription] = useState('')
+  const [versionBusy, setVersionBusy] = useState('')
   const [formData, setFormData] = useState({
     appName: '',
     appDescription: '',
@@ -1873,8 +2144,102 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
   }, [])
 
   useEffect(() => {
+    onDirtyChange?.(dirty)
+  }, [dirty, onDirtyChange])
+
+  useEffect(() => {
     loadMarketSources()
+    loadConfigVersions()
   }, [])
+
+  async function loadConfigVersions() {
+    setVersionsLoading(true)
+    setVersionsError('')
+    try {
+      const body = await fetchConfigVersions()
+      setConfigVersions(body.data?.versions || [])
+    } catch (err) {
+      setVersionsError(readableAPIError(err, '读取配置版本快照失败。'))
+    } finally {
+      setVersionsLoading(false)
+    }
+  }
+
+  async function createConfigVersion() {
+    if (dirty) {
+      setVersionMessage('当前有未保存的修改，请先保存设置后再创建版本快照。')
+      return
+    }
+    const name = versionName.trim()
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+      setVersionMessage('版本名称只能包含字母、数字、连字符和下划线。')
+      return
+    }
+    setVersionBusy('create')
+    setVersionMessage('正在把当前已保存的配置写入版本快照...')
+    try {
+      await saveConfigVersion({name, description: versionDescription.trim()})
+      setVersionName('')
+      setVersionDescription('')
+      setVersionMessage(`版本 ${name} 已保存。快照基于磁盘上的配置，创建前请先保存当前修改。`)
+      await loadConfigVersions()
+    } catch (err) {
+      setVersionMessage(readableAPIError(err, '保存版本快照失败。'))
+    } finally {
+      setVersionBusy('')
+    }
+  }
+
+  async function loadConfigVersionIntoEditor(version) {
+    if (dirty && !window.confirm('当前配置有未保存的修改，载入版本会覆盖编辑器内容，确认继续？')) return
+    setVersionBusy(version.name)
+    setVersionMessage(`正在载入版本 ${version.name}...`)
+    try {
+      const body = await fetchConfigVersion(version.name)
+      const data = body.data || {}
+      if (!data.exists) {
+        setVersionMessage(`版本 ${version.name} 的快照文件不存在。`)
+        return
+      }
+      setContent(data.content || '')
+      setEditMode('yaml')
+      setDirty(true)
+      setVersionMessage(`版本 ${version.name} 已载入编辑器，点击“保存设置”后才会生效。`)
+    } catch (err) {
+      setVersionMessage(readableAPIError(err, '载入版本快照失败。'))
+    } finally {
+      setVersionBusy('')
+    }
+  }
+
+  async function markDefaultConfigVersion(version) {
+    setVersionBusy(version.name)
+    setVersionMessage(`正在把 ${version.name} 设为默认版本...`)
+    try {
+      await setDefaultConfigVersion(version.name)
+      setVersionMessage(`版本 ${version.name} 已标记为默认版本。该标记不会自动覆盖当前配置。`)
+      await loadConfigVersions()
+    } catch (err) {
+      setVersionMessage(readableAPIError(err, '设置默认版本失败。'))
+    } finally {
+      setVersionBusy('')
+    }
+  }
+
+  async function removeConfigVersion(version) {
+    if (!window.confirm(`确认删除配置版本快照 ${version.name}？`)) return
+    setVersionBusy(version.name)
+    setVersionMessage(`正在删除版本 ${version.name}...`)
+    try {
+      await deleteConfigVersion(version.name)
+      setVersionMessage(`版本 ${version.name} 已删除。`)
+      await loadConfigVersions()
+    } catch (err) {
+      setVersionMessage(readableAPIError(err, '删除版本快照失败。'))
+    } finally {
+      setVersionBusy('')
+    }
+  }
 
   async function loadMarketSources() {
     setMarketSourcesLoading(true)
@@ -2225,6 +2590,57 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
             </div>
           </section>
         )
+      case 'versions':
+        return (
+          <section className="settingsCard">
+            <div className="settingsCardHead">
+              <h4>配置版本快照</h4>
+              <p>把磁盘上已保存的配置存为命名快照；载入快照只会写入当前编辑器，点击“保存设置”后才会真正回滚。</p>
+            </div>
+            <div className="configVersionCreate">
+              <label className="settingsField">
+                <span>版本名称</span>
+                <input value={versionName} disabled={Boolean(versionBusy)} placeholder="例如 before-upgrade" onChange={event => setVersionName(event.target.value)} />
+              </label>
+              <label className="settingsField">
+                <span>说明（可选）</span>
+                <input value={versionDescription} disabled={Boolean(versionBusy)} placeholder="记录本次配置变更原因" onChange={event => setVersionDescription(event.target.value)} />
+              </label>
+              <button className="secondary" type="button" disabled={Boolean(versionBusy) || !versionName.trim()} onClick={createConfigVersion}>
+                {versionBusy === 'create' ? '保存中...' : '保存当前配置为版本'}
+              </button>
+            </div>
+            <small className="settingsHint">版本快照保存的是已经写入磁盘的配置；当前草稿有未保存修改时，请先保存再创建快照。</small>
+            {versionsError && <div className="marketSourceError">{versionsError}</div>}
+            {versionMessage && <small className="nexusMessage">{versionMessage}</small>}
+            <div className="configVersionList">
+              {versionsLoading ? (
+                <div className="empty small">正在读取版本快照...</div>
+              ) : configVersions.length === 0 ? (
+                <div className="empty small">还没有版本快照。填写版本名称后保存当前配置，即可创建第一个快照。</div>
+              ) : configVersions.map(version => (
+                <article className="configVersionItem" key={version.name}>
+                  <div className="configVersionMain">
+                    <div className="configVersionTitle">
+                      <strong>{version.name}</strong>
+                      {version.default && <span className="marketBadge installed">默认版本</span>}
+                    </div>
+                    <small>{version.description || '无说明'}</small>
+                    <small>{version.created_at ? new Date(version.created_at).toLocaleString() : '创建时间未知'}{version.created_by ? ` · ${version.created_by}` : ''}</small>
+                  </div>
+                  <div className="configVersionActions">
+                    <button className="secondary" type="button" disabled={Boolean(versionBusy)} onClick={() => loadConfigVersionIntoEditor(version)}>载入编辑器</button>
+                    <button className="secondary" type="button" disabled={Boolean(versionBusy) || version.default} onClick={() => markDefaultConfigVersion(version)}>{version.default ? '默认版本' : '设为默认'}</button>
+                    <button className="secondary danger" type="button" disabled={Boolean(versionBusy)} onClick={() => removeConfigVersion(version)}>删除</button>
+                  </div>
+                </article>
+              ))}
+            </div>
+            <div className="settingsCardActions">
+              <button className="secondary" type="button" disabled={versionsLoading} onClick={loadConfigVersions}>{versionsLoading ? '刷新中...' : '刷新版本列表'}</button>
+            </div>
+          </section>
+        )
       case 'ui':
         return (
           <section className="settingsCard">
@@ -2246,7 +2662,7 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
           <section className="settingsCard">
             <div className="settingsCardHead">
               <h4>宿主配置文件白名单</h4>
-              <p>限定宿主 mapping 可读取的配置文件范围，未命中白名单的目录会被拒绝访问。</p>
+              <p>限定宿主 mapping 与工作流配置文件可读取的范围，未命中白名单的目录会被拒绝访问。</p>
             </div>
             <div className="settingsGrid">
               <label className="settingsField settingsWide">
@@ -2284,12 +2700,18 @@ function GlobalConfigPanel({onBack, onSaved, modalMode = false}) {
   }
 }
 
-function GlobalEnvConfigPanel({onBack, onSaved, modalMode = false}) {
+function GlobalEnvConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) {
   const [content, setContent] = useState('')
+  const [savedContent, setSavedContent] = useState('')
   const [path, setPath] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('正在读取全局环境配置...')
+  const dirty = content !== savedContent
+
+  useEffect(() => {
+    onDirtyChange?.(dirty)
+  }, [dirty, onDirtyChange])
 
   useEffect(() => {
     let cancelled = false
@@ -2299,7 +2721,9 @@ function GlobalEnvConfigPanel({onBack, onSaved, modalMode = false}) {
       try {
         const body = await fetchJSON('/api/config/global-env')
         if (cancelled) return
-        setContent(body.data?.content || '')
+        const loadedContent = body.data?.content || ''
+        setContent(loadedContent)
+        setSavedContent(loadedContent)
         setPath(body.data?.path || 'configs/global-env.conf')
         setMessage('已加载全局环境配置文件。')
       } catch (err) {
@@ -2317,6 +2741,7 @@ function GlobalEnvConfigPanel({onBack, onSaved, modalMode = false}) {
     setMessage('正在保存全局环境配置...')
     try {
       const body = await putJSON('/api/config/global-env', {content})
+      setSavedContent(content)
       setMessage('全局环境配置已保存并重新加载运行时配置。')
       await onSaved(body)
     } catch (err) {
@@ -2343,9 +2768,10 @@ function GlobalEnvConfigPanel({onBack, onSaved, modalMode = false}) {
             <span>.env 格式内容</span>
             <textarea value={content} disabled={loading || saving} placeholder="# 数据库配置&#10;DB_HOST=localhost&#10;DB_PORT=5432&#10;&#10;# API 配置&#10;API_BASE_URL=https://api.example.com&#10;&#10;# 环境标识&#10;ENVIRONMENT=dev" onChange={event => setContent(event.target.value)} />
           </label>
+          {dirty && !saving && <div className="configFileSaveHint">有未保存的修改，保存后才会写入。</div>}
           <div className="buttonRow">
             <button className="primary" disabled={loading || saving} onClick={saveConfig}>保存全局变量</button>
-            {!modalMode && <button className="secondary" disabled={saving} onClick={onBack}>返回列表</button>}
+            <button className="secondary" disabled={saving} onClick={onBack}>{modalMode ? '关闭' : '返回列表'}</button>
           </div>
           <pre className="modalResult">{message}</pre>
         </div>
@@ -2751,6 +3177,28 @@ function PluginConfigFileEditor({pluginID, file, onBack}) {
     }
   }
 
+  function requestBack() {
+    if (content !== originalContent && !window.confirm('当前配置文件还有未保存的修改，确认返回列表并丢弃？')) return
+    onBack()
+  }
+
+  async function deleteFile() {
+    if (!canDelete) return
+    const displayName = file?.displayPath || file?.path || fileID
+    if (file?.exists !== false && !window.confirm(`将删除配置文件 ${displayName}，是否继续？`)) return
+    setDeleting(true)
+    setMessage('正在删除配置文件...')
+    try {
+      await deleteJSON(`/api/plugins/${encodeURIComponent(pluginID)}/files/${encodeURIComponent(fileID)}`)
+      setMessage('配置文件已删除。')
+      onBack()
+    } catch (err) {
+      setMessage(readableAPIError(err, '删除配置文件失败。'))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   return (
     <div className="pluginConfigEditor">
       <div className="configFileEditorSummary">
@@ -2789,7 +3237,8 @@ function PluginConfigFileEditor({pluginID, file, onBack}) {
       {showDiff && <ConfigDiffView diff={diff} />}
       <div className="buttonRow">
         <button className="primary" disabled={loading || saving || deleting || !canSave} onClick={saveFile}>保存配置文件</button>
-        <button className="secondary" disabled={saving || deleting} onClick={onBack}>返回列表</button>
+        <button className="secondary danger" disabled={loading || saving || deleting || !canDelete} onClick={deleteFile}>删除配置文件</button>
+        <button className="secondary" disabled={saving || deleting} onClick={requestBack}>返回列表</button>
       </div>
       <pre className="modalResult">{message}</pre>
     </div>
@@ -2808,6 +3257,7 @@ function WorkflowConfigFileEditor({workflowID, file, onBack}) {
   const saveBlockReason = workflowConfigFileSaveBlockReason(file)
   const canSave = !saveBlockReason
   const canDelete = canDeleteConfigFile(file)
+  const externalBinding = file?.managed === false
   const diff = useMemo(() => buildTextDiff(originalContent, content), [originalContent, content])
 
   useEffect(() => {
@@ -2850,18 +3300,26 @@ function WorkflowConfigFileEditor({workflowID, file, onBack}) {
     }
   }
 
+  function requestBack() {
+    if (content !== originalContent && !window.confirm('当前工作流配置文件还有未保存的修改，确认返回列表并丢弃？')) return
+    onBack()
+  }
+
   async function deleteFile() {
     if (!canDelete) return
     const displayName = file?.displayPath || file?.path || fileID
-    if (file?.exists !== false && !window.confirm(`将删除工作流配置文件 ${displayName}，是否继续？`)) return
+    const confirmText = externalBinding
+      ? `将解除工作流对 ${displayName} 的绑定，原文件会保留，是否继续？`
+      : `将删除工作流配置文件 ${displayName}，是否继续？`
+    if (file?.exists !== false && !window.confirm(confirmText)) return
     setDeleting(true)
-    setMessage('正在删除工作流配置文件...')
+    setMessage(externalBinding ? '正在解除绑定...' : '正在删除工作流配置文件...')
     try {
-      await deleteJSON(`/api/workflows/${encodeURIComponent(workflowID)}/files/${encodeURIComponent(fileID)}`)
-      setMessage('工作流配置文件已删除。')
+      const body = await deleteJSON(`/api/workflows/${encodeURIComponent(workflowID)}/files/${encodeURIComponent(fileID)}`)
+      setMessage(body?.data?.message || (externalBinding ? '已解除绑定，原文件保留。' : '工作流配置文件已删除。'))
       onBack()
     } catch (err) {
-      setMessage(readableAPIError(err, '删除工作流配置文件失败。'))
+      setMessage(readableAPIError(err, externalBinding ? '解除绑定失败。' : '删除工作流配置文件失败。'))
     } finally {
       setDeleting(false)
     }
@@ -2876,6 +3334,7 @@ function WorkflowConfigFileEditor({workflowID, file, onBack}) {
         </div>
         <ConfigFileStatusBadges file={file || {}} />
         {file?.reason && <small className="configFileReason">{file.reason}</small>}
+        {externalBinding && <small className="configFileSaveHint">该文件位于工作流配置目录之外，删除时仅解除绑定，不会删除原文件。</small>}
         {saveBlockReason && <small className="configFileSaveHint">{saveBlockReason}</small>}
       </div>
       <ConfigReplaceToolbar
@@ -2905,8 +3364,8 @@ function WorkflowConfigFileEditor({workflowID, file, onBack}) {
       {showDiff && <ConfigDiffView diff={diff} />}
       <div className="buttonRow">
         <button className="primary" disabled={loading || saving || deleting || !canSave} onClick={saveFile}>保存工作流配置文件</button>
-        <button className="secondary danger" disabled={loading || saving || deleting || !canDelete} onClick={deleteFile}>删除配置文件</button>
-        <button className="secondary" disabled={saving || deleting} onClick={onBack}>返回列表</button>
+        <button className="secondary danger" disabled={loading || saving || deleting || !canDelete} onClick={deleteFile}>{externalBinding ? '解除绑定' : '删除配置文件'}</button>
+        <button className="secondary" disabled={saving || deleting} onClick={requestBack}>返回列表</button>
       </div>
       <pre className="modalResult">{message}</pre>
     </div>
@@ -2941,24 +3400,94 @@ function WorkflowConfigFilesPanel({workflowID, onBack, onSaved}) {
   const [loading, setLoading] = useState(true)
   const [message, setMessage] = useState('正在加载工作流配置文件列表...')
   const [editingFile, setEditingFile] = useState(null)
+  const [bindMode, setBindMode] = useState('')
+  const [bindFile, setBindFile] = useState(null)
+  const [bindPath, setBindPath] = useState('')
+  const [bindLabel, setBindLabel] = useState('')
+  const [bindSubdir, setBindSubdir] = useState('')
+  const [binding, setBinding] = useState(false)
+  const bindFileInputRef = useRef(null)
   const fileTree = useMemo(() => buildWorkflowConfigFileTree(files, workflowID), [files, workflowID])
 
   useEffect(() => {
     loadFiles()
   }, [workflowID])
 
-  async function loadFiles() {
-    setLoading(true)
-    setMessage('正在加载工作流配置文件列表...')
+  async function loadFiles({silent = false} = {}) {
+    if (!silent) {
+      setLoading(true)
+      setMessage('正在加载工作流配置文件列表...')
+    }
     try {
       const body = await fetchJSON(`/api/workflows/${encodeURIComponent(workflowID)}/files`)
       const fileList = (body.data?.files || []).map(normalizeWorkflowConfigFile)
       setFiles(fileList)
-      setMessage(fileList.length > 0 ? `已加载 ${fileList.length} 个工作流配置文件。` : '当前没有工作流配置文件。')
+      if (!silent) {
+        setMessage(fileList.length > 0 ? `已加载 ${fileList.length} 个工作流配置文件。` : '当前没有工作流配置文件。')
+      }
     } catch (err) {
-      setMessage(readableAPIError(err, '加载工作流配置文件列表失败。'))
+      if (!silent) {
+        setMessage(readableAPIError(err, '加载工作流配置文件列表失败。'))
+      }
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
+    }
+  }
+
+  function openBind(mode) {
+    setBindMode(mode)
+    setBindFile(null)
+    setBindPath('')
+    setBindLabel('')
+    setBindSubdir('')
+    if (bindFileInputRef.current) bindFileInputRef.current.value = ''
+    setMessage(mode === 'upload'
+      ? '选择本地文件，上传到该工作流配置目录并写入工作流声明。'
+      : '填写运行根目录内的相对路径，或白名单目录内的宿主绝对路径。')
+  }
+
+  function cancelBind() {
+    setBindMode('')
+    setBindFile(null)
+    setBindPath('')
+    setBindLabel('')
+    setBindSubdir('')
+    if (bindFileInputRef.current) bindFileInputRef.current.value = ''
+    setMessage('已取消绑定。')
+  }
+
+  async function submitBind(event) {
+    event.preventDefault()
+    if (binding) return
+    const path = bindPath.trim()
+    if (bindMode === 'upload' && !bindFile) {
+      setMessage('请选择要上传的配置文件。')
+      return
+    }
+    if (bindMode === 'existing' && !path) {
+      setMessage('请填写要绑定的配置文件路径。')
+      return
+    }
+    setBinding(true)
+    setMessage(bindMode === 'upload' ? '正在上传并绑定配置文件...' : '正在绑定配置文件...')
+    try {
+      const body = bindMode === 'upload'
+        ? await uploadWorkflowConfigFile(workflowID, bindFile, bindSubdir.trim())
+        : await bindWorkflowConfigPath(workflowID, {path, label: bindLabel.trim()})
+      const bound = normalizeWorkflowConfigFile(body.data?.file || {})
+      setBindMode('')
+      setBindFile(null)
+      setBindPath('')
+      setBindLabel('')
+      setBindSubdir('')
+      if (bindFileInputRef.current) bindFileInputRef.current.value = ''
+      setMessage(`已绑定工作流配置文件：${bound.displayPath || bound.path || bound.id}`)
+      await loadFiles({silent: true})
+      setEditingFile(bound)
+    } catch (err) {
+      setMessage(readableAPIError(err, bindMode === 'upload' ? '上传并绑定失败。' : '绑定配置文件失败。'))
+    } finally {
+      setBinding(false)
     }
   }
 
@@ -2979,12 +3508,49 @@ function WorkflowConfigFilesPanel({workflowID, onBack, onSaved}) {
   return (
     <div className="pluginConfigFilesPanel">
       <div className="empty small">工作流配置文件来自真实挂载路径；可在此直接查看和编辑。目录默认展开，可按目录折叠查找。</div>
+      <div className="workflowConfigBindBar">
+        <button className="secondary" type="button" disabled={binding} onClick={() => openBind('upload')}>上传并绑定</button>
+        <button className="secondary" type="button" disabled={binding} onClick={() => openBind('existing')}>绑定已有路径</button>
+      </div>
+      {bindMode && (
+        <form className="workflowConfigBindForm" onSubmit={submitBind}>
+          <strong>{bindMode === 'upload' ? '上传并绑定' : '绑定已有路径'}</strong>
+          {bindMode === 'upload' ? (
+            <>
+              <label>
+                <span>配置文件</span>
+                <input ref={bindFileInputRef} type="file" disabled={binding} onChange={event => setBindFile(event.target.files?.[0] || null)} />
+              </label>
+              <label>
+                <span>保存子目录（可选）</span>
+                <input value={bindSubdir} disabled={binding} placeholder="例如 deployment；留空保存到工作流配置目录根目录" onChange={event => setBindSubdir(event.target.value)} />
+              </label>
+            </>
+          ) : (
+            <label>
+              <span>文件路径</span>
+              <input value={bindPath} disabled={binding} placeholder="例如 runs/uploads/app.conf 或 /etc/nginx/nginx.conf" onChange={event => setBindPath(event.target.value)} />
+            </label>
+          )}
+          <label>
+            <span>显示名称（可选）</span>
+            <input value={bindLabel} disabled={binding} placeholder="留空使用文件名" onChange={event => setBindLabel(event.target.value)} />
+          </label>
+          <div className="workflowConfigBindHint">
+            上传会写入该工作流自己的配置目录并登记到工作流 YAML；绑定已有路径不会移动原文件。宿主绝对路径必须位于 configs/ops.yaml 的 host_config_files.allowed_dirs 白名单内（可在“平台设置 → 宿主配置文件白名单”维护），解除绑定时不会删除原文件。文件大小上限 1MB。
+          </div>
+          <div className="buttonRow">
+            <button className="primary" type="submit" disabled={binding}>{binding ? '处理中...' : bindMode === 'upload' ? '上传并绑定' : '绑定路径'}</button>
+            <button className="secondary" type="button" disabled={binding} onClick={cancelBind}>取消</button>
+          </div>
+        </form>
+      )}
       <div className="configFilesTree" role="tree" aria-label="工作流配置文件目录树">
         {fileTree.children.map(node => (
           <ConfigFileTreeNode key={node.key} node={node} depth={0} onSelectFile={setEditingFile} />
         ))}
         {files.length === 0 && !loading && (
-          <div className="empty">当前没有工作流配置文件。</div>
+          <div className="empty">当前没有工作流配置文件。可点击“上传并绑定”保存新文件，或“绑定已有路径”引用运行根目录内或白名单目录内的现有文件。</div>
         )}
       </div>
       <div className="buttonRow">
@@ -3240,7 +3806,12 @@ function RunDetail({detail, run}) {
           <LogBlock title="错误输出" value={logs.stderr} />
         </>
       )}
-      {items.length > 0 && <StepLogs items={items} />}
+      {items.length > 0 && (
+        <details className="runStepLogsDetails">
+          <summary>按节点查看日志（{items.length}）</summary>
+          <StepLogs items={items} />
+        </details>
+      )}
       <details>
         <summary>查看完整运行记录</summary>
         <pre>{JSON.stringify(detail, null, 2)}</pre>
@@ -3305,11 +3876,12 @@ function TagList({tags}) {
   )
 }
 
-function RunPanel({entries, totalEntries, selected, params, setParams, selectEntry, runSelected, searchText, setSearchText, activeTag, setActiveTag, availableTags, hosts = [], runHosts = [], setRunHosts = () => {}, runLocal = true, setRunLocal = () => {}, isRunning = false}) {
+function RunPanel({entries, totalEntries, selected, params, setParams, selectEntry, runSelected, searchText, setSearchText, activeTag, setActiveTag, availableTags, hosts = [], runHosts = [], setRunHosts = () => {}, runLocal = true, setRunLocal = () => {}, isRunning = false, onCancelRun, isCancelling = false}) {
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
   const [targetPickerOpen, setTargetPickerOpen] = useState(false)
   const targetPickerRef = useRef(null)
+  const runCardRef = useRef(null)
   const paginationEnabled = true
   const totalPages = paginationEnabled ? Math.max(1, Math.ceil(entries.length / pageSize)) : 1
   const safePage = Math.min(currentPage, totalPages)
@@ -3339,6 +3911,15 @@ function RunPanel({entries, totalEntries, selected, params, setParams, selectEnt
 
   useEffect(() => {
     setTargetPickerOpen(false)
+    if (!selected?.id) return undefined
+    const frame = window.requestAnimationFrame(() => {
+      const element = runCardRef.current
+      if (!element) return
+      if (element.getBoundingClientRect().top > window.innerHeight * 0.55) {
+        element.scrollIntoView({behavior: 'smooth', block: 'start'})
+      }
+    })
+    return () => window.cancelAnimationFrame(frame)
   }, [selected?.id])
 
   useEffect(() => {
@@ -3429,7 +4010,7 @@ function RunPanel({entries, totalEntries, selected, params, setParams, selectEnt
         )}
       </section>
 
-      <section className="card runCard">
+      <section className="card runCard" ref={runCardRef}>
         <div className="cardHeader">
           <h3>执行配置</h3>
           {selected && <span>工具</span>}
@@ -3509,14 +4090,24 @@ function RunPanel({entries, totalEntries, selected, params, setParams, selectEnt
                   {param.type === 'bool' ? (
                     <input type="checkbox" checked={parseBoolParamValue(params[param.name])} onChange={event => setParams({...params, [param.name]: event.target.checked})} />
                   ) : param.type === 'file' ? (
-                    <FileUploadInput value={params[param.name] || ''} onChange={value => setParams({...params, [param.name]: value})} />
+                    <FileUploadInput value={params[param.name] ?? ''} onChange={value => setParams({...params, [param.name]: value})} />
+                  ) : Array.isArray(param.options) && param.options.length > 0 ? (
+                    <select aria-required={param.required || undefined} value={params[param.name] ?? ''} onChange={event => setParams({...params, [param.name]: event.target.value})}>
+                      <option value="">{param.default ? `默认：${param.default}` : '请选择...'}</option>
+                      {param.options.map(option => <option key={option} value={option}>{option || '（空）'}</option>)}
+                    </select>
                   ) : (
-                    <input aria-required={param.required || undefined} value={params[param.name] || ''} placeholder={param.name} onChange={event => setParams({...params, [param.name]: event.target.value})} />
+                    <input aria-required={param.required || undefined} value={params[param.name] ?? ''} placeholder={param.name} onChange={event => setParams({...params, [param.name]: event.target.value})} />
                   )}
                 </label>
               ))}
               {(selected.parameters || []).length === 0 && <div className="empty small">无需参数。</div>}
-              <button className="primary" disabled={isRunning || missingTargets || (selected.parameters || []).some(param => param.required && !hasConfiguredParamValue(params[param.name]))} onClick={runSelected}>{isRunning ? '执行中...' : '开始执行'}</button>
+              <div className="buttonRow">
+                <button className="primary" disabled={isRunning || missingTargets || (selected.parameters || []).some(param => param.required && !hasConfiguredParamValue(params[param.name]))} onClick={runSelected}>{isRunning ? '执行中...' : '开始执行'}</button>
+                {isRunning && onCancelRun && (
+                  <button className="secondary danger" type="button" disabled={isCancelling} onClick={onCancelRun}>{isCancelling ? '取消中...' : '取消执行'}</button>
+                )}
+              </div>
             </div>
           </>
         )}

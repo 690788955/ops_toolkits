@@ -367,7 +367,10 @@ func serveCommand(opts *options) *cobra.Command {
 			return err
 		}
 		listenAddr := resolveListenAddr(addr, port, reg.Root.ListenAddr())
-		token := generateToken()
+		token, err := generateToken()
+		if err != nil {
+			return err
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "监听地址: %s\n", listenAddr)
 		fmt.Fprintf(cmd.OutOrStdout(), "运行目录: %s\n", filepath.Join(reg.BaseDir, filepath.FromSlash(reg.Root.Paths.Runs)))
 		fmt.Fprintf(cmd.OutOrStdout(), "日志目录: %s\n", filepath.Join(reg.BaseDir, filepath.FromSlash(reg.Root.Paths.Logs)))
@@ -522,12 +525,15 @@ func resolveDisplayHost(addr string) string {
 	return host
 }
 
-func generateToken() string {
+// generateToken 生成 Web UI 的本地访问 token。
+// 熵不足时直接报错而不是降级：可预测的 token 等于鉴权失效，
+// 静默降级会让服务看起来正常、实际已无防护。
+func generateToken() (string, error) {
 	var data [16]byte
 	if _, err := rand.Read(data[:]); err != nil {
-		return fmt.Sprintf("%d", os.Getpid())
+		return "", fmt.Errorf("生成访问 token 失败（系统随机源不可用）: %w", err)
 	}
-	return hex.EncodeToString(data[:])
+	return hex.EncodeToString(data[:]), nil
 }
 
 func newCommand(opts *options) *cobra.Command {
@@ -625,6 +631,15 @@ func displayStepType(step runner.StepRecord) string {
 	if step.Type == config.WorkflowNodeTypeUpload {
 		return "编排节点/上传文件"
 	}
+	if step.Type == config.WorkflowNodeTypeExtractConfig {
+		return "编排节点/提取配置"
+	}
+	if step.Type == config.WorkflowNodeTypeParallel || step.Type == config.WorkflowNodeTypeJoin {
+		return "编排节点/并行合流"
+	}
+	if step.Type == config.WorkflowNodeTypeHTTP {
+		return "内置节点/HTTP 调用"
+	}
 	return "工具节点"
 }
 
@@ -640,6 +655,9 @@ func workflowNodeType(node config.WorkflowNode) string {
 	}
 	if node.Upload.TargetDir != "" {
 		return config.WorkflowNodeTypeUpload
+	}
+	if strings.TrimSpace(node.HTTP.URL) != "" || strings.TrimSpace(node.HTTP.Method) != "" || len(node.HTTP.Headers) > 0 || strings.TrimSpace(node.HTTP.Body) != "" || len(node.HTTP.ExpectStatus) > 0 {
+		return config.WorkflowNodeTypeHTTP
 	}
 	return ""
 }

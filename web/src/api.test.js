@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest'
-import {createMarketSource, deleteMarketSource, deleteNexusPlugin, downloadUserWorkflowExport, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusPlugins, nexusDownloadURL, postJSON, postMarketInstall, postNexusPluginZip, postPluginZip, postRunUploadNode, postRunUploadNodeChunked, rebuildNexusIndex, testMarketSource, updateMarketSource} from './api.js'
+import {bindWorkflowConfigPath, createMarketSource, deleteMarketSource, deleteNexusPlugin, downloadUserWorkflowExport, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusPlugins, nexusDownloadURL, postJSON, postMarketInstall, postNexusPluginZip, postPluginZip, postRunUploadNode, postRunUploadNodeChunked, rebuildNexusIndex, testMarketSource, updateMarketSource, uploadWorkflowConfigFile} from './api.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -92,6 +92,24 @@ describe('api helpers', () => {
     expect(options.body).toBeInstanceOf(FormData)
   })
 
+  it('binds and uploads workflow config files', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ok: true, json: async () => ({status: 'bound'})})))
+
+    await expect(bindWorkflowConfigPath('demo.flow', {path: 'runs/uploads/upload-1/app.conf', label: '应用配置'})).resolves.toEqual({status: 'bound'})
+    const [bindURL, bindOptions] = fetch.mock.calls[0]
+    expect(bindURL).toBe('/api/workflows/demo.flow/files')
+    expect(bindOptions.method).toBe('POST')
+    expect(JSON.parse(bindOptions.body)).toEqual({path: 'runs/uploads/upload-1/app.conf', label: '应用配置'})
+
+    await expect(uploadWorkflowConfigFile('demo.flow', new Blob(['app: true\n']), 'release')).resolves.toEqual({status: 'bound'})
+    const [uploadURL, uploadOptions] = fetch.mock.calls[1]
+    expect(uploadURL).toBe('/api/workflows/demo.flow/files/upload')
+    expect(uploadOptions.method).toBe('POST')
+    expect(uploadOptions.body).toBeInstanceOf(FormData)
+    expect(uploadOptions.body.get('subdir')).toBe('release')
+    expect(uploadOptions.body.get('file')).toBeTruthy()
+  })
+
   it('wraps browser upload network failures with readable errors', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => {
       throw new Error('Failed to fetch')
@@ -154,6 +172,51 @@ describe('api helpers', () => {
     expect(uploadOptions.method).toBe('POST')
     expect(uploadOptions.credentials).toBe('same-origin')
     expect(uploadOptions.body).toBeInstanceOf(FormData)
+  })
+
+  it('reports nexus upload progress and rejects failed XHR uploads', async () => {
+    class FakeXHR {
+      constructor() {
+        FakeXHR.instance = this
+        this.upload = {}
+        this.status = 0
+        this.statusText = ''
+        this.responseText = ''
+      }
+      open(method, path) {
+        this.method = method
+        this.path = path
+      }
+      send(body) {
+        this.body = body
+      }
+    }
+    vi.stubGlobal('XMLHttpRequest', FakeXHR)
+
+    const onProgress = vi.fn()
+    const pending = postNexusPluginZip('nexus', new Blob(['zip']), false, onProgress)
+    const xhr = FakeXHR.instance
+    expect(xhr.method).toBe('POST')
+    expect(xhr.path).toBe('/api/nexus/upload?source=nexus')
+    expect(xhr.withCredentials).toBe(true)
+    expect(xhr.body).toBeInstanceOf(FormData)
+
+    xhr.upload.onprogress({lengthComputable: true, loaded: 40, total: 100})
+    xhr.upload.onprogress({lengthComputable: false, loaded: 0, total: 0})
+    expect(onProgress).toHaveBeenCalledTimes(1)
+    expect(onProgress).toHaveBeenCalledWith({loaded: 40, total: 100})
+
+    xhr.status = 200
+    xhr.responseText = JSON.stringify({status: 'uploaded'})
+    xhr.onload()
+    await expect(pending).resolves.toEqual({status: 'uploaded'})
+
+    const failed = postNexusPluginZip('nexus', new Blob(['zip']), true, () => {})
+    const failedXHR = FakeXHR.instance
+    failedXHR.status = 409
+    failedXHR.responseText = JSON.stringify({error: '插件已存在'})
+    failedXHR.onload()
+    await expect(failed).rejects.toMatchObject({message: '插件已存在', status: 409})
   })
 
   it('deletes nexus plugins and builds download links', async () => {

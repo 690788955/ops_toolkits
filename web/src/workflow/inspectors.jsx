@@ -1,14 +1,21 @@
 import React, {useState} from 'react'
 import FileUploadInput from '../FileUploadInput.jsx'
 import {sshHostStatusLabel} from '../SshHostsModal.jsx'
-import {conditionOperators, controlNodeHelp, controlNodeTitle} from './catalog.js'
+import {conditionOperators, controlNodeCategory, controlNodeHelp, controlNodeTitle} from './catalog.js'
 import {
   defaultExtractConfig as modelDefaultExtractConfig,
   defaultCondition,
+  defaultHttpRequest as modelDefaultHttpRequest,
   defaultLoop as modelDefaultLoop,
   defaultUpload as modelDefaultUpload,
   defaultParams,
+  formatHTTPStatusList,
+  httpBodyTypes,
+  httpMethods,
   normalizeExtractConfig,
+  normalizeHttpBodyType,
+  normalizeHttpRequestConfig,
+  normalizeHTTPStatusList,
   normalizeLoopConfig,
   normalizeUploadConfig
 } from './model.js'
@@ -34,14 +41,14 @@ function NodeConfigModal({node, kindLabel, children, onClose, onSave}) {
   )
 }
 
-function NodeConfigEditor({node, tool, loopTool, tools, nodes, hosts = [], sources, paramsText, setParamsText, onNameChange, onConditionChange, onLoopChange, onUploadChange, onExtractConfigChange, onParamChange, onLoopParamChange, onApplyParams, onHostChange}) {
+function NodeConfigEditor({node, tool, loopTool, tools, nodes, hosts = [], sources, paramsText, setParamsText, onNameChange, onConditionChange, onLoopChange, onUploadChange, onExtractConfigChange, onHttpChange, onParamChange, onLoopParamChange, onApplyParams, onHostChange}) {
   if (!node) return null
   return (
     <div className="form nodeConfigEditor">
       {node.type === 'conditionNode' ? (
         <ConditionEditor node={node} sources={sources} onNameChange={onNameChange} onChange={onConditionChange} />
       ) : node.type === 'controlNode' ? (
-        <ControlNodeInspector node={node} tools={tools} nodes={nodes} hosts={hosts} loopTool={loopTool} sources={sources} onNameChange={onNameChange} onLoopChange={onLoopChange} onUploadChange={onUploadChange} onExtractConfigChange={onExtractConfigChange} onLoopParamChange={onLoopParamChange} onHostChange={onHostChange} />
+        <ControlNodeInspector node={node} tools={tools} nodes={nodes} hosts={hosts} loopTool={loopTool} sources={sources} onNameChange={onNameChange} onLoopChange={onLoopChange} onUploadChange={onUploadChange} onExtractConfigChange={onExtractConfigChange} onHttpChange={onHttpChange} onLoopParamChange={onLoopParamChange} onHostChange={onHostChange} />
       ) : (
         <ToolNodeConfigEditor
           node={node}
@@ -204,18 +211,24 @@ function ConditionEditor({node, sources, onNameChange, onChange}) {
   )
 }
 
-function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onNameChange, onLoopChange, onUploadChange, onExtractConfigChange, onLoopParamChange, onHostChange}) {
+function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onNameChange, onLoopChange, onUploadChange, onExtractConfigChange, onHttpChange, onLoopParamChange, onHostChange}) {
   const isLoop = node.data.controlType === 'loop'
   const loop = normalizeLoopConfig(node.data.loop || modelDefaultLoop())
   const isUpload = node.data.controlType === 'upload'
   const isExtractConfig = node.data.controlType === 'extract_config'
+  const isHTTP = node.data.controlType === 'http_request'
+  const category = controlNodeCategory(node.data.controlType)
   const upload = normalizeUploadConfig(node.data.upload || modelDefaultUpload())
   const extract = normalizeExtractConfig(node.data.extract_config || modelDefaultExtractConfig())
+  const httpRequest = normalizeHttpRequestConfig(node.data.http || modelDefaultHttpRequest())
   function updateLoop(patch) {
     onLoopChange(normalizeLoopConfig({...loop, ...patch}))
   }
   function updateExtract(patch) {
     onExtractConfigChange(normalizeExtractConfig({...extract, ...patch}))
+  }
+  function updateHttp(patch) {
+    onHttpChange(normalizeHttpRequestConfig({...httpRequest, ...patch}))
   }
   function changeLoopTool(toolID) {
     const tool = (tools || []).find(item => item.id === toolID)
@@ -229,7 +242,7 @@ function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onN
       </label>
       <label>
         <span>节点类型</span>
-        <input value={controlNodeTitle(node.data.controlType)} disabled />
+        <input value={`${category.label} · ${controlNodeTitle(node.data.controlType)}`} disabled />
       </label>
       <label>
         <span>显示名称</span>
@@ -277,10 +290,95 @@ function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onN
           )}
           <div className="empty small">建议把“提取配置”接在“上传文件”节点之后；源文件可选上传节点输出，也可手动填写上传目录内的相对路径。目标配置路径始终是工作流配置中心内的相对路径。</div>
         </>
+      ) : isHTTP ? (
+        <HttpRequestEditor http={httpRequest} sources={sources} onChange={updateHttp} />
       ) : (
         <div className="empty small">{controlNodeHelp(node.data.controlType)}。该节点不需要配置工具或参数，运行时自身记录为成功。</div>
       )}
     </div>
+  )
+}
+
+function HttpRequestEditor({http, sources = [], onChange}) {
+  const headers = http.headers || []
+  function updateHeader(index, patch) {
+    onChange({headers: headers.map((item, current) => current === index ? {...item, ...patch} : item)})
+  }
+  function removeHeader(index) {
+    onChange({headers: headers.filter((item, current) => current !== index)})
+  }
+  function addHeader() {
+    onChange({headers: [...headers, {name: '', value: ''}]})
+  }
+  const bodyDisabled = http.body_type === 'none'
+  const downstreamHint = (sources || []).find(source => source.value)?.value || '{{ .steps.节点ID.stdout }}'
+  return (
+    <>
+      <div className="httpRequestLine">
+        <label className="httpMethodField">
+          <span>方法</span>
+          <select value={http.method} onChange={event => onChange({method: event.target.value})}>
+            {httpMethods.map(method => <option key={method} value={method}>{method}</option>)}
+          </select>
+        </label>
+        <label className="httpUrlField">
+          <span>请求 URL</span>
+          <input value={http.url} placeholder="https://api.example.com/deploy 或 {{ .base_url }}/health" onChange={event => onChange({url: event.target.value})} />
+        </label>
+      </div>
+      <div className="empty small">URL、Header 与 Body 都支持运行期模板，例如 {downstreamHint}；内置 HTTP 节点在本机发起请求，不受操作机设置影响。</div>
+
+      <div className="httpSectionHead">
+        <span>请求 Header</span>
+        <button type="button" className="secondary small" onClick={addHeader}>添加 Header</button>
+      </div>
+      {headers.length === 0 && <div className="empty small">没有自定义 Header；JSON 请求体默认补 Content-Type: application/json。</div>}
+      {headers.map((item, index) => (
+        <div className="httpHeaderRow" key={`header-${index}`}>
+          <input value={item.name} placeholder="Authorization" onChange={event => updateHeader(index, {name: event.target.value})} />
+          <input value={item.value} placeholder="Bearer {{ .token }}" onChange={event => updateHeader(index, {value: event.target.value})} />
+          <button type="button" className="secondary danger small" onClick={() => removeHeader(index)}>删除</button>
+        </div>
+      ))}
+
+      <label>
+        <span>请求体类型</span>
+        <select value={http.body_type} onChange={event => {
+          const nextType = event.target.value
+          onChange({
+            body_type: nextType,
+            method: nextType !== 'none' && http.method === 'GET' ? 'POST' : http.method
+          })
+        }}>
+          {httpBodyTypes.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+        </select>
+      </label>
+      {!bodyDisabled && (
+        <label>
+          <span>请求体</span>
+          <textarea className="smallTextarea" value={http.body} placeholder={`{"env":"{{ .env }}"}`} onChange={event => onChange({body: event.target.value, body_type: normalizeHttpBodyType(http.body_type, event.target.value)})} />
+        </label>
+      )}
+      {!bodyDisabled && http.method === 'GET' && <small className="targetWarning">GET 请求不能携带请求体，请改用 POST/PUT/PATCH。</small>}
+
+      <label>
+        <span>期望状态码</span>
+        <input value={formatHTTPStatusList(http.expect_status)} placeholder="留空表示 2xx，例如 200, 201" onChange={event => onChange({expect_status: normalizeHTTPStatusList(event.target.value)})} />
+      </label>
+      <label className="checkboxLabel">
+        <input type="checkbox" checked={http.fail_on_error !== false} onChange={event => onChange({fail_on_error: event.target.checked})} />
+        <span>状态码不符时判定节点失败</span>
+      </label>
+      <label>
+        <span>响应保存路径</span>
+        <input value={http.save_response} placeholder="可留空，例如 response/deploy.json" onChange={event => onChange({save_response: event.target.value})} />
+      </label>
+      <label>
+        <span>请求超时</span>
+        <input value={http.timeout} placeholder="可留空，默认 30s，例如 10s、2m" onChange={event => onChange({timeout: event.target.value})} />
+      </label>
+      <div className="empty small">响应体写入节点 stdout，可在下游用 {"{{ .steps.节点ID.stdout }}"} 引用；状态码与耗时可用 {"{{ .steps.节点ID.http.status }}"}、{"{{ .steps.节点ID.http.duration_ms }}"} 引用。</div>
+    </>
   )
 }
 
