@@ -5,8 +5,13 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest'
 import LiveRunTerminal from './LiveRunTerminal.jsx'
 import {normalizeLogFontSize} from './logUtils.js'
 
+// 组件把整批日志合并成一次 write 写入，这里按行拆开记到 writeln 上，断言仍然按行计数。
 const terminal = vi.hoisted(() => ({
   writeln: vi.fn(),
+  write: vi.fn(function (data, callback) {
+    String(data).split('\r\n').forEach(line => terminal.writeln(line))
+    callback?.()
+  }),
   reset: vi.fn(),
   scrollToBottom: vi.fn()
 }))
@@ -59,6 +64,8 @@ afterEach(async () => {
 
 async function render(props) {
   await act(async () => root.render(React.createElement(LiveRunTerminal, props)))
+  // 流式日志按帧攒批后整块写入，渲染结束后把待刷新的定时器跑完再断言。
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
 }
 
 function logEvent(line, text, overrides = {}) {
@@ -113,10 +120,14 @@ describe('LiveRunTerminal logs', () => {
   it('resets the log identities when switching runs with the same step snapshot', async () => {
     const initialItems = [{id: 'shared-step', stdout: 'same\n'}]
     await render({runID: 'run-1', initialItems})
+    // 终端按运行重建，重置只发生在切换运行后的新终端上，同一运行不会因快照到达再清屏。
+    terminal.reset.mockClear()
     await render({runID: 'run-2', initialItems})
 
-    expect(terminal.writeln).toHaveBeenCalledTimes(2)
-    count('log', 1)
+    // 切换运行会重建终端，只在新终端里重放当前运行的日志。
+    expect(terminal.reset.mock.calls.length).toBeLessThanOrEqual(2)
+    expect(terminal.writeln.mock.calls.slice(-1)[0][0]).toContain(' same')
+    expect([...host.querySelectorAll('button')].some(button => button.textContent === 'log 1')).toBe(true)
   })
 
   it('waits for an incomplete line before merging the final output', async () => {
@@ -131,6 +142,21 @@ describe('LiveRunTerminal logs', () => {
     expect(terminal.writeln).toHaveBeenCalledTimes(2)
     expect(terminal.writeln.mock.calls.at(-1)[0]).toContain('partial')
     count('log', 2)
+  })
+})
+
+describe('LiveRunTerminal bulk snapshot', () => {
+  it('writes a large backlog in one block instead of one write per line', async () => {
+    const stdout = Array.from({length: 2000}, (_, index) => `line ${index}`).join('\n') + '\n'
+    await render({runID: 'run-1', initialItems: [{id: 'run-1', stdout}]})
+    expect(terminal.write.mock.calls.length).toBeLessThan(10)
+
+    const beforeSwitch = terminal.write.mock.calls.length
+    await render({runID: 'run-2', running: true, initialItems: [{id: 'run-2', stdout: 'fresh\n'}]})
+    // 切换运行只重放当前运行的日志，历史 2000 行不会在之后快照到达时被重新灌入。
+    expect(terminal.write.mock.calls.length - beforeSwitch).toBeLessThan(10)
+    expect(terminal.writeln.mock.calls.slice(-1)[0][0]).toContain(' fresh')
+    expect([...host.querySelectorAll('button')].some(button => button.textContent.startsWith('log '))).toBe(true)
   })
 })
 

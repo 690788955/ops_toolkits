@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"math"
+	"net/mail"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -192,38 +194,83 @@ type ToolOutput struct {
 }
 
 type WorkflowConfig struct {
-	ID          string          `yaml:"id" json:"id"`
-	Name        string          `yaml:"name" json:"name"`
-	Description string          `yaml:"description" json:"description"`
-	Version     string          `yaml:"version" json:"version"`
-	Category    string          `yaml:"category" json:"category"`
-	Tags        []string        `yaml:"tags" json:"tags"`
-	SharedWith  []string        `yaml:"shared_with,omitempty" json:"shared_with,omitempty"`
-	Parameters  []Parameter     `yaml:"parameters" json:"parameters"`
-	ConfigFiles []ConfigFileRef `yaml:"config_files" json:"config_files"`
-	Nodes       []WorkflowNode  `yaml:"nodes" json:"nodes"`
-	Edges       []WorkflowEdge  `yaml:"edges" json:"edges"`
-	Steps       []WorkflowNode  `yaml:"steps" json:"-"`
-	Confirm     Confirmation    `yaml:"confirm" json:"confirm"`
+	ID          string                 `yaml:"id" json:"id"`
+	Name        string                 `yaml:"name" json:"name"`
+	Description string                 `yaml:"description" json:"description"`
+	Version     string                 `yaml:"version" json:"version"`
+	Category    string                 `yaml:"category" json:"category"`
+	Tags        []string               `yaml:"tags" json:"tags"`
+	SharedWith  []string               `yaml:"shared_with,omitempty" json:"shared_with,omitempty"`
+	Parameters  []Parameter            `yaml:"parameters" json:"parameters"`
+	ConfigFiles []ConfigFileRef        `yaml:"config_files" json:"config_files"`
+	Stages      []WorkflowStage        `yaml:"stages,omitempty" json:"stages,omitempty"`
+	Nodes       []WorkflowNode         `yaml:"nodes" json:"nodes"`
+	Edges       []WorkflowEdge         `yaml:"edges" json:"edges"`
+	Steps       []WorkflowNode         `yaml:"steps" json:"-"`
+	Confirm     Confirmation           `yaml:"confirm" json:"confirm"`
+	Recovery    *WorkflowRecovery      `yaml:"recovery,omitempty" json:"recovery,omitempty"`
+	ExtraFields map[string]interface{} `yaml:",inline" json:"-"`
+}
+
+// WorkflowRecovery 是模板级失败恢复策略，不写死到执行器：
+// 差异检查节点输出无变化时可跳过变更与服务重启；变更后的失败可暂停为待处理。
+type WorkflowRecovery struct {
+	PendingOnFailure   bool                  `yaml:"pending_on_failure,omitempty" json:"pending_on_failure,omitempty"`
+	SkipChangeOnNoDiff bool                  `yaml:"skip_change_on_no_diff,omitempty" json:"skip_change_on_no_diff,omitempty"`
+	DiffNodeID         string                `yaml:"diff_node_id,omitempty" json:"diff_node_id,omitempty"`
+	ChangeNodeIDs      []string              `yaml:"change_node_ids,omitempty" json:"change_node_ids,omitempty"`
+	ServiceNodeIDs     []string              `yaml:"service_node_ids,omitempty" json:"service_node_ids,omitempty"`
+	HealthNodeIDs      []string              `yaml:"health_node_ids,omitempty" json:"health_node_ids,omitempty"`
+	Notification       *WorkflowNotification `yaml:"notification,omitempty" json:"notification,omitempty"`
+}
+
+type WorkflowNotification struct {
+	URL     string            `yaml:"url,omitempty" json:"url,omitempty"`
+	Events  []string          `yaml:"events,omitempty" json:"events,omitempty"`
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	Timeout string            `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
+const (
+	WorkflowNotifySucceeded  = "succeeded"
+	WorkflowNotifyFailed     = "failed"
+	WorkflowNotifyPending    = "pending"
+	WorkflowNotifyRolledBack = "rolled_back"
+)
+
+type WorkflowStage struct {
+	ID             string                 `yaml:"id" json:"id"`
+	Name           string                 `yaml:"name" json:"name"`
+	ExecutionMode  string                 `yaml:"execution_mode,omitempty" json:"execution_mode,omitempty"`
+	MaxConcurrency int                    `yaml:"max_concurrency,omitempty" json:"max_concurrency,omitempty"`
+	ExtraFields    map[string]interface{} `yaml:",inline" json:"-"`
 }
 
 type WorkflowNode struct {
-	ID        string                 `yaml:"id" json:"id"`
-	Type      string                 `yaml:"type" json:"type"`
-	Name      string                 `yaml:"name" json:"name"`
-	Tool      string                 `yaml:"tool" json:"tool"`
-	Host      string                 `yaml:"host,omitempty" json:"host,omitempty"`
-	Condition WorkflowCondition      `yaml:"condition" json:"condition"`
-	Loop      WorkflowLoop           `yaml:"loop" json:"loop"`
-	Upload    WorkflowUpload         `yaml:"upload" json:"upload"`
-	Extract   WorkflowExtractConfig  `yaml:"extract_config" json:"extract_config"`
-	HTTP      WorkflowHTTP           `yaml:"http,omitempty" json:"http"`
-	DependsOn []string               `yaml:"depends_on" json:"depends_on"`
-	Params    map[string]interface{} `yaml:"params" json:"params"`
-	Optional  bool                   `yaml:"optional" json:"optional"`
-	Timeout   string                 `yaml:"timeout" json:"timeout"`
-	Confirm   bool                   `yaml:"confirm" json:"confirm"`
-	OnFailure string                 `yaml:"on_failure" json:"on_failure"`
+	ID          string                 `yaml:"id" json:"id"`
+	Type        string                 `yaml:"type" json:"type"`
+	Name        string                 `yaml:"name" json:"name"`
+	StageID     string                 `yaml:"stage_id,omitempty" json:"stage_id,omitempty"`
+	Order       int                    `yaml:"order,omitempty" json:"order,omitempty"`
+	Tool        string                 `yaml:"tool" json:"tool"`
+	Host        string                 `yaml:"host,omitempty" json:"host,omitempty"`
+	Condition   WorkflowCondition      `yaml:"condition" json:"condition"`
+	Loop        WorkflowLoop           `yaml:"loop" json:"loop"`
+	Upload      WorkflowUpload         `yaml:"upload" json:"upload"`
+	Extract     WorkflowExtractConfig  `yaml:"extract_config" json:"extract_config"`
+	HTTP        WorkflowHTTP           `yaml:"http,omitempty" json:"http"`
+	Script      WorkflowScript         `yaml:"script,omitempty" json:"script,omitempty"`
+	Checksum    WorkflowChecksum       `yaml:"checksum,omitempty" json:"checksum,omitempty"`
+	Archive     WorkflowArchive        `yaml:"archive,omitempty" json:"archive,omitempty"`
+	Wait        WorkflowWait           `yaml:"wait,omitempty" json:"wait,omitempty"`
+	Notify      WorkflowNotify         `yaml:"notify,omitempty" json:"notify,omitempty"`
+	DependsOn   []string               `yaml:"depends_on" json:"depends_on"`
+	Params      map[string]interface{} `yaml:"params" json:"params"`
+	Optional    bool                   `yaml:"optional" json:"optional"`
+	Timeout     string                 `yaml:"timeout" json:"timeout"`
+	Confirm     bool                   `yaml:"confirm" json:"confirm"`
+	OnFailure   string                 `yaml:"on_failure" json:"on_failure"`
+	ExtraFields map[string]interface{} `yaml:",inline" json:"-"`
 }
 
 type WorkflowLoop struct {
@@ -314,9 +361,10 @@ type ConditionCase struct {
 }
 
 type WorkflowEdge struct {
-	From string `yaml:"from" json:"from"`
-	To   string `yaml:"to" json:"to"`
-	Case string `yaml:"case" json:"case"`
+	From        string                 `yaml:"from" json:"from"`
+	To          string                 `yaml:"to" json:"to"`
+	Case        string                 `yaml:"case" json:"case"`
+	ExtraFields map[string]interface{} `yaml:",inline" json:"-"`
 }
 
 const (
@@ -328,7 +376,200 @@ const (
 	WorkflowNodeTypeUpload        = "upload"
 	WorkflowNodeTypeExtractConfig = "extract_config"
 	WorkflowNodeTypeHTTP          = "http_request"
+	WorkflowNodeTypeShell         = "shell"
+	WorkflowNodeTypeChecksum      = "file_checksum"
+	WorkflowNodeTypeArchive       = "archive"
+	WorkflowNodeTypeWait          = "wait"
+	WorkflowNodeTypeNotify        = "notify"
+
+	WorkflowStageExecutionSerial   = "serial"
+	WorkflowStageExecutionParallel = "parallel"
 )
+
+// WorkflowScript 是内置 Shell 节点：在目标机器上执行内联脚本，不要求先封装插件。
+type WorkflowScript struct {
+	Script     string            `yaml:"script,omitempty" json:"script,omitempty"`
+	Workdir    string            `yaml:"workdir,omitempty" json:"workdir,omitempty"`
+	Env        map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	FailOnExit *bool             `yaml:"fail_on_exit,omitempty" json:"fail_on_exit,omitempty"`
+	Timeout    string            `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
+// WorkflowChecksum 对文件做 MD5/SHA256 校验，可要求与期望值一致。
+type WorkflowChecksum struct {
+	Path      string `yaml:"path" json:"path"`
+	Algorithm string `yaml:"algorithm,omitempty" json:"algorithm,omitempty"`
+	Expected  string `yaml:"expected,omitempty" json:"expected,omitempty"`
+}
+
+// WorkflowArchive 解开本地压缩包到目标目录。
+type WorkflowArchive struct {
+	Path      string `yaml:"path" json:"path"`
+	TargetDir string `yaml:"target_dir" json:"target_dir"`
+	Format    string `yaml:"format,omitempty" json:"format,omitempty"`
+	Strip     int    `yaml:"strip_components,omitempty" json:"strip_components,omitempty"`
+	Overwrite bool   `yaml:"overwrite,omitempty" json:"overwrite,omitempty"`
+}
+
+// WorkflowWait 固定等待或有限轮询：轮询支持 HTTP 与文件存在两种检查方式，取消可立即生效。
+type WorkflowWait struct {
+	Seconds      float64           `yaml:"seconds,omitempty" json:"seconds,omitempty"`
+	PollURL      string            `yaml:"poll_url,omitempty" json:"poll_url,omitempty"`
+	PollFile     string            `yaml:"poll_file,omitempty" json:"poll_file,omitempty"`
+	ExpectStatus []int             `yaml:"expect_status,omitempty" json:"expect_status,omitempty"`
+	Interval     string            `yaml:"interval,omitempty" json:"interval,omitempty"`
+	MaxAttempts  int               `yaml:"max_attempts,omitempty" json:"max_attempts,omitempty"`
+	MaxWait      string            `yaml:"max_wait,omitempty" json:"max_wait,omitempty"`
+	Headers      map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+}
+
+// WorkflowNotify 把上游结果推送到外部通道，作为流程收尾或失败提示。
+// 标题与正文支持运行期模板；通道参数按 channel 分别校验。
+type WorkflowNotify struct {
+	Channel string            `yaml:"channel,omitempty" json:"channel,omitempty"`
+	Title   string            `yaml:"title,omitempty" json:"title,omitempty"`
+	Message string            `yaml:"message,omitempty" json:"message,omitempty"`
+	URL     string            `yaml:"url,omitempty" json:"url,omitempty"`
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	Webhook string            `yaml:"webhook,omitempty" json:"webhook,omitempty"`
+	Timeout string            `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+
+	SMTPHost string   `yaml:"smtp_host,omitempty" json:"smtp_host,omitempty"`
+	SMTPPort int      `yaml:"smtp_port,omitempty" json:"smtp_port,omitempty"`
+	SMTPUser string   `yaml:"smtp_user,omitempty" json:"smtp_user,omitempty"`
+	SMTPPass string   `yaml:"smtp_pass,omitempty" json:"smtp_pass,omitempty"`
+	SMTPTLS  string   `yaml:"smtp_tls,omitempty" json:"smtp_tls,omitempty"`
+	From     string   `yaml:"from,omitempty" json:"from,omitempty"`
+	To       []string `yaml:"to,omitempty" json:"to,omitempty"`
+	Subject  string   `yaml:"subject,omitempty" json:"subject,omitempty"`
+}
+
+const (
+	NotifyChannelWebhook = "webhook"
+	NotifyChannelWeCom   = "wecom"
+	NotifyChannelEmail   = "email"
+	NotifyTLSStartTLS    = "starttls"
+	NotifyTLSTLS         = "tls"
+	NotifyTLSNone        = "none"
+)
+
+var notifyChannels = []string{NotifyChannelWebhook, NotifyChannelWeCom, NotifyChannelEmail}
+var notifyTLSModes = []string{NotifyTLSStartTLS, NotifyTLSTLS, NotifyTLSNone}
+
+// ValidateNotifyConfig 校验通知节点：通道、目标地址与通道专属参数。
+func ValidateNotifyConfig(nodeID string, item WorkflowNotify) (WorkflowNotify, error) {
+	out := item
+	out.Channel = strings.ToLower(strings.TrimSpace(out.Channel))
+	if out.Channel == "" {
+		out.Channel = NotifyChannelWebhook
+	}
+	valid := false
+	for _, channel := range notifyChannels {
+		if out.Channel == channel {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return out, fmt.Errorf("通知节点 %s 的 notify.channel 只支持 webhook、wecom 或 email", nodeID)
+	}
+	out.URL = strings.TrimSpace(out.URL)
+	out.Webhook = strings.TrimSpace(out.Webhook)
+	out.Timeout = strings.TrimSpace(out.Timeout)
+	for name, value := range out.Headers {
+		if strings.TrimSpace(name) == "" {
+			return out, fmt.Errorf("通知节点 %s 的 notify.headers 存在空 header 名", nodeID)
+		}
+		if strings.ContainsAny(name, "\r\n") || strings.ContainsAny(value, "\r\n") {
+			return out, fmt.Errorf("通知节点 %s 的 header %s 不能包含换行", nodeID, name)
+		}
+	}
+	if out.Timeout != "" {
+		if duration, err := time.ParseDuration(out.Timeout); err != nil || duration <= 0 {
+			return out, fmt.Errorf("通知节点 %s 的 notify.timeout 必须是正时长，例如 10s", nodeID)
+		}
+	}
+	switch out.Channel {
+	case NotifyChannelWebhook:
+		if out.URL == "" && out.Webhook == "" {
+			return out, fmt.Errorf("通知节点 %s 的 Webhook 地址必填", nodeID)
+		}
+		for label, target := range map[string]string{"url": out.URL, "webhook": out.Webhook} {
+			if target == "" || strings.Contains(target, "{{") {
+				continue
+			}
+			if !strings.HasPrefix(strings.ToLower(target), "http://") && !strings.HasPrefix(strings.ToLower(target), "https://") {
+				return out, fmt.Errorf("通知节点 %s 的 %s 只支持 http:// 或 https://", nodeID, label)
+			}
+		}
+	case NotifyChannelWeCom:
+		if out.Webhook == "" {
+			return out, fmt.Errorf("通知节点 %s 的企业微信机器人 Webhook 必填", nodeID)
+		}
+		if out.SMTPHost != "" || len(out.To) > 0 {
+			return out, fmt.Errorf("通知节点 %s 的邮件参数不能用于企业微信通道", nodeID)
+		}
+	case NotifyChannelEmail:
+		out.SMTPHost = strings.TrimSpace(out.SMTPHost)
+		out.SMTPTLS = strings.ToLower(strings.TrimSpace(out.SMTPTLS))
+		if out.SMTPTLS == "" {
+			out.SMTPTLS = NotifyTLSStartTLS
+		}
+		validTLS := false
+		for _, mode := range notifyTLSModes {
+			if out.SMTPTLS == mode {
+				validTLS = true
+				break
+			}
+		}
+		if !validTLS {
+			return out, fmt.Errorf("通知节点 %s 的 notify.smtp_tls 只支持 starttls、tls 或 none", nodeID)
+		}
+		if out.SMTPHost == "" {
+			return out, fmt.Errorf("通知节点 %s 的邮件通道需要配置 notify.smtp_host", nodeID)
+		}
+		if out.SMTPPort < 0 || out.SMTPPort > 65535 {
+			return out, fmt.Errorf("通知节点 %s 的 notify.smtp_port 必须在 1..65535 之间", nodeID)
+		}
+		if out.SMTPPort == 0 {
+			if out.SMTPTLS == NotifyTLSTLS {
+				out.SMTPPort = 465
+			} else {
+				out.SMTPPort = 587
+			}
+		}
+		recipients := make([]string, 0, len(out.To))
+		for _, item := range out.To {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if strings.Contains(item, "{{") {
+				recipients = append(recipients, item)
+				continue
+			}
+			if _, err := mail.ParseAddress(item); err != nil {
+				return out, fmt.Errorf("通知节点 %s 的收件人无效: %s", nodeID, item)
+			}
+			recipients = append(recipients, item)
+		}
+		if len(recipients) == 0 {
+			return out, fmt.Errorf("通知节点 %s 至少需要一个收件人", nodeID)
+		}
+		out.To = recipients
+		out.From = strings.TrimSpace(out.From)
+		if out.From == "" {
+			out.From = out.SMTPUser
+		}
+		if strings.TrimSpace(out.From) == "" {
+			return out, fmt.Errorf("通知节点 %s 的邮件通道需要配置发件人 notify.from 或 notify.smtp_user", nodeID)
+		}
+		if _, err := mail.ParseAddress(out.From); err != nil {
+			return out, fmt.Errorf("通知节点 %s 的发件人无效: %s", nodeID, out.From)
+		}
+	}
+	return out, nil
+}
 
 var (
 	httpMethods   = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
@@ -573,4 +814,155 @@ func ParseTimeout(value string, fallback time.Duration) time.Duration {
 
 func fmtInt(value int) string {
 	return strconv.Itoa(value)
+}
+
+// ValidateScriptConfig 校验内置 Shell 节点：脚本必填，超时与工作目录格式合法。
+func ValidateScriptConfig(nodeID string, item WorkflowScript) (WorkflowScript, error) {
+	out := item
+	if strings.TrimSpace(out.Script) == "" {
+		return out, fmt.Errorf("Shell 节点 %s 的 script.script 必填", nodeID)
+	}
+	out.Timeout = strings.TrimSpace(out.Timeout)
+	if out.Timeout != "" {
+		if duration, err := time.ParseDuration(out.Timeout); err != nil || duration <= 0 {
+			return out, fmt.Errorf("Shell 节点 %s 的 script.timeout 必须是正时长，例如 30s、2m", nodeID)
+		}
+	}
+	for name := range out.Env {
+		if !validScriptEnvName(name) {
+			return out, fmt.Errorf("Shell 节点 %s 的 script.env 变量名 %q 只能包含字母、数字和下划线，且不能以数字开头", nodeID, name)
+		}
+	}
+	return out, nil
+}
+
+func validScriptEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index, char := range name {
+		if char == '_' || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || index > 0 && char >= '0' && char <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// ValidateChecksumConfig 校验文件校验节点：路径必填，算法只支持 md5/sha256。
+func ValidateChecksumConfig(nodeID string, item WorkflowChecksum) (WorkflowChecksum, error) {
+	out := item
+	out.Path = strings.TrimSpace(out.Path)
+	if out.Path == "" {
+		return out, fmt.Errorf("文件校验节点 %s 的 checksum.path 必填", nodeID)
+	}
+	algorithm := strings.ToLower(strings.TrimSpace(out.Algorithm))
+	if algorithm == "" {
+		algorithm = "sha256"
+	}
+	if algorithm != "md5" && algorithm != "sha256" {
+		return out, fmt.Errorf("文件校验节点 %s 的 checksum.algorithm 只支持 md5 或 sha256", nodeID)
+	}
+	out.Algorithm = algorithm
+	out.Expected = strings.TrimSpace(out.Expected)
+	// 模板引用保留大小写，渲染后的摘要由执行器再次校验。
+	if out.Expected != "" && !strings.Contains(out.Expected, "{{") {
+		out.Expected = strings.ToLower(out.Expected)
+		want := 32
+		if algorithm == "sha256" {
+			want = 64
+		}
+		if len(out.Expected) != want {
+			return out, fmt.Errorf("文件校验节点 %s 的 checksum.expected 长度应为 %d 位", nodeID, want)
+		}
+		for _, r := range out.Expected {
+			if !strings.ContainsRune("0123456789abcdef", r) {
+				return out, fmt.Errorf("文件校验节点 %s 的 checksum.expected 只能是十六进制", nodeID)
+			}
+		}
+	}
+	return out, nil
+}
+
+var archiveFormats = []string{"", "tar", "tar.gz", "tgz", "zip"}
+
+// ValidateArchiveConfig 校验解压节点：源文件与目标目录必填，格式需受支持。
+func ValidateArchiveConfig(nodeID string, item WorkflowArchive) (WorkflowArchive, error) {
+	out := item
+	out.Path = strings.TrimSpace(out.Path)
+	out.TargetDir = strings.TrimSpace(out.TargetDir)
+	if out.Path == "" {
+		return out, fmt.Errorf("解压节点 %s 的 archive.path 必填", nodeID)
+	}
+	if out.TargetDir == "" {
+		return out, fmt.Errorf("解压节点 %s 的 archive.target_dir 必填", nodeID)
+	}
+	out.Format = strings.ToLower(strings.TrimSpace(out.Format))
+	valid := false
+	for _, format := range archiveFormats {
+		if out.Format == format {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		return out, fmt.Errorf("解压节点 %s 的 archive.format 只支持 tar、tar.gz、tgz、zip 或留空自动识别", nodeID)
+	}
+	if out.Strip < 0 {
+		return out, fmt.Errorf("解压节点 %s 的 archive.strip_components 不能为负数", nodeID)
+	}
+	return out, nil
+}
+
+// ValidateWaitConfig 校验等待/轮询节点：固定等待或轮询二选一，轮询必须有结束条件。
+func ValidateWaitConfig(nodeID string, item WorkflowWait) (WorkflowWait, error) {
+	out := item
+	out.PollURL = strings.TrimSpace(out.PollURL)
+	out.PollFile = strings.TrimSpace(out.PollFile)
+	out.Interval = strings.TrimSpace(out.Interval)
+	out.MaxWait = strings.TrimSpace(out.MaxWait)
+	if math.IsNaN(out.Seconds) || math.IsInf(out.Seconds, 0) || out.Seconds < 0 {
+		return out, fmt.Errorf("等待节点 %s 的 wait.seconds 必须是有限的非负数", nodeID)
+	}
+	if out.MaxAttempts < 0 {
+		return out, fmt.Errorf("等待节点 %s 的 wait.max_attempts 不能为负数", nodeID)
+	}
+	if out.PollURL != "" && out.PollFile != "" {
+		return out, fmt.Errorf("等待节点 %s 的 wait.poll_url 与 wait.poll_file 只能配置一个", nodeID)
+	}
+	polling := out.PollURL != "" || out.PollFile != ""
+	if !polling {
+		if out.Seconds <= 0 {
+			return out, fmt.Errorf("等待节点 %s 需要配置固定等待秒数或轮询条件", nodeID)
+		}
+		if out.Seconds > 3600 {
+			return out, fmt.Errorf("等待节点 %s 的 wait.seconds 不能超过 3600", nodeID)
+		}
+		return out, nil
+	}
+	if out.Seconds > 0 {
+		return out, fmt.Errorf("等待节点 %s 不能同时配置固定等待与轮询", nodeID)
+	}
+	if out.Interval != "" {
+		if duration, err := time.ParseDuration(out.Interval); err != nil || duration <= 0 {
+			return out, fmt.Errorf("等待节点 %s 的 wait.interval 必须是正时长，例如 5s、1m", nodeID)
+		}
+	}
+	if out.MaxWait != "" {
+		if duration, err := time.ParseDuration(out.MaxWait); err != nil || duration <= 0 {
+			return out, fmt.Errorf("等待节点 %s 的 wait.max_wait 必须是正时长，例如 5m", nodeID)
+		}
+	}
+	if out.PollURL != "" {
+		lower := strings.ToLower(out.PollURL)
+		if !strings.Contains(out.PollURL, "{{") && !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+			return out, fmt.Errorf("等待节点 %s 的 wait.poll_url 只支持 http:// 或 https://", nodeID)
+		}
+		for _, code := range out.ExpectStatus {
+			if code < 100 || code > 599 {
+				return out, fmt.Errorf("等待节点 %s 的 wait.expect_status 必须在 100..599 之间", nodeID)
+			}
+		}
+	}
+	return out, nil
 }

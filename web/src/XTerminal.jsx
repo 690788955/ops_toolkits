@@ -39,6 +39,10 @@ const XTerminal = forwardRef(function XTerminal({className = '', options = {}, o
     writeln(value) {
       terminalRef.current?.writeln(value)
     },
+    write(data, callback) {
+      if (!terminalRef.current) return
+      terminalRef.current.write(data, callback)
+    },
     reset() {
       terminalRef.current?.reset()
     },

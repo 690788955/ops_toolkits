@@ -4,7 +4,7 @@ import { createRoot } from 'react-dom/client'
 import '@xyflow/react/dist/style.css'
 import './styles.css'
 import * as yaml from 'js-yaml'
-import {bindWorkflowConfigPath, deleteConfigVersion, deleteJSON, downloadUserWorkflowExport, fetchConfigVersion, fetchConfigVersions, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusShareTargets, fetchRunDetail, fetchRunSummary, postJSON, postMarketInstall, postPluginZip, putJSON, rescanPlugins, saveConfigVersion, setDefaultConfigVersion, uploadWorkflowConfigFile} from './api.js'
+import {bindWorkflowConfigPath, bootstrapAuthTokenFromURL, deleteConfigVersion, deleteJSON, downloadUserWorkflowExport, fetchConfigVersion, fetchConfigVersions, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusShareTargets, fetchRunDetail, fetchRunSummary, postJSON, postMarketInstall, postPluginZip, putJSON, rescanPlugins, saveConfigVersion, setDefaultConfigVersion, uploadWorkflowConfigFile} from './api.js'
 import {buildTextDiff, countTextMatches, replaceTextDraft} from './configDiff.js'
 import {buildConfigItemCollections} from './configItems.js'
 import {filterEntries, readableAPIError, summarizeAPIResponse, tagsForEntries} from './utils.js'
@@ -14,10 +14,12 @@ import SshHostsModal, {sshHostStatusLabel, summarizeSshHosts} from './SshHostsMo
 import PluginShareModal from './PluginShareModal.jsx'
 import {MarketSourcesModal} from './MarketSourcesPanel.jsx'
 import {useModalEscape} from './useModalEscape.js'
+import {isDraftWindowLocation} from './workflow/draftWindow.js'
 
 const WorkflowEditor = React.lazy(() => import('./workflow/WorkflowEditor.jsx'))
 const LiveRunTerminal = React.lazy(() => import('./LiveRunTerminal.jsx'))
 const RunRecordCanvas = React.lazy(() => import('./workflow/RunRecordCanvas.jsx'))
+const DraftWindowShell = React.lazy(() => import('./workflow/DraftWindowShell.jsx'))
 
 const APP_TABS = new Set(['tools', 'workflows', 'config', 'runs'])
 
@@ -408,6 +410,7 @@ function App() {
                 hosts={sshData?.hosts || []}
                 setResult={setResult}
                 refreshCatalog={refreshCatalog}
+                openPluginManager={() => setPluginModalOpen(true)}
                 resultPanel={(
                   <section className="card resultCard workflowResultCard">
                     {resultPanelHeader}
@@ -737,7 +740,9 @@ export function RunHistoryPanel({catalog}) {
 
   const statusOptions = [
     ['', '全部'],
+    ['pending', '待处理'],
     ['failed', '失败'],
+    ['rolled_back', '已回滚'],
     ['running', '运行中'],
     ['cancelled', '已取消'],
     ['succeeded', '成功']
@@ -905,6 +910,8 @@ function runStatusText(status) {
   if (status === 'succeeded') return '成功'
   if (status === 'failed') return '失败'
   if (status === 'running') return '运行中'
+  if (status === 'pending') return '待处理'
+  if (status === 'rolled_back') return '已回滚'
   if (status === 'cancelled') return '已取消'
   if (status === 'skipped') return '跳过'
   return status || '未知'
@@ -4118,7 +4125,12 @@ function RunPanel({entries, totalEntries, selected, params, setParams, selectEnt
 
 const rootElement = document.getElementById('root')
 if (rootElement) {
-  createRoot(rootElement).render(<App />)
+  bootstrapAuthTokenFromURL().finally(() => {
+    // 独立草稿窗口只挂载画布，不初始化主控制台的其它面板。
+    createRoot(rootElement).render(isDraftWindowLocation(window.location.search)
+      ? <React.Suspense fallback={<div className="empty">正在打开独立草稿窗口...</div>}><DraftWindowShell /></React.Suspense>
+      : <App />)
+  })
 }
 
 function parseBoolParamValue(value) {

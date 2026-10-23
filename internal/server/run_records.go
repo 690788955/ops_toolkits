@@ -105,8 +105,9 @@ func loadRunDetail(state *serverState, reg *registry.Registry, id string) (runDe
 
 func loadRunLogs(runDir string, record runner.RunRecord) runLogs {
 	logs := runLogs{
-		Stdout: readTextFile(filepath.Join(runDir, "stdout.log")),
-		Stderr: readTextFile(filepath.Join(runDir, "stderr.log")),
+		Stdout:   readTextFile(filepath.Join(runDir, "stdout.log")),
+		Stderr:   readTextFile(filepath.Join(runDir, "stderr.log")),
+		Attempts: loadAttemptLogs(runDir, record),
 	}
 	if len(record.Steps) == 0 {
 		if logs.Stdout != "" || logs.Stderr != "" || record.Kind == "tool" {
@@ -140,6 +141,56 @@ func readTextFile(path string) string {
 		return ""
 	}
 	return string(data)
+}
+
+// loadAttemptLogs 读取 attempts/<attempt-id>/ 下的恢复证据，路径离开运行目录时忽略。
+func loadAttemptLogs(runDir string, record runner.RunRecord) map[string]runAttemptLogs {
+	if len(record.Attempts) == 0 {
+		return nil
+	}
+	out := make(map[string]runAttemptLogs, len(record.Attempts))
+	for _, attempt := range record.Attempts {
+		if strings.TrimSpace(attempt.LogDir) == "" {
+			continue
+		}
+		dir := filepath.Join(runDir, filepath.FromSlash(attempt.LogDir))
+		rel, err := filepath.Rel(runDir, dir)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			continue
+		}
+		logs := runAttemptLogs{Summary: readTextFile(filepath.Join(dir, "summary.log"))}
+		_ = filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil || entry.IsDir() {
+				return nil
+			}
+			name := entry.Name()
+			if name != "stdout.log" && name != "stderr.log" {
+				return nil
+			}
+			key, relErr := filepath.Rel(dir, filepath.Dir(path))
+			if relErr != nil {
+				return nil
+			}
+			key = filepath.ToSlash(key)
+			if key == "." {
+				key = "attempt"
+			}
+			if name == "stdout.log" {
+				if logs.Stdout == nil {
+					logs.Stdout = map[string]string{}
+				}
+				logs.Stdout[key] = readTextFile(path)
+			} else {
+				if logs.Stderr == nil {
+					logs.Stderr = map[string]string{}
+				}
+				logs.Stderr[key] = readTextFile(path)
+			}
+			return nil
+		})
+		out[attempt.ID] = logs
+	}
+	return out
 }
 
 func buildRunLogItems(runDir string, record runner.RunRecord, steps map[string]runLogs) []runLogItem {

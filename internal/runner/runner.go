@@ -63,19 +63,24 @@ func (r *Runner) SetRemoteExecutor(exec RemoteExecutor) {
 }
 
 type RunRecord struct {
-	ID        string                 `json:"id"`
-	Kind      string                 `json:"kind"`
-	Target    string                 `json:"target"`
-	BatchID   string                 `json:"batch_id,omitempty"`
-	HostID    string                 `json:"host_id,omitempty"`
-	HostName  string                 `json:"host_name,omitempty"`
-	Status    string                 `json:"status"`
-	StartedAt time.Time              `json:"started_at"`
-	EndedAt   time.Time              `json:"ended_at"`
-	Params    map[string]string      `json:"params"`
-	Config    map[string]interface{} `json:"config,omitempty"`
-	Steps     []StepRecord           `json:"steps,omitempty"`
-	Error     string                 `json:"error,omitempty"`
+	ID            string                 `json:"id"`
+	Kind          string                 `json:"kind"`
+	Target        string                 `json:"target"`
+	BatchID       string                 `json:"batch_id,omitempty"`
+	HostID        string                 `json:"host_id,omitempty"`
+	HostName      string                 `json:"host_name,omitempty"`
+	Status        string                 `json:"status"`
+	StartedAt     time.Time              `json:"started_at"`
+	EndedAt       time.Time              `json:"ended_at"`
+	Params        map[string]string      `json:"params"`
+	Config        map[string]interface{} `json:"config,omitempty"`
+	Steps         []StepRecord           `json:"steps,omitempty"`
+	Error         string                 `json:"error,omitempty"`
+	Snapshot      *RunSnapshot           `json:"snapshot,omitempty"`
+	Pending       *PendingState          `json:"pending,omitempty"`
+	Backups       []BackupRecord         `json:"backups,omitempty"`
+	Attempts      []AttemptRecord        `json:"attempts,omitempty"`
+	Notifications []NotificationRecord   `json:"notifications,omitempty"`
 }
 
 type StepRecord struct {
@@ -333,6 +338,11 @@ func (r *Runner) prepareWorkflowRun(wf *config.WorkflowConfig, params map[string
 	if err != nil {
 		return record, nil, "", err
 	}
+	record.Snapshot = newRunSnapshot(wf, finalParams)
+	r.captureRunSnapshotBindings(record.Snapshot)
+	if err := writeRunSnapshot(runDir, record.Snapshot); err != nil {
+		return record, nil, "", err
+	}
 	return record, finalParams, runDir, nil
 }
 
@@ -340,27 +350,35 @@ func (r *Runner) runWorkflowPrepared(ctx context.Context, wf *config.WorkflowCon
 	_ = r.saveRecord(runDir, record)
 	ordered, err := registry.OrderWorkflow(wf)
 	if err != nil {
-		finishRecord(record, err)
-		_ = r.saveRecord(runDir, record)
-		return record, err
+		return record, r.finalizeWorkflowRun(ctx, record, runDir, err)
 	}
 	if err := r.validateWorkflowConfirmations(ordered, confirmed); err != nil {
-		finishRecord(record, err)
-		_ = r.saveRecord(runDir, record)
-		return record, err
+		return record, r.finalizeWorkflowRun(ctx, record, runDir, err)
 	}
 	workflowContext, active, nodeByID, legacyLoopTargets, edgesByFrom, err := prepareWorkflowExecutionState(wf, finalParams)
 	if err != nil {
-		finishRecord(record, err)
-		_ = r.saveRecord(runDir, record)
-		return record, err
+		return record, r.finalizeWorkflowRun(ctx, record, runDir, err)
 	}
 	err = r.executeWorkflowNodes(ctx, wf, ordered, finalParams, uploads, out, errOut, record, runDir, workflowContext, active, nodeByID, legacyLoopTargets, edgesByFrom, nil)
-	finishRecord(record, err)
-	if saveErr := r.saveRecord(runDir, record); saveErr != nil && err == nil {
-		err = saveErr
+	return record, r.finalizeWorkflowRun(ctx, record, runDir, err)
+}
+
+// finalizeWorkflowRun 统一收敛终态、待处理标记和结束动作通知，保证恢复链路与普通运行一致。
+func (r *Runner) finalizeWorkflowRun(ctx context.Context, record *RunRecord, runDir string, runErr error) error {
+	applyPendingState(record, runErr)
+	finishRecord(record, runErr)
+	switch record.Status {
+	case RunStatusPending:
+		r.appendRecoveryNotification(ctx, record, config.WorkflowNotifyPending)
+	case "succeeded":
+		r.appendRecoveryNotification(ctx, record, config.WorkflowNotifySucceeded)
+	case "failed":
+		r.appendRecoveryNotification(ctx, record, config.WorkflowNotifyFailed)
 	}
-	return record, err
+	if saveErr := r.saveRecord(runDir, record); saveErr != nil && runErr == nil {
+		return saveErr
+	}
+	return runErr
 }
 
 func (r *Runner) RerunWorkflowNode(ctx context.Context, wf *config.WorkflowConfig, record *RunRecord, runDir, nodeID string, confirmed bool, out, errOut io.Writer) (*RunRecord, error) {
@@ -381,6 +399,9 @@ func (r *Runner) RerunWorkflowNodeWithParams(ctx context.Context, wf *config.Wor
 	if record.Status == "running" {
 		return record, fmt.Errorf("运行中的工作流不能重跑节点")
 	}
+	if record.Pending != nil || len(record.Attempts) > 0 {
+		return record, fmt.Errorf("有恢复历史的运行不能直接重跑节点，请使用恢复入口或新建运行，保留原始失败证据")
+	}
 	if strings.TrimSpace(nodeID) == "" {
 		return record, fmt.Errorf("节点 ID 必填")
 	}
@@ -400,8 +421,53 @@ func (r *Runner) RerunWorkflowNodeWithParams(ctx context.Context, wf *config.Wor
 		return record, fmt.Errorf("工作流中找不到节点 %s", nodeID)
 	}
 	affected := downstreamNodeSet(nodeID, wf.Edges)
+	if len(wf.Stages) > 0 {
+		// 后续阶段受屏障影响，当前并行阶段只重跑真实依赖与主机冲突的后继。
+		includeLater := false
+		for _, stage := range workflowStages(wf, ordered) {
+			if includeLater {
+				for _, node := range stage.nodes {
+					affected[node.ID] = true
+				}
+				continue
+			}
+			if stage.id != nodeByID[nodeID].StageID {
+				continue
+			}
+			if stage.mode == config.WorkflowStageExecutionParallel {
+				inStage := map[string]bool{}
+				for _, node := range stage.nodes {
+					inStage[node.ID] = true
+				}
+				graph := buildStageDependencyGraph(stage.nodes, wf.Edges, inStage)
+				if err := graph.addMutationConflicts(stage.nodes, r.changeNodeIDs(wf), r.serviceNodeIDs(wf)); err != nil {
+					return record, err
+				}
+				queue := []string{nodeID}
+				visited := map[string]bool{}
+				for len(queue) > 0 {
+					id := queue[0]
+					queue = queue[1:]
+					if visited[id] {
+						continue
+					}
+					visited[id] = true
+					affected[id] = true
+					queue = append(queue, graph.children[id]...)
+				}
+			} else {
+				for _, node := range stage.nodes {
+					if node.Order >= nodeByID[nodeID].Order {
+						affected[node.ID] = true
+					}
+				}
+			}
+			includeLater = true
+		}
+	}
 	rerunUploads := reusableUploadsForNodes(runDir, wf.Nodes, affected)
 	record.Steps = filterStepsOutside(record.Steps, affected)
+	record.Backups = filterBackupsOutside(record.Backups, affected)
 	for affectedNodeID := range affected {
 		if err := os.RemoveAll(filepath.Join(runDir, affectedNodeID)); err != nil {
 			return record, fmt.Errorf("清理节点 %s 旧日志失败: %w", affectedNodeID, err)
@@ -420,13 +486,12 @@ func (r *Runner) RerunWorkflowNodeWithParams(ctx context.Context, wf *config.Wor
 	record.Status = "running"
 	record.Error = ""
 	record.EndedAt = time.Time{}
+	record.Snapshot = newRunSnapshot(wf, finalParams)
+	r.captureRunSnapshotBindings(record.Snapshot)
+	_ = writeRunSnapshot(runDir, record.Snapshot)
 	_ = r.saveRecord(runDir, record)
 	err = r.executeWorkflowNodes(ctx, wf, ordered, finalParams, rerunUploads, out, errOut, record, runDir, workflowContext, active, nodeByID, legacyLoopTargets, edgesByFrom, affected)
-	finishRecord(record, err)
-	if saveErr := r.saveRecord(runDir, record); saveErr != nil && err == nil {
-		err = saveErr
-	}
-	return record, err
+	return record, r.finalizeWorkflowRun(ctx, record, runDir, err)
 }
 
 func rerunWorkflowParams(wf *config.WorkflowConfig, record *RunRecord, overrides map[string]string) map[string]string {
@@ -459,228 +524,712 @@ func prepareWorkflowExecutionState(wf *config.WorkflowConfig, finalParams map[st
 }
 
 func (r *Runner) executeWorkflowNodes(ctx context.Context, wf *config.WorkflowConfig, ordered []config.WorkflowNode, finalParams map[string]string, uploads map[string]config.WorkflowUploadResult, out, errOut io.Writer, record *RunRecord, runDir string, workflowContext map[string]string, active map[string]bool, nodeByID map[string]config.WorkflowNode, legacyLoopTargets map[string]bool, edgesByFrom workflowEdgeBuckets, executeOnly map[string]bool) error {
-	var err error
+	exec := &workflowExec{
+		workflowContext:    workflowContext,
+		active:             active,
+		nodeByID:           nodeByID,
+		legacyLoopTargets:  legacyLoopTargets,
+		edgesByFrom:        edgesByFrom,
+		changeNodes:        r.changeNodeIDs(wf),
+		serviceNodes:       r.serviceNodeIDs(wf),
+		diffNodes:          r.diffNodeIDs(wf),
+		skipChangeOnNoDiff: wf.Recovery != nil && wf.Recovery.SkipChangeOnNoDiff,
+		record:             record,
+		runDir:             runDir,
+		saver:              r.saveRecord,
+		rerun:              executeOnly != nil,
+	}
+	for _, stage := range workflowStages(wf, ordered) {
+		stageNodes := make([]config.WorkflowNode, 0, len(stage.nodes))
+		for _, node := range stage.nodes {
+			if executeOnly == nil || executeOnly[node.ID] {
+				stageNodes = append(stageNodes, node)
+			}
+		}
+		var stageErr error
+		if stage.mode == config.WorkflowStageExecutionParallel {
+			stageErr = r.executeParallelStage(ctx, wf, stage, stageNodes, finalParams, uploads, out, errOut, exec)
+		} else {
+			stageErr = r.executeSerialNodes(ctx, wf, stageNodes, finalParams, uploads, out, errOut, exec)
+		}
+		if stageErr != nil {
+			return stageErr
+		}
+	}
+	return nil
+}
+
+// workflowStagePlan 是运行时展开的阶段视图：串行阶段按 order 形成隐式链，并行阶段只保留显式依赖。
+type workflowStagePlan struct {
+	id    string
+	name  string
+	mode  string
+	limit int
+	nodes []config.WorkflowNode
+}
+
+// workflowStages 把有序节点切成阶段。没有 stages 的旧工作流视为一个串行阶段，保持原有语义。
+func workflowStages(wf *config.WorkflowConfig, ordered []config.WorkflowNode) []workflowStagePlan {
+	if len(wf.Stages) == 0 {
+		return []workflowStagePlan{{id: "", name: "原有流程", mode: config.WorkflowStageExecutionSerial, nodes: ordered}}
+	}
+	plans := make([]workflowStagePlan, 0, len(wf.Stages))
+	index := map[string]int{}
+	for _, stage := range wf.Stages {
+		mode := stage.ExecutionMode
+		if mode == "" {
+			mode = config.WorkflowStageExecutionSerial
+		}
+		index[stage.ID] = len(plans)
+		plans = append(plans, workflowStagePlan{id: stage.ID, name: stage.Name, mode: mode, limit: stage.MaxConcurrency})
+	}
 	for _, node := range ordered {
+		position, ok := index[node.StageID]
+		if !ok {
+			continue
+		}
+		plans[position].nodes = append(plans[position].nodes, node)
+	}
+	return plans
+}
+
+// executeSerialNodes 保持串行阶段语义：按 order 依次执行，任一节点失败后不再派发后续节点。
+// 阶段内跳过的条件分支会级联跳过它的下游；但同一节点仍可能由其他分支激活，因此跳过不阻断后续节点。
+func (r *Runner) executeSerialNodes(ctx context.Context, wf *config.WorkflowConfig, nodes []config.WorkflowNode, finalParams map[string]string, uploads map[string]config.WorkflowUploadResult, out, errOut io.Writer, exec *workflowExec) error {
+	for _, node := range nodes {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		if executeOnly != nil && !executeOnly[node.ID] {
-			continue
+		if err := r.dispatchWorkflowNode(ctx, wf, node, finalParams, uploads, out, errOut, exec, false); err != nil {
+			return err
 		}
-		nodeType := workflowNodeType(node)
-		if legacyLoopTargets[node.ID] {
-			reason := "循环目标工具由循环节点内嵌执行"
-			record.Steps = append(record.Steps, skippedStepRecord(node, nodeType, reason))
-			_ = r.saveRecord(runDir, record)
-			continue
-		}
-		if !active[node.ID] {
-			reason := "条件分支未激活"
-			record.Steps = append(record.Steps, skippedStepRecord(node, nodeType, reason))
-			_ = r.saveRecord(runDir, record)
-			continue
-		}
-		if nodeType == config.WorkflowNodeTypeCondition {
-			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "running", StartedAt: time.Now()}
-			stepIndex := appendStepRecord(record, stepRecord)
-			_ = r.saveRecord(runDir, record)
-			inputValue := renderTemplate(node.Condition.Input, workflowContext)
-			matchedCase := matchConditionCase(inputValue, node.Condition)
-			stepRecord.ConditionInput = inputValue
-			stepRecord.MatchedCase = matchedCase
-			stepRecord.EndedAt = time.Now()
-			stepRecord.Status = "succeeded"
-			record.Steps[stepIndex] = stepRecord
-			_ = r.saveRecord(runDir, record)
-			activateConditionBranches(node.ID, matchedCase, edgesByFrom, active)
+	}
+	return nil
+}
+
+// dispatchWorkflowNode 执行单个节点并写入步骤记录。串行阶段由调用方保证顺序；
+// 并行阶段可能有多个 goroutine 同时进入，记录追加、上下文和激活状态都要经过 exec 的锁。
+func (r *Runner) dispatchWorkflowNode(ctx context.Context, wf *config.WorkflowConfig, node config.WorkflowNode, finalParams map[string]string, uploads map[string]config.WorkflowUploadResult, out, errOut io.Writer, exec *workflowExec, parallel bool) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		step := StepRecord{ID: node.ID, Type: workflowNodeType(node), Tool: node.Tool, StartedAt: time.Now(), EndedAt: time.Now()}
+		markStepFailure(&step, ctxErr)
+		exec.appendStep(step)
+		return ctxErr
+	}
+	nodeType := workflowNodeType(node)
+	if exec.legacyLoopTargets[node.ID] {
+		exec.recordSkippedStep(node, nodeType, "循环目标工具由循环节点内嵌执行")
+		return nil
+	}
+	exec.mu.Lock()
+	activeNow := exec.active[node.ID]
+	skipChange := exec.skipChanges && (exec.changeNodes[node.ID] || exec.serviceNodes[node.ID])
+	contextSnapshot, _ := cloneWorkflowContext(exec.workflowContext)
+	exec.mu.Unlock()
+	if !activeNow {
+		exec.recordSkippedStep(node, nodeType, "条件分支未激活")
+		return nil
+	}
+	if skipChange {
+		exec.recordSkippedStep(node, nodeType, "差异检查未发现变更，跳过配置下发与服务重启")
+		exec.activate(node.ID, "", false)
+		return nil
+	}
+	if nodeType == config.WorkflowNodeTypeCondition {
+		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "running", StartedAt: time.Now()}
+		stepIndex := exec.appendStep(stepRecord)
+		inputValue := renderTemplate(node.Condition.Input, contextSnapshot)
+		matchedCase := matchConditionCase(inputValue, node.Condition)
+		stepRecord.ConditionInput = inputValue
+		stepRecord.MatchedCase = matchedCase
+		stepRecord.EndedAt = time.Now()
+		stepRecord.Status = "succeeded"
+		exec.updateStep(stepIndex, stepRecord)
+		exec.activate(node.ID, matchedCase, true)
+		exec.writeContext(func(workflowContext map[string]string) {
 			workflowContext["steps."+node.ID+".condition.input"] = inputValue
 			workflowContext["steps."+node.ID+".condition.case"] = matchedCase
-			continue
+		})
+		return nil
+	}
+	if nodeType == config.WorkflowNodeTypeParallel || nodeType == config.WorkflowNodeTypeJoin {
+		// 旧 parallel/join 节点只做兼容标记：并行能力由阶段模式承担，节点本身不再分叉。
+		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "succeeded", StartedAt: time.Now(), EndedAt: time.Now()}
+		exec.appendStep(stepRecord)
+		exec.activate(node.ID, "", false)
+		return nil
+	}
+	if nodeType == config.WorkflowNodeTypeUpload {
+		if parallel && !hasUploadResult(uploads, node.ID) {
+			message := fmt.Sprintf("上传节点 %s 不能放在并行阶段：上传结果需要在运行启动前确定", node.ID)
+			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "failed", StartedAt: time.Now(), EndedAt: time.Now(), Error: message}
+			exec.appendStep(stepRecord)
+			return errors.New(message)
 		}
-		if nodeType == config.WorkflowNodeTypeParallel || nodeType == config.WorkflowNodeTypeJoin {
-			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "succeeded", StartedAt: time.Now(), EndedAt: time.Now()}
-			record.Steps = append(record.Steps, stepRecord)
-			_ = r.saveRecord(runDir, record)
-			activatePlainBranches(node.ID, edgesByFrom, active)
-			continue
+		if exec.rerun && !hasUploadResult(uploads, node.ID) {
+			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "failed", StartedAt: time.Now(), EndedAt: time.Now(), Error: fmt.Sprintf("上传节点 %s 缺少可复用的上传结果", node.ID)}
+			exec.appendStep(stepRecord)
+			return fmt.Errorf("上传节点 %s 缺少可复用的上传结果", node.ID)
 		}
-		if nodeType == config.WorkflowNodeTypeUpload {
-			if executeOnly != nil && !hasUploadResult(uploads, node.ID) {
-				stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "failed", StartedAt: time.Now(), EndedAt: time.Now(), Error: fmt.Sprintf("上传节点 %s 缺少可复用的上传结果", node.ID)}
-				record.Steps = append(record.Steps, stepRecord)
-				_ = r.saveRecord(runDir, record)
-				return fmt.Errorf("上传节点 %s 缺少可复用的上传结果", node.ID)
-			}
-			status := "waiting"
+		status := "waiting"
+		if hasUploadResult(uploads, node.ID) {
+			status = "running"
+		}
+		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: status, StartedAt: time.Now()}
+		stepRunDir := filepath.Join(exec.runDir, node.ID)
+		stepIndex := exec.appendStep(stepRecord)
+		upload, uploadErr := waitForUploadNode(ctx, node, uploads, stepRunDir)
+		stepRecord.Status = "running"
+		exec.updateStep(stepIndex, stepRecord)
+		if uploadErr == nil {
 			if hasUploadResult(uploads, node.ID) {
-				status = "running"
+				uploadErr = WriteWorkflowUploadResult(exec.runDir, node.ID, upload)
 			}
-			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: status, StartedAt: time.Now()}
-			stepRunDir := filepath.Join(runDir, node.ID)
-			stepIndex := appendStepRecord(record, stepRecord)
-			_ = r.saveRecord(runDir, record)
-			upload, uploadErr := waitForUploadNode(ctx, node, uploads, stepRunDir)
-			stepRecord.Status = "running"
-			record.Steps[stepIndex] = stepRecord
-			_ = r.saveRecord(runDir, record)
-			if uploadErr == nil {
-				if hasUploadResult(uploads, node.ID) {
-					uploadErr = WriteWorkflowUploadResult(runDir, node.ID, upload)
-				}
-			}
-			if uploadErr == nil {
-				uploadErr = executeUploadNode(node, upload, stepRunDir)
-			}
-			stepRecord.EndedAt = time.Now()
-			if uploadErr != nil {
-				if errors.Is(uploadErr, context.Canceled) {
-					stepRecord.Status = "cancelled"
-					stepRecord.Error = "运行已取消"
-				} else {
-					stepRecord.Status = "failed"
-					stepRecord.Error = uploadErr.Error()
-				}
-				record.Steps[stepIndex] = stepRecord
-				_ = r.saveRecord(runDir, record)
-				err = uploadErr
-				break
-			}
+		}
+		if uploadErr == nil {
+			uploadErr = executeUploadNode(node, upload, stepRunDir)
+		}
+		stepRecord.EndedAt = time.Now()
+		if uploadErr != nil {
+			uploadErr = workflowNodeError(ctx, node.ID, uploadErr)
+			markStepFailure(&stepRecord, uploadErr)
+			exec.updateStep(stepIndex, stepRecord)
+			return exec.recoveryFailure(node, uploadErr)
+		}
+		exec.writeContext(func(workflowContext map[string]string) {
 			addUploadContext(workflowContext, node.ID, upload, stepRunDir)
-			stepRecord.Status = "succeeded"
-			record.Steps[stepIndex] = stepRecord
-			_ = r.saveRecord(runDir, record)
-			activatePlainBranches(node.ID, edgesByFrom, active)
-			continue
+		})
+		stepRecord.Status = "succeeded"
+		exec.updateStep(stepIndex, stepRecord)
+		exec.activate(node.ID, "", false)
+		return nil
+	}
+	if nodeType == config.WorkflowNodeTypeExtractConfig {
+		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "running", StartedAt: time.Now()}
+		stepRunDir := filepath.Join(exec.runDir, node.ID)
+		stepIndex := exec.appendStep(stepRecord)
+		extractErr := r.executeExtractConfigNode(wf, node, contextSnapshot, stepRunDir)
+		stepRecord.EndedAt = time.Now()
+		if extractErr != nil {
+			extractErr = workflowNodeError(ctx, node.ID, extractErr)
+			markStepFailure(&stepRecord, extractErr)
+			exec.updateStep(stepIndex, stepRecord)
+			return exec.recoveryFailure(node, extractErr)
 		}
-		if nodeType == config.WorkflowNodeTypeExtractConfig {
-			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "running", StartedAt: time.Now()}
-			stepRunDir := filepath.Join(runDir, node.ID)
-			stepIndex := appendStepRecord(record, stepRecord)
-			_ = r.saveRecord(runDir, record)
-			extractErr := r.executeExtractConfigNode(wf, node, workflowContext, stepRunDir)
-			stepRecord.EndedAt = time.Now()
-			if extractErr != nil {
-				if errors.Is(extractErr, context.Canceled) {
-					stepRecord.Status = "cancelled"
-					stepRecord.Error = "运行已取消"
-				} else {
-					stepRecord.Status = "failed"
-					stepRecord.Error = extractErr.Error()
-				}
-				record.Steps[stepIndex] = stepRecord
-				_ = r.saveRecord(runDir, record)
-				err = extractErr
-				break
-			}
+		exec.writeContext(func(workflowContext map[string]string) {
 			addStepContext(workflowContext, node.ID, nil, stepRunDir, nil)
-			stepRecord.Status = "succeeded"
-			record.Steps[stepIndex] = stepRecord
-			_ = r.saveRecord(runDir, record)
-			activatePlainBranches(node.ID, edgesByFrom, active)
-			continue
+		})
+		stepRecord.Status = "succeeded"
+		exec.updateStep(stepIndex, stepRecord)
+		exec.activate(node.ID, "", false)
+		return nil
+	}
+	if nodeType == config.WorkflowNodeTypeHTTP {
+		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "running", StartedAt: time.Now()}
+		stepRunDir := filepath.Join(exec.runDir, node.ID)
+		stepIndex := exec.appendStep(stepRecord)
+		meta, httpErr := r.executeHTTPNode(ctx, node, contextSnapshot, stepRunDir, out, errOut)
+		stepRecord.HTTPStatus = meta.Status
+		stepRecord.EndedAt = time.Now()
+		if httpErr != nil {
+			httpErr = workflowNodeError(ctx, node.ID, httpErr)
+			markStepFailure(&stepRecord, httpErr)
+			exec.updateStep(stepIndex, stepRecord)
+			return exec.recoveryFailure(node, httpErr)
 		}
-		if nodeType == config.WorkflowNodeTypeHTTP {
-			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "running", StartedAt: time.Now()}
-			stepRunDir := filepath.Join(runDir, node.ID)
-			stepIndex := appendStepRecord(record, stepRecord)
-			_ = r.saveRecord(runDir, record)
-			meta, httpErr := r.executeHTTPNode(ctx, node, workflowContext, stepRunDir, out, errOut)
-			stepRecord.HTTPStatus = meta.Status
-			stepRecord.EndedAt = time.Now()
-			if httpErr != nil {
-				if errors.Is(httpErr, context.Canceled) {
-					stepRecord.Status = "cancelled"
-					stepRecord.Error = "运行已取消"
-				} else {
-					stepRecord.Status = "failed"
-					stepRecord.Error = httpErr.Error()
-				}
-				record.Steps[stepIndex] = stepRecord
-				_ = r.saveRecord(runDir, record)
-				err = httpErr
-				break
-			}
+		exec.writeContext(func(workflowContext map[string]string) {
 			addStepContext(workflowContext, node.ID, nil, stepRunDir, nil)
 			addHTTPContext(workflowContext, node.ID, meta)
-			stepRecord.Status = "succeeded"
-			record.Steps[stepIndex] = stepRecord
-			_ = r.saveRecord(runDir, record)
-			activatePlainBranches(node.ID, edgesByFrom, active)
-			continue
+		})
+		stepRecord.Status = "succeeded"
+		exec.updateStep(stepIndex, stepRecord)
+		exec.activate(node.ID, "", false)
+		return nil
+	}
+	if nodeType == config.WorkflowNodeTypeShell || nodeType == config.WorkflowNodeTypeChecksum || nodeType == config.WorkflowNodeTypeArchive {
+		hostID := node.Host
+		if nodeType == config.WorkflowNodeTypeArchive {
+			hostID = "" // 解压器只处理平台本地文件，不能记录或连接远程主机。
 		}
-		if nodeType == config.WorkflowNodeTypeLoop {
-			loopHostID := loopNodeHostID(node, nodeByID)
-			host, hostErr := r.remoteHost(loopHostID)
-			stepRecord := StepRecord{ID: node.ID, Type: nodeType, Tool: loopToolID(node, nodeByID), HostID: host.ID, HostName: host.Name, Status: "running", StartedAt: time.Now(), LoopTarget: node.Loop.Target, LoopIterations: node.Loop.MaxIterations}
-			stepIndex := appendStepRecord(record, stepRecord)
-			_ = r.saveRecord(runDir, record)
-			var loopErr error
-			if hostErr != nil {
-				loopErr = hostErr
-			} else {
-				loopErr = r.executeLoop(ctx, node, nodeByID, finalParams, workflowContext, runDir, loopHostID, out, errOut)
-			}
-			stepRecord.EndedAt = time.Now()
-			if loopErr != nil {
-				if errors.Is(loopErr, context.Canceled) {
-					stepRecord.Status = "cancelled"
-					stepRecord.Error = "运行已取消"
-				} else {
-					stepRecord.Status = "failed"
-					stepRecord.Error = loopErr.Error()
-				}
-				record.Steps[stepIndex] = stepRecord
-				_ = r.saveRecord(runDir, record)
-				err = loopErr
-				break
-			}
-			addLoopContext(workflowContext, node.ID, node.Loop.MaxIterations, runDir)
-			stepRecord.Status = "succeeded"
-			record.Steps[stepIndex] = stepRecord
-			_ = r.saveRecord(runDir, record)
-			activatePlainBranches(node.ID, edgesByFrom, active)
-			continue
-		}
-		stepParams := resolveStepParams(finalParams, workflowContext, node.Params)
-		host, hostErr := r.remoteHost(node.Host)
-		tool, toolErr := r.Registry.Tool(node.Tool)
-		if hostErr != nil {
-			toolErr = hostErr
-		}
-		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Tool: node.Tool, HostID: host.ID, HostName: host.Name, Status: "running", StartedAt: time.Now()}
-		stepRunDir := filepath.Join(runDir, node.ID)
-		stepIndex := appendStepRecord(record, stepRecord)
-		_ = r.saveRecord(runDir, record)
-		if toolErr == nil {
-			stepValues, stepFlat, _, resolveErr := r.resolveToolValues(tool, config.StringMapToValues(stepParams))
-			if resolveErr != nil {
-				toolErr = resolveErr
-			} else {
-				stepParams = stepFlat
-				toolErr = r.executeTool(ctx, tool, stepValues, stepFlat, stepRunDir, node.Host, out, errOut)
+		host, hostErr := r.remoteHost(hostID)
+		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "running", StartedAt: time.Now(), HostID: host.ID, HostName: host.Name}
+		stepRunDir := filepath.Join(exec.runDir, node.ID)
+		stepIndex := exec.appendStep(stepRecord)
+		builtinErr := hostErr
+		if builtinErr == nil {
+			switch nodeType {
+			case config.WorkflowNodeTypeShell:
+				builtinErr = r.executeShellNode(ctx, node, contextSnapshot, stepRunDir, hostID, out, errOut)
+			case config.WorkflowNodeTypeChecksum:
+				builtinErr = r.executeChecksumNode(ctx, node, contextSnapshot, stepRunDir, hostID, out, errOut)
+			default:
+				builtinErr = r.executeArchiveNode(ctx, node, contextSnapshot, stepRunDir)
 			}
 		}
 		stepRecord.EndedAt = time.Now()
-		if toolErr != nil {
-			if errors.Is(toolErr, context.Canceled) {
-				stepRecord.Status = "cancelled"
-				stepRecord.Error = "运行已取消"
-			} else {
-				stepRecord.Status = "failed"
-				stepRecord.Error = toolErr.Error()
-			}
-			record.Steps[stepIndex] = stepRecord
-			_ = r.saveRecord(runDir, record)
-			err = toolErr
-			break
+		if builtinErr != nil {
+			builtinErr = workflowNodeError(ctx, node.ID, builtinErr)
+			markStepFailure(&stepRecord, builtinErr)
+			exec.updateStep(stepIndex, stepRecord)
+			return exec.recoveryFailure(node, builtinErr)
 		}
-		addStepContext(workflowContext, node.ID, stepParams, stepRunDir, tool.Config.Outputs)
+		exec.writeContext(func(workflowContext map[string]string) {
+			addStepContext(workflowContext, node.ID, nil, stepRunDir, nil)
+		})
 		stepRecord.Status = "succeeded"
-		record.Steps[stepIndex] = stepRecord
-		_ = r.saveRecord(runDir, record)
-		activatePlainBranches(node.ID, edgesByFrom, active)
+		exec.updateStep(stepIndex, stepRecord)
+		exec.activate(node.ID, "", false)
+		return nil
+	}
+	if nodeType == config.WorkflowNodeTypeWait {
+		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "running", StartedAt: time.Now()}
+		stepRunDir := filepath.Join(exec.runDir, node.ID)
+		stepIndex := exec.appendStep(stepRecord)
+		waitErr := r.executeWaitNode(ctx, node, contextSnapshot, stepRunDir, out)
+		stepRecord.EndedAt = time.Now()
+		if waitErr != nil {
+			waitErr = workflowNodeError(ctx, node.ID, waitErr)
+			markStepFailure(&stepRecord, waitErr)
+			exec.updateStep(stepIndex, stepRecord)
+			return exec.recoveryFailure(node, waitErr)
+		}
+		exec.writeContext(func(workflowContext map[string]string) {
+			addStepContext(workflowContext, node.ID, nil, stepRunDir, nil)
+			addWaitContext(workflowContext, node.ID, stepRunDir)
+		})
+		stepRecord.Status = "succeeded"
+		exec.updateStep(stepIndex, stepRecord)
+		exec.activate(node.ID, "", false)
+		return nil
+	}
+	if nodeType == config.WorkflowNodeTypeNotify {
+		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "running", StartedAt: time.Now()}
+		stepRunDir := filepath.Join(exec.runDir, node.ID)
+		stepIndex := exec.appendStep(stepRecord)
+		_, notifyErr := r.executeNotifyNode(ctx, node, contextSnapshot, stepRunDir, out, errOut)
+		stepRecord.EndedAt = time.Now()
+		if notifyErr != nil {
+			notifyErr = workflowNodeError(ctx, node.ID, notifyErr)
+			markStepFailure(&stepRecord, notifyErr)
+			exec.updateStep(stepIndex, stepRecord)
+			return exec.recoveryFailure(node, notifyErr)
+		}
+		exec.writeContext(func(workflowContext map[string]string) {
+			addStepContext(workflowContext, node.ID, nil, stepRunDir, nil)
+		})
+		stepRecord.Status = "succeeded"
+		exec.updateStep(stepIndex, stepRecord)
+		exec.activate(node.ID, "", false)
+		return nil
+	}
+	if nodeType == config.WorkflowNodeTypeLoop {
+		loopHostID := loopNodeHostID(node, exec.nodeByID)
+		host, hostErr := r.remoteHost(loopHostID)
+		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Tool: loopToolID(node, exec.nodeByID), HostID: host.ID, HostName: host.Name, Status: "running", StartedAt: time.Now(), LoopTarget: node.Loop.Target, LoopIterations: node.Loop.MaxIterations}
+		stepIndex := exec.appendStep(stepRecord)
+		var loopErr error
+		if hostErr != nil {
+			loopErr = hostErr
+		} else {
+			exec.mu.Lock()
+			loopContext, _ := cloneWorkflowContext(exec.workflowContext)
+			exec.mu.Unlock()
+			loopErr = r.executeLoop(ctx, node, exec.nodeByID, finalParams, loopContext, exec.runDir, loopHostID, out, errOut)
+			if loopErr == nil {
+				exec.writeContext(func(workflowContext map[string]string) {
+					for key, value := range loopContext {
+						if strings.HasPrefix(key, "steps."+node.ID+".") {
+							workflowContext[key] = value
+						}
+					}
+				})
+			}
+		}
+		stepRecord.EndedAt = time.Now()
+		if loopErr != nil {
+			loopErr = workflowNodeError(ctx, node.ID, loopErr)
+			markStepFailure(&stepRecord, loopErr)
+			exec.updateStep(stepIndex, stepRecord)
+			return exec.recoveryFailure(node, loopErr)
+		}
+		stepRecord.Status = "succeeded"
+		exec.updateStep(stepIndex, stepRecord)
+		exec.activate(node.ID, "", false)
+		return nil
+	}
+	stepParams := resolveStepParams(finalParams, contextSnapshot, node.Params)
+	host, hostErr := r.remoteHost(node.Host)
+	tool, toolErr := r.Registry.Tool(node.Tool)
+	if hostErr != nil {
+		toolErr = hostErr
+	}
+	stepRecord := StepRecord{ID: node.ID, Type: nodeType, Tool: node.Tool, HostID: host.ID, HostName: host.Name, Status: "running", StartedAt: time.Now()}
+	stepRunDir := filepath.Join(exec.runDir, node.ID)
+	stepIndex := exec.appendStep(stepRecord)
+	if toolErr == nil {
+		stepValues, stepFlat, _, resolveErr := r.resolveToolValues(tool, config.StringMapToValues(stepParams))
+		if resolveErr != nil {
+			toolErr = resolveErr
+		} else {
+			stepParams = stepFlat
+			toolErr = r.executeTool(ctx, tool, stepValues, stepFlat, stepRunDir, node.Host, out, errOut)
+		}
+	}
+	stepRecord.EndedAt = time.Now()
+	// 远端可能已经完成写入并输出备份证据，随后才报告取消或退出失败。
+	// 先保存有效证据，避免并行失败取消兄弟节点时丢失恢复依据。
+	if exec.changeNodes[node.ID] {
+		exec.mu.Lock()
+		recordBackupMetadata(exec.record, node, host, stepRunDir)
+		exec.mu.Unlock()
+	}
+	if toolErr != nil {
+		toolErr = workflowNodeError(ctx, node.ID, toolErr)
+		markStepFailure(&stepRecord, toolErr)
+		exec.updateStep(stepIndex, stepRecord)
+		return exec.recoveryFailure(node, toolErr)
+	}
+	exec.writeContext(func(workflowContext map[string]string) {
+		addStepContext(workflowContext, node.ID, stepParams, stepRunDir, tool.Config.Outputs)
+	})
+	exec.mu.Lock()
+	if exec.skipChangeOnNoDiff && exec.diffNodes[node.ID] {
+		exec.skipChanges = noDiffFromStep(exec.workflowContext, node.ID) || exec.skipChanges
+	}
+	exec.mu.Unlock()
+	stepRecord.Status = "succeeded"
+	exec.updateStep(stepIndex, stepRecord)
+	exec.activate(node.ID, "", false)
+	return nil
+}
+
+func workflowNodeError(ctx context.Context, nodeID string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("节点 %s 执行超时：%v", nodeID, err)
 	}
 	return err
+}
+
+func markStepFailure(step *StepRecord, err error) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		step.Status = "cancelled"
+		step.Error = "运行已取消"
+		return
+	}
+	step.Status = "failed"
+	step.Error = err.Error()
+}
+
+// workflowExec 汇集一次运行中所有节点共享的可变状态。并行阶段会并发调用 dispatchWorkflowNode，
+// 因此工作流上下文、激活集合、步骤记录和跳过判定都必须在该锁内读写。
+type workflowExec struct {
+	mu                 sync.Mutex
+	workflowContext    map[string]string
+	active             map[string]bool
+	nodeByID           map[string]config.WorkflowNode
+	legacyLoopTargets  map[string]bool
+	edgesByFrom        workflowEdgeBuckets
+	changeNodes        map[string]bool
+	serviceNodes       map[string]bool
+	diffNodes          map[string]bool
+	skipChangeOnNoDiff bool
+	skipChanges        bool
+	record             *RunRecord
+	runDir             string
+	saver              func(dir string, record *RunRecord) error
+	rerun              bool
+}
+
+func (e *workflowExec) appendStep(step StepRecord) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.record.Steps = append(e.record.Steps, step)
+	index := len(e.record.Steps) - 1
+	_ = e.saveLocked()
+	return index
+}
+
+func (e *workflowExec) updateStep(index int, step StepRecord) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if index >= 0 && index < len(e.record.Steps) {
+		e.record.Steps[index] = step
+	}
+	_ = e.saveLocked()
+}
+
+func (e *workflowExec) writeContext(write func(map[string]string)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	write(e.workflowContext)
+}
+
+func (e *workflowExec) recordSkippedStep(node config.WorkflowNode, nodeType, reason string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.record.Steps = append(e.record.Steps, skippedStepRecord(node, nodeType, reason))
+	_ = e.saveLocked()
+}
+
+func (e *workflowExec) save() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_ = e.saveLocked()
+}
+
+func (e *workflowExec) saveLocked() error {
+	if e.saver == nil {
+		return nil
+	}
+	return e.saver(e.runDir, e.record)
+}
+
+func (e *workflowExec) recoveryFailure(node config.WorkflowNode, err error) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return recoveryFailure(e.record, node, err)
+}
+
+// activate 只沿实际执行的边激活节点；跳过的分支不传播激活，也不撤销其他路径的合流。
+func (e *workflowExec) activate(nodeID, matchedCase string, condition bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, edge := range e.edgesByFrom[nodeID] {
+		if !condition || edge.Case == matchedCase {
+			e.active[edge.To] = true
+		}
+	}
+	_ = e.saveLocked()
+}
+
+func cloneWorkflowContext(source map[string]string) (map[string]string, bool) {
+	out := make(map[string]string, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out, true
+}
+
+func (e *workflowExec) nodeActive(nodeID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.active[nodeID]
+}
+
+// executeParallelStage 按显式依赖做有界并发调度。阶段内没有隐式顺序，因此：
+//   - 只有全部上游显式依赖都到终态的节点才可派发；
+//   - 条件节点执行后会把未命中的分支标记为未激活，这些节点直接记为跳过，不阻塞阶段屏障；
+//   - 同主机的变更/服务节点沿显式依赖的稳定拓扑序串成链，避免并发写入且不引入环；
+//   - 任一节点失败后停止派发新节点，等待已开始的节点收敛；未派发节点记为跳过，阶段结束即屏障。
+func (r *Runner) executeParallelStage(ctx context.Context, wf *config.WorkflowConfig, stage workflowStagePlan, nodes []config.WorkflowNode, finalParams map[string]string, uploads map[string]config.WorkflowUploadResult, out, errOut io.Writer, exec *workflowExec) error {
+	if len(nodes) == 0 {
+		return nil
+	}
+	limit := stage.limit
+	if limit <= 0 {
+		limit = defaultStageConcurrency
+	}
+	inStage := map[string]bool{}
+	for _, node := range nodes {
+		inStage[node.ID] = true
+	}
+	graph := buildStageDependencyGraph(nodes, wf.Edges, inStage)
+	if err := graph.addMutationConflicts(nodes, exec.changeNodes, exec.serviceNodes); err != nil {
+		return fmt.Errorf("阶段 %s 的依赖无法调度：%w", stage.id, err)
+	}
+	remaining := map[string]int{}
+	for _, node := range nodes {
+		remaining[node.ID] = len(graph.blockers[node.ID])
+	}
+	// 每个子节点从派发前就继承阶段取消信号，不依赖工作 goroutine 注册句柄。
+	stageCtx, cancelStage := context.WithCancel(ctx)
+	defer cancelStage()
+	outputMu := &sync.Mutex{}
+	out = stageOutputWriter{mu: outputMu, writer: out}
+	errOut = stageOutputWriter{mu: outputMu, writer: errOut}
+	type stageResult struct {
+		id  string
+		err error
+	}
+	finished := make(chan stageResult, len(nodes))
+	done := map[string]bool{}
+	started := map[string]bool{}
+	var firstErr error
+	var failedNode config.WorkflowNode
+	running := 0
+	for {
+		if ctxErr := ctx.Err(); ctxErr != nil && firstErr == nil {
+			firstErr = ctxErr
+		}
+		progress := false
+		// 先收敛所有已可判定跳过的节点，再受并发上限约束派发；否则被跳过的上游没释放，下游会一直等不到就绪。
+		for _, node := range nodes {
+			if started[node.ID] || done[node.ID] || remaining[node.ID] > 0 {
+				continue
+			}
+			if firstErr != nil || !exec.nodeActive(node.ID) {
+				reason := "条件分支未激活"
+				if firstErr != nil {
+					reason = "运行已取消或阶段内已有节点失败，未派发"
+				}
+				r.dispatchStageSkip(exec, node, reason)
+				done[node.ID] = true
+				r.releaseStageNode(node.ID, graph, remaining)
+				progress = true
+			}
+		}
+		for _, node := range nodes {
+			if running >= limit {
+				break
+			}
+			if started[node.ID] || done[node.ID] {
+				continue
+			}
+			if firstErr != nil || remaining[node.ID] > 0 {
+				continue
+			}
+			started[node.ID] = true
+			progress = true
+			running++
+			go func(node config.WorkflowNode) {
+				err := r.dispatchWorkflowNode(stageCtx, wf, node, finalParams, uploads, out, errOut, exec, true)
+				finished <- stageResult{id: node.ID, err: err}
+			}(node)
+		}
+		if running == 0 {
+			if progress && len(done) < len(nodes) {
+				continue
+			}
+			if len(done) != len(nodes) && firstErr == nil {
+				firstErr = fmt.Errorf("阶段 %s 仍有节点未满足依赖，无法继续执行", stage.id)
+			}
+			break
+		}
+		result := <-finished
+		running--
+		done[result.id] = true
+		r.releaseStageNode(result.id, graph, remaining)
+		if result.err != nil && firstErr == nil {
+			firstErr = result.err
+			failedNode = exec.nodeByID[result.id]
+			cancelStage()
+		}
+	}
+	// 没有真正执行过的节点无论因为条件未命中、上游失败还是取消，都要沿依赖继续传播未激活，
+	// 否则后续阶段的节点只会看到“上游没成功”，既无法解释也无法被条件分支正确跳过。
+	for _, node := range nodes {
+		if !done[node.ID] && !started[node.ID] {
+			r.dispatchStageSkip(exec, node, "阶段内上游失败或取消，未执行")
+			exec.activate(node.ID, "", false)
+		}
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if firstErr != nil && failedNode.ID != "" {
+		// 并行兄弟节点可能在失败被报告之后才写入备份，收敛后重新判定恢复入口。
+		return exec.recoveryFailure(failedNode, firstErr)
+	}
+	return firstErr
+}
+
+type stageOutputWriter struct {
+	mu     *sync.Mutex
+	writer io.Writer
+}
+
+func (w stageOutputWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.writer == nil {
+		return len(data), nil
+	}
+	return w.writer.Write(data)
+}
+
+const defaultStageConcurrency = 4
+
+func (r *Runner) dispatchStageSkip(exec *workflowExec, node config.WorkflowNode, reason string) {
+	exec.recordSkippedStep(node, workflowNodeType(node), reason)
+}
+
+func (r *Runner) releaseStageNode(nodeID string, graph *stageDependencyGraph, remaining map[string]int) {
+	for _, child := range graph.children[nodeID] {
+		if remaining[child] > 0 {
+			remaining[child]--
+		}
+	}
+}
+
+// stageDependencyGraph 只为并行阶段构建：显式依赖 + 同主机变更冲突边。
+type stageDependencyGraph struct {
+	blockers map[string][]string
+	children map[string][]string
+}
+
+func buildStageDependencyGraph(nodes []config.WorkflowNode, edges []config.WorkflowEdge, inStage map[string]bool) *stageDependencyGraph {
+	graph := &stageDependencyGraph{blockers: map[string][]string{}, children: map[string][]string{}}
+	for _, node := range nodes {
+		graph.blockers[node.ID] = nil
+	}
+	for _, edge := range edges {
+		if !inStage[edge.From] || !inStage[edge.To] {
+			continue
+		}
+		graph.blockers[edge.To] = append(graph.blockers[edge.To], edge.From)
+		graph.children[edge.From] = append(graph.children[edge.From], edge.To)
+	}
+	return graph
+}
+
+// addMutationConflicts 把同主机的变更/服务节点按稳定拓扑顺序串成链。
+// 只约束显式标记为变更或服务的节点，不推断任意 Shell 的副作用。
+func (graph *stageDependencyGraph) addMutationConflicts(nodes []config.WorkflowNode, changeNodes, serviceNodes map[string]bool) error {
+	candidates := append([]config.WorkflowNode(nil), nodes...)
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Order < candidates[j].Order })
+	remaining := map[string]int{}
+	for _, node := range nodes {
+		remaining[node.ID] = len(graph.blockers[node.ID])
+	}
+	ordered := make([]config.WorkflowNode, 0, len(nodes))
+	visited := map[string]bool{}
+	for len(ordered) < len(nodes) {
+		found := false
+		for _, node := range candidates {
+			if visited[node.ID] || remaining[node.ID] > 0 {
+				continue
+			}
+			visited[node.ID] = true
+			ordered = append(ordered, node)
+			for _, child := range graph.children[node.ID] {
+				remaining[child]--
+			}
+			found = true
+			break
+		}
+		if !found {
+			return fmt.Errorf("阶段内的依赖存在环")
+		}
+	}
+	lastByHost := map[string]string{}
+	for _, node := range ordered {
+		if !changeNodes[node.ID] && !serviceNodes[node.ID] {
+			continue
+		}
+		host := strings.TrimSpace(node.Host)
+		if host == LocalTargetID {
+			host = ""
+		}
+		if previous := lastByHost[host]; previous != "" {
+			graph.blockers[node.ID] = append(graph.blockers[node.ID], previous)
+			graph.children[previous] = append(graph.children[previous], node.ID)
+		}
+		lastByHost[host] = node.ID
+	}
+	return nil
 }
 
 func appendStepRecord(record *RunRecord, step StepRecord) int {
@@ -772,6 +1321,10 @@ func (r *Runner) rebuildWorkflowContextFromSteps(context map[string]string, step
 			}
 			addStepContext(context, step.ID, nil, filepath.Join(runDir, step.ID), nil)
 			addHTTPContext(context, step.ID, meta)
+			activatePlainBranches(step.ID, edgesByFrom, active)
+		case config.WorkflowNodeTypeWait:
+			addStepContext(context, step.ID, nil, filepath.Join(runDir, step.ID), nil)
+			addWaitContext(context, step.ID, filepath.Join(runDir, step.ID))
 			activatePlainBranches(step.ID, edgesByFrom, active)
 		default:
 			outputs := r.outputsForWorkflowStep(node)
@@ -865,6 +1418,18 @@ func workflowNodeType(node config.WorkflowNode) string {
 	}
 	if strings.TrimSpace(node.HTTP.URL) != "" || strings.TrimSpace(node.HTTP.Method) != "" || len(node.HTTP.Headers) > 0 || strings.TrimSpace(node.HTTP.Body) != "" || strings.TrimSpace(node.HTTP.SaveResponse) != "" || len(node.HTTP.ExpectStatus) > 0 {
 		return config.WorkflowNodeTypeHTTP
+	}
+	if strings.TrimSpace(node.Script.Script) != "" {
+		return config.WorkflowNodeTypeShell
+	}
+	if strings.TrimSpace(node.Checksum.Path) != "" {
+		return config.WorkflowNodeTypeChecksum
+	}
+	if strings.TrimSpace(node.Archive.Path) != "" || strings.TrimSpace(node.Archive.TargetDir) != "" {
+		return config.WorkflowNodeTypeArchive
+	}
+	if node.Wait.Seconds > 0 || strings.TrimSpace(node.Wait.PollURL) != "" || strings.TrimSpace(node.Wait.PollFile) != "" {
+		return config.WorkflowNodeTypeWait
 	}
 	return ""
 }
@@ -1653,6 +2218,12 @@ func readLoopText(runDir, nodeID, fileName string, maxIterations int) string {
 }
 
 func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values map[string]interface{}, params map[string]string, runDir, hostID string, out, errOut io.Writer) error {
+	if out == nil {
+		out = io.Discard
+	}
+	if errOut == nil {
+		errOut = io.Discard
+	}
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		return err
 	}
@@ -1752,11 +2323,12 @@ func resolveEntry(toolDir, entry string) string {
 
 func buildCommand(ctx context.Context, entry string, tool config.ToolConfig, params map[string]string, paramFile, workdir string, extraEnv []string) *exec.Cmd {
 	args := commandArgs(tool, params, paramFile)
-	if usesWSLBash(entry) {
-		return exec.CommandContext(ctx, "bash", "-lc", wslBashScript(entry, workdir, extraEnv, args))
-	}
 	if runtime.GOOS == "windows" && strings.EqualFold(filepath.Ext(entry), ".sh") {
-		return exec.CommandContext(ctx, "bash", append([]string{windowsBashPath(entry)}, args...)...)
+		bash, wsl := bashRuntime()
+		if wsl {
+			return exec.CommandContext(ctx, bash, "-lc", wslBashScript(entry, workdir, extraEnv, args))
+		}
+		return exec.CommandContext(ctx, bash, append([]string{filepath.ToSlash(entry)}, args...)...)
 	}
 	return exec.CommandContext(ctx, entry, args...)
 }
@@ -1784,15 +2356,6 @@ func commandArgs(tool config.ToolConfig, params map[string]string, paramFile str
 
 func usesWSLBash(entry string) bool {
 	return runtime.GOOS == "windows" && strings.EqualFold(filepath.Ext(entry), ".sh") && isWSLBash()
-}
-
-func windowsBashPath(path string) string {
-	if isWSLBash() {
-		if converted := windowsPathToWSL(path); converted != "" {
-			return converted
-		}
-	}
-	return filepath.ToSlash(path)
 }
 
 func wslBashScript(entry, workdir string, env []string, args []string) string {
@@ -1843,11 +2406,47 @@ func isShellEnvName(value string) bool {
 }
 
 func isWSLBash() bool {
-	bashPath, err := exec.LookPath("bash")
-	if err != nil {
-		return false
+	_, wsl := bashRuntime()
+	return wsl
+}
+
+// bashRuntime 返回执行 .sh 的 bash 路径及是否为 WSL。
+// Windows PATH 中 System32 可能排在 Git 之前，直接 LookPath 会命中 WSL 启动器，
+// 因此按 PATH 顺序优先选择非 WSL 的 bash。
+func bashRuntime() (string, bool) {
+	if runtime.GOOS != "windows" {
+		return "bash", false
 	}
-	normalized := strings.ToLower(filepath.ToSlash(bashPath))
+	return findBash(os.Getenv("PATH"), isWSLBashPath)
+}
+
+func findBash(pathValue string, isWSL func(string) bool) (string, bool) {
+	fallback := ""
+	for _, dir := range filepath.SplitList(pathValue) {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, "bash.exe")
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if isWSL(candidate) {
+			if fallback == "" {
+				fallback = candidate
+			}
+			continue
+		}
+		return candidate, false
+	}
+	if fallback != "" {
+		return fallback, true
+	}
+	return "bash", false
+}
+
+func isWSLBashPath(path string) bool {
+	normalized := strings.ToLower(filepath.ToSlash(path))
 	return strings.Contains(normalized, "/windows/system32/bash.exe") || strings.Contains(normalized, "/windowsapps/bash.exe")
 }
 
@@ -2185,7 +2784,12 @@ func newRecord(kind, target string, params map[string]interface{}) *RunRecord {
 func finishRecord(record *RunRecord, err error) {
 	record.EndedAt = time.Now()
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		if isPendingRunError(err) {
+			record.Status = RunStatusPending
+			record.Error = err.Error()
+			return
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			record.Status = "cancelled"
 			record.Error = "运行已取消"
 			markRunningStepsCancelled(record)

@@ -1,5 +1,5 @@
 import React, {useEffect, useMemo, useState} from 'react'
-import {controlNodeCatalog, controlNodeMatchesKeyword, groupControlsByCategory, isControlReady} from './catalog.js'
+import {controlNodeCatalog, controlNodeMatchesKeyword, controlUnavailableReason, groupControlsByCategory, isControlLegacy, isControlReady} from './catalog.js'
 import {controlShapeMarker} from './nodes.jsx'
 
 function toolPluginKey(tool) {
@@ -74,16 +74,18 @@ function ToolPluginSelect({tools, onAddTool}) {
 
 function ControlPickerItem({control, onAddControl}) {
   const ready = isControlReady(control)
+  const legacy = isControlLegacy(control)
+  const reason = controlUnavailableReason(control)
   const title = [
     control.title,
     control.secondary,
     control.help || control.description,
-    ready ? '' : '规划中：暂不可添加'
+    ready ? '' : reason
   ].filter(Boolean).join('\n')
   return (
     <button
       type="button"
-      className={`nodePickerItem control cat-${control.category}${ready ? '' : ' planned'}`}
+      className={`nodePickerItem control cat-${control.category}${ready ? '' : legacy ? ' legacy' : ' planned'}`}
       disabled={!ready}
       aria-disabled={!ready}
       onClick={ready ? () => onAddControl(control.type) : undefined}
@@ -92,14 +94,28 @@ function ControlPickerItem({control, onAddControl}) {
       <span className={`paletteShape ${control.shape} cat-${control.category}`} data-symbol={controlShapeMarker(control.type)} aria-hidden="true" />
       <span className="nodePickerItemText">
         <b>{control.title}</b>
-        <small>{control.secondary}{ready ? '' : ' · 规划中'}</small>
+        <small>{control.secondary}{ready ? '' : ` · ${legacy ? '旧流程兼容' : '规划中'}`}</small>
+        {ready ? null : <small className="nodePickerUnavailableReason">{reason}</small>}
       </span>
-      {ready ? null : <span className="nodePickerPlannedTag">规划中</span>}
+      {ready ? null : <span className={`nodePickerPlannedTag${legacy ? ' legacy' : ''}`}>{legacy ? '旧流程兼容' : '规划中'}</span>}
     </button>
   )
 }
 
-function NodePickerPanel({searchText, setSearchText, tools, totalTools, panelPosition, canvasElement, mode = 'add', connection, insertEdge, onAddTool, onAddControl, onClose}) {
+function MissingToolItem({item, onOpenPlugins}) {
+  return (
+    <li className="nodePickerMissingItem" title={item.reason}>
+      <span className="nodePickerItemText">
+        <b>{item.name || item.id}</b>
+        <small>{item.id}</small>
+        <small className="nodePickerUnavailableReason">{item.reason}</small>
+      </span>
+      {onOpenPlugins && <button type="button" className="secondary small" onClick={onOpenPlugins}>打开插件管理</button>}
+    </li>
+  )
+}
+
+function NodePickerPanel({searchText, setSearchText, tools, totalTools, missingTools = [], panelPosition, canvasElement, mode = 'add', connection, insertEdge, onAddTool, onAddControl, onOpenPlugins, onClose}) {
   const keyword = searchText.trim().toLowerCase()
   const quickAdd = Boolean(connection?.source)
   const insertMode = mode === 'insert' && insertEdge?.source && insertEdge?.target
@@ -167,19 +183,27 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, panelPos
             ? <ToolPluginSelect tools={tools} onAddTool={onAddTool} />
             : <div className="empty small">没有匹配的插件工具；可换用工具名称、描述、ID 或标签继续搜索。</div>}
         </div>
+        {missingTools.length > 0 && (
+          <div className="nodePickerSection nodePickerMissing">
+            <span>依赖缺失 · {missingTools.length}</span>
+            <ul className="nodePickerMissingList">
+              {missingTools.map(item => (
+                <MissingToolItem key={item.id} item={item} onOpenPlugins={onOpenPlugins} />
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
     </div>
   )
 }
 
-function CanvasDock({onZoomIn, onZoomOut, onFitView, onAutoLayout, onRunWorkflow, runDisabled = false}) {
+function CanvasDock({onZoomIn, onZoomOut, onFitView}) {
   return (
     <div className="canvasDock nodrag nopan" onMouseDown={event => event.stopPropagation()} aria-label="画布操作">
       <button type="button" onClick={onZoomOut} title="缩小画布" aria-label="缩小画布">−</button>
       <button type="button" onClick={onZoomIn} title="放大画布" aria-label="放大画布">+</button>
       <button type="button" onClick={onFitView} title="将全部节点适配到当前视图" aria-label="适配视图">⤢</button>
-      <button type="button" onClick={onAutoLayout} title="按依赖关系重新排列当前画布节点" aria-label="自动排版">⇄</button>
-      <button type="button" className="canvasDockPrimary" onClick={onRunWorkflow} disabled={runDisabled} title={runDisabled ? '当前工作流正在运行' : '执行当前工作流草稿'} aria-label="运行工作流">▶</button>
     </div>
   )
 }

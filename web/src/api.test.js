@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest'
-import {bindWorkflowConfigPath, createMarketSource, deleteMarketSource, deleteNexusPlugin, downloadUserWorkflowExport, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusPlugins, nexusDownloadURL, postJSON, postMarketInstall, postNexusPluginZip, postPluginZip, postRunUploadNode, postRunUploadNodeChunked, rebuildNexusIndex, testMarketSource, updateMarketSource, uploadWorkflowConfigFile} from './api.js'
+import {bindWorkflowConfigPath, bootstrapAuthTokenFromURL, createMarketSource, deleteMarketSource, deleteNexusPlugin, downloadUserWorkflowExport, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusPlugins, nexusDownloadURL, postJSON, postMarketInstall, postNexusPluginZip, postPluginZip, postRunUploadNode, postRunUploadNodeChunked, rebuildNexusIndex, testMarketSource, updateMarketSource, uploadWorkflowConfigFile} from './api.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -30,6 +30,24 @@ describe('api helpers', () => {
       credentials: 'same-origin',
       body: JSON.stringify({workflow: {id: 'demo'}})
     })
+  })
+
+  it('exchanges a URL token for the session cookie', async () => {
+    vi.stubGlobal('window', {location: {search: '?token=abc123'}})
+    vi.stubGlobal('fetch', vi.fn(async () => ({ok: true, json: async () => ({data: {}})})))
+
+    await bootstrapAuthTokenFromURL()
+
+    expect(fetch).toHaveBeenCalledWith('/api/ui/preferences?token=abc123', {credentials: 'same-origin'})
+  })
+
+  it('skips token bootstrap when the URL has no token', async () => {
+    vi.stubGlobal('window', {location: {search: '?tab=workflows'}})
+    vi.stubGlobal('fetch', vi.fn())
+
+    await bootstrapAuthTokenFromURL()
+
+    expect(fetch).not.toHaveBeenCalled()
   })
 
   it('fetches market catalog with optional cache refresh', async () => {

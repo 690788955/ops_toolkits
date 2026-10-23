@@ -38,6 +38,14 @@ func runsHandler(state *serverState) http.HandlerFunc {
 				handleRunUploadNode(w, req, state, reg, strings.Trim(runID, "/"), strings.Trim(nodeID, "/"), action)
 				return
 			}
+			if runID, action, ok := parseRunRecoveryPath(id); ok {
+				handleRunRecovery(w, req, state, reg, strings.Trim(runID, "/"), action)
+				return
+			}
+			if runID, index, ok := parseRunNotificationRetryPath(id); ok {
+				handleRunNotificationRetry(w, req, state, reg, strings.Trim(runID, "/"), index)
+				return
+			}
 			methodNotAllowed(w)
 			return
 		}
@@ -132,6 +140,128 @@ func parseRunUploadPath(path string) (string, string, string, bool) {
 		action = parts[3]
 	}
 	return parts[0], parts[2], action, true
+}
+
+func parseRunRecoveryPath(path string) (string, string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 3 || parts[1] != "recovery" {
+		return "", "", false
+	}
+	switch parts[2] {
+	case "check", "rollback", "resolve":
+		return parts[0], parts[2], true
+	default:
+		return "", "", false
+	}
+}
+
+func parseRunNotificationRetryPath(path string) (string, int, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 4 || parts[1] != "notifications" || parts[3] != "retry" {
+		return "", 0, false
+	}
+	index, err := strconv.Atoi(parts[2])
+	if err != nil || index < 0 {
+		return "", 0, false
+	}
+	return parts[0], index, true
+}
+
+type runRecoveryResolveRequest struct {
+	Note string `json:"note"`
+}
+
+// handleRunRecovery 领取一次性恢复动作，并始终回写最新记录和独立 attempt 证据。
+func handleRunRecovery(w http.ResponseWriter, req *http.Request, state *serverState, reg *registry.Registry, runID, action string) {
+	if strings.TrimSpace(runID) == "" {
+		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
+		return
+	}
+	ctx, cancel, ok := state.claimRun(runID)
+	if !ok {
+		writeJSON(w, http.StatusConflict, response{Error: "该运行已有恢复动作正在执行，请稍后刷新"})
+		return
+	}
+	defer func() {
+		state.finishRun(runID)
+		cancel()
+	}()
+	// 领取后再读取和校验，避免并发请求在前一动作完成后使用旧的待处理记录。
+	record, err := loadClaimedRunRecord(state, reg, runID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+		return
+	}
+	if record.Status != runner.RunStatusPending || record.Pending == nil || record.Pending.Status != runner.PendingStatusPending {
+		writeJSON(w, http.StatusBadRequest, response{Status: record.Status, Error: "运行不在待处理状态，无法执行恢复动作"})
+		return
+	}
+	runDir, err := runbundle.RunDir(reg, runID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+		return
+	}
+	r := state.newRunner(reg)
+	var actionErr error
+	switch action {
+	case "check":
+		actionErr = r.RetryPendingCheck(ctx, &record, runDir)
+	case "rollback":
+		actionErr = r.RollbackPendingRun(ctx, &record, runDir)
+	case "resolve":
+		var body runRecoveryResolveRequest
+		if req.Body != nil {
+			_ = json.NewDecoder(req.Body).Decode(&body)
+		}
+		actionErr = r.ResolvePendingRun(&record, body.Note)
+	}
+	if saveErr := saveRunRecord(reg, &record); saveErr != nil && actionErr == nil {
+		actionErr = saveErr
+	}
+	writeReconciledRun(w, reg, runID, record, actionErr)
+}
+
+func handleRunNotificationRetry(w http.ResponseWriter, req *http.Request, state *serverState, reg *registry.Registry, runID string, index int) {
+	if strings.TrimSpace(runID) == "" {
+		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
+		return
+	}
+	ctx, cancel, ok := state.claimRun(runID)
+	if !ok {
+		writeJSON(w, http.StatusConflict, response{Error: "该运行正在执行其他动作，请稍后刷新"})
+		return
+	}
+	defer func() {
+		state.finishRun(runID)
+		cancel()
+	}()
+	record, err := loadClaimedRunRecord(state, reg, runID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+		return
+	}
+	if index < 0 || index >= len(record.Notifications) {
+		writeJSON(w, http.StatusNotFound, response{Error: "通知记录不存在"})
+		return
+	}
+	r := state.newRunner(reg)
+	actionErr := r.RetryNotification(ctx, &record, index)
+	if saveErr := saveRunRecord(reg, &record); saveErr != nil && actionErr == nil {
+		actionErr = saveErr
+	}
+	writeReconciledRun(w, reg, runID, record, actionErr)
+}
+
+func writeReconciledRun(w http.ResponseWriter, reg *registry.Registry, runID string, record runner.RunRecord, actionErr error) {
+	detail, err := loadRunDetail(nil, reg, runID)
+	if err != nil {
+		detail = runDetail{Record: record}
+	}
+	status := http.StatusOK
+	if actionErr != nil {
+		status = http.StatusInternalServerError
+	}
+	writeJSON(w, status, response{ID: record.ID, Status: record.Status, Data: detail, Error: errorText(actionErr)})
 }
 
 func handleRunCancel(w http.ResponseWriter, state *serverState, reg *registry.Registry, id string) {

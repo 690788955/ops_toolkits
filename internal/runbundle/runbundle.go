@@ -81,6 +81,23 @@ func List(reg *registry.Registry) ([]Summary, error) {
 	return out, nil
 }
 
+// cleanupProtected 保留仍处于待处理状态的运行，避免清理备份后失去回滚依据。
+func cleanupProtected(reg *registry.Registry, id string) bool {
+	record, err := LoadRecord(reg, id)
+	if err != nil {
+		return false
+	}
+	if record.Status == "running" || record.Status == runner.RunStatusPending || record.Pending != nil && record.Pending.Status == runner.PendingStatusPending {
+		return true
+	}
+	for _, attempt := range record.Attempts {
+		if attempt.Status == "running" {
+			return true
+		}
+	}
+	return false
+}
+
 func Cleanup(reg *registry.Registry, opts CleanupOptions) (CleanupResult, error) {
 	if opts.Keep < 0 {
 		return CleanupResult{}, fmt.Errorf("保留数量不能小于 0")
@@ -95,7 +112,7 @@ func Cleanup(reg *registry.Registry, opts CleanupOptions) (CleanupResult, error)
 		Total:  len(items),
 	}
 	for index, item := range items {
-		if index < opts.Keep {
+		if index < opts.Keep || cleanupProtected(reg, item.ID) {
 			result.KeptIDs = append(result.KeptIDs, item.ID)
 			continue
 		}
@@ -171,6 +188,10 @@ func ExportZip(reg *registry.Registry, id string) ([]byte, error) {
 			return err
 		}
 		if d.IsDir() {
+			// 内置节点的临时脚本含运行期模板值，仅保留日志与脱敏快照。
+			if d.Name() == ".builtin" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		info, err := d.Info()
@@ -190,6 +211,21 @@ func ExportZip(reg *registry.Registry, id string) ([]byte, error) {
 		}
 		if filepath.ToSlash(rel) == "result.json" {
 			return addZipFile(zw, name, redactedRecordJSON(record), info.Mode())
+		}
+		if filepath.ToSlash(rel) == "snapshot.json" {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			var snapshot runner.RunSnapshot
+			if err := json.Unmarshal(data, &snapshot); err != nil {
+				return fmt.Errorf("无法脱敏运行快照: %w", err)
+			}
+			data, err = json.MarshalIndent(redactedSnapshot(&snapshot), "", "  ")
+			if err != nil {
+				return err
+			}
+			return addZipFile(zw, name, data, info.Mode())
 		}
 		header, err := zip.FileInfoHeader(info)
 		if err != nil {
@@ -243,7 +279,7 @@ func summaryFromRecord(record runner.RunRecord) Summary {
 		Status:    record.Status,
 		StartedAt: record.StartedAt,
 		EndedAt:   record.EndedAt,
-		Params:    redactFlatParams(record.Params),
+		Params:    redactFlatParams(record.Params, recordSensitivePaths(record)...),
 		Error:     record.Error,
 	}
 }
@@ -299,7 +335,7 @@ func supportMarkdown(reg *registry.Registry, record runner.RunRecord, runDir str
 		fmt.Fprintf(&b, "- 错误: %s\n", record.Error)
 	}
 	b.WriteString("\n## 参数摘要\n\n")
-	params := redactFlatParams(record.Params)
+	params := redactFlatParams(record.Params, recordSensitivePaths(record)...)
 	if len(params) == 0 {
 		b.WriteString("- 无参数记录\n")
 	} else {
@@ -354,8 +390,10 @@ func summarizeDoctor(report doctor.Report) map[string]int {
 }
 
 func redactedRecordJSON(record runner.RunRecord) []byte {
-	record.Params = redactFlatParams(record.Params)
-	record.Config = config.RedactSensitive(record.Config, nil)
+	paths := recordSensitivePaths(record)
+	record.Params = redactFlatParams(record.Params, paths...)
+	record.Config = config.RedactSensitive(record.Config, paths)
+	record.Snapshot = redactedSnapshot(record.Snapshot)
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return []byte("{}")
@@ -426,10 +464,17 @@ func unsafeArchiveName(name string) bool {
 	return clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator))
 }
 
-func redactFlatParams(params map[string]string) map[string]string {
+func redactFlatParams(params map[string]string, sensitivePaths ...string) map[string]string {
 	out := make(map[string]string, len(params))
 	for key, value := range params {
-		if config.IsSensitivePath(key) {
+		sensitive := config.IsSensitivePath(key)
+		for _, path := range sensitivePaths {
+			if key == path || strings.HasPrefix(key, path+".") {
+				sensitive = true
+				break
+			}
+		}
+		if sensitive {
 			out[key] = "******"
 		} else {
 			out[key] = value

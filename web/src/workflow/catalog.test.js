@@ -3,9 +3,11 @@ import {
   controlNodeCatalog,
   controlNodeCategory,
   controlNodeMatchesKeyword,
+  controlUnavailableReason,
   countNodesByCategory,
   flowNodeCategoryID,
   groupControlsByCategory,
+  isControlLegacy,
   isControlReady,
   nodeCategories
 } from './catalog.js'
@@ -21,16 +23,36 @@ describe('节点分类目录', () => {
   it('按分类分组时保持声明顺序且不产生空分组', () => {
     const groups = groupControlsByCategory(controlNodeCatalog)
     expect(groups.map(group => group.category.id)).toEqual(['flow', 'data', 'builtin'])
-    expect(groups[0].controls.map(control => control.type)).toEqual(['condition', 'parallel', 'join', 'loop'])
-    expect(groups[1].controls.map(control => control.type)).toEqual(['upload', 'extract_config'])
+    expect(groups[0].controls.map(control => control.type)).toEqual(['condition', 'parallel', 'join', 'loop', 'wait'])
+    expect(groups[1].controls.map(control => control.type)).toEqual(['upload', 'extract_config', 'file_checksum', 'archive'])
     expect(groups.every(group => group.controls.length > 0)).toBe(true)
   })
 
-  it('内置能力中 HTTP 调用已上线，脚本与通知仍为规划态', () => {
+  it('并行/合流只作旧流程兼容，不再作为新建节点候选', () => {
+    const legacy = controlNodeCatalog.filter(control => ['parallel', 'join'].includes(control.type))
+    expect(legacy.every(control => isControlLegacy(control))).toBe(true)
+    expect(legacy.every(control => !isControlReady(control))).toBe(true)
+    expect(legacy.every(control => controlUnavailableReason(control).includes('阶段'))).toBe(true)
+    expect(controlUnavailableReason(controlNodeCatalog.find(control => control.type === 'notify'))).toBe('')
+    expect(controlUnavailableReason(controlNodeCatalog.find(control => control.type === 'condition'))).toBe('')
+  })
+
+  it('内置能力与数据节点都已可执行', () => {
     const builtin = controlNodeCatalog.filter(control => control.category === 'builtin')
     expect(builtin.map(control => control.type)).toEqual(['http_request', 'shell_script', 'notify'])
     expect(isControlReady(builtin[0])).toBe(true)
-    expect(builtin.slice(1).every(control => !isControlReady(control))).toBe(true)
+    expect(isControlReady(builtin[1])).toBe(true)
+    expect(isControlReady(builtin[2])).toBe(true)
+    const data = controlNodeCatalog.filter(control => control.category === 'data')
+    expect(data.every(control => isControlReady(control))).toBe(true)
+  })
+
+  it('搜索支持英文别名与中文用途词', () => {
+    const byAlias = controlNodeCatalog.filter(control => controlNodeMatchesKeyword(control, 'unzip'))
+    expect(byAlias.map(control => control.type)).toEqual(['archive'])
+    const byPurpose = controlNodeCatalog.filter(control => controlNodeMatchesKeyword(control, '轮询'))
+    expect(byPurpose.map(control => control.type)).toEqual(['wait'])
+    expect(controlNodeCatalog.filter(control => controlNodeMatchesKeyword(control, 'sha256')).map(control => control.type)).toEqual(['file_checksum'])
   })
 
   it('已上线节点都带有形状与符号元数据', () => {

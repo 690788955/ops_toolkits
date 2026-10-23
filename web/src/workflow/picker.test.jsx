@@ -59,7 +59,7 @@ describe('NodePickerPanel plugin/tool selection', () => {
 })
 
 describe('NodePickerPanel 节点分类折叠', () => {
-  it('按分类分组，内置能力默认可直接添加 HTTP 调用，规划节点保持禁用', async () => {
+  it('按分类分组，内置能力可添加，旧流程标记节点保持禁用', async () => {
     const host = document.createElement('div')
     document.body.appendChild(host)
     const onAddControl = vi.fn()
@@ -89,11 +89,20 @@ describe('NodePickerPanel 节点分类折叠', () => {
     expect(builtinHead.getAttribute('aria-expanded')).toBe('true')
 
     const flowItems = host.querySelectorAll('.nodePickerCategory.cat-flow .nodePickerItem')
-    expect(flowItems).toHaveLength(4)
+    expect(flowItems).toHaveLength(5)
+    expect(Array.from(flowItems).map(item => [item.querySelector('b').textContent, item.disabled])).toEqual([
+      ['条件分支', false],
+      ['并行分支', true],
+      ['合流', true],
+      ['循环', false],
+      ['等待 / 轮询', false]
+    ])
+    expect(flowItems[1].textContent).toContain('旧流程兼容')
+    expect(flowItems[2].textContent).toContain('旧流程兼容')
 
     const builtinItems = host.querySelectorAll('.nodePickerCategory.cat-builtin .nodePickerItem')
     expect(builtinItems).toHaveLength(3)
-    expect(Array.from(builtinItems).map(item => item.disabled)).toEqual([false, true, true])
+    expect(Array.from(builtinItems).map(item => item.disabled)).toEqual([false, false, false])
 
     await act(async () => {
       builtinItems[0].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
@@ -101,9 +110,9 @@ describe('NodePickerPanel 节点分类折叠', () => {
     expect(onAddControl).toHaveBeenCalledWith('http_request')
 
     await act(async () => {
-      builtinItems[1].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+      builtinItems[2].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
     })
-    expect(onAddControl).toHaveBeenCalledTimes(1)
+    expect(onAddControl).toHaveBeenCalledWith('notify')
 
     await act(async () => {
       builtinHead.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))

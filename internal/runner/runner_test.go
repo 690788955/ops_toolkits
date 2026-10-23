@@ -1255,6 +1255,66 @@ func TestWSLBashScriptConvertsPathsAndExportsEnv(t *testing.T) {
 	}
 }
 
+func TestFindBashPrefersNonWSLOverSystem32(t *testing.T) {
+	gitDir := t.TempDir()
+	wslDir := t.TempDir()
+	gitBash := filepath.Join(gitDir, "bash.exe")
+	wslBash := filepath.Join(wslDir, "bash.exe")
+	for _, path := range []string{gitBash, wslBash} {
+		if err := os.WriteFile(path, []byte(""), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	pathValue := strings.Join([]string{wslDir, gitDir}, string(os.PathListSeparator))
+	isWSL := func(path string) bool { return path == wslBash }
+	got, wsl := findBash(pathValue, isWSL)
+	if wsl {
+		t.Fatalf("findBash() reported WSL for %q", got)
+	}
+	if got != gitBash {
+		t.Fatalf("findBash() = %q, want %q", got, gitBash)
+	}
+}
+
+func TestFindBashFallsBackToWSL(t *testing.T) {
+	wslDir := t.TempDir()
+	wslBash := filepath.Join(wslDir, "bash.exe")
+	if err := os.WriteFile(wslBash, []byte(""), 0o644); err != nil {
+		t.Fatalf("write %s: %v", wslBash, err)
+	}
+	got, wsl := findBash(wslDir, func(path string) bool { return true })
+	if !wsl {
+		t.Fatalf("findBash() = %q, want WSL fallback", got)
+	}
+	if got != wslBash {
+		t.Fatalf("findBash() = %q, want %q", got, wslBash)
+	}
+}
+
+func TestFindBashWithoutBashOnPath(t *testing.T) {
+	got, wsl := findBash(t.TempDir(), isWSLBashPath)
+	if wsl {
+		t.Fatalf("findBash() = %q, want non-WSL fallback", got)
+	}
+	if got != "bash" {
+		t.Fatalf("findBash() = %q, want %q", got, "bash")
+	}
+}
+
+func TestIsWSLBashPathMatchesKnownLaunchers(t *testing.T) {
+	for _, path := range []string{
+		`C:\Windows\System32\bash.exe`,
+		`C:\Users\demo\AppData\Local\Microsoft\WindowsApps\bash.exe`,
+	} {
+		if !isWSLBashPath(path) {
+			t.Fatalf("isWSLBashPath(%q) = false, want true", path)
+		}
+	}
+	if isWSLBashPath(`D:\Git\usr\bin\bash.exe`) {
+		t.Fatal("isWSLBashPath() marked Git Bash as WSL")
+	}
+}
+
 type fakeRemoteExecutor struct {
 	mu       sync.Mutex
 	hosts    map[string]RemoteHost

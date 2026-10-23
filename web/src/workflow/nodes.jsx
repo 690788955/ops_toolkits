@@ -1,6 +1,6 @@
 import React from 'react'
 import {Handle, Position} from '@xyflow/react'
-import {conditionBranchRows, conditionOperators, defaultCondition, normalizeExtractConfig, normalizeHttpRequestConfig} from './model.js'
+import {conditionBranchRows, conditionOperators, defaultCondition, normalizeArchiveConfig, normalizeChecksumConfig, normalizeExtractConfig, normalizeHttpRequestConfig, normalizeNotifyConfig, normalizeScriptConfig, normalizeWaitConfig} from './model.js'
 import {controlNodeCategory, controlNodeHelp, controlNodeMeta} from './catalog.js'
 
 function FlowchartShape({kind, marker}) {
@@ -209,6 +209,28 @@ function ControlNode({id, data, selected}) {
   const httpSummary = httpURL
     ? `${httpRequest.method} ${httpURL}`
     : '未配置请求 URL'
+  const script = normalizeScriptConfig(data.script || {})
+  const scriptFirstLine = script.script.split('\n').map(line => line.trim()).find(Boolean) || ''
+  const scriptSummary = scriptFirstLine
+    ? `${scriptFirstLine.length > 40 ? `${scriptFirstLine.slice(0, 40)}…` : scriptFirstLine}${script.timeout ? ` · 超时 ${script.timeout}` : ''}`
+    : '未填写脚本内容'
+  const checksum = normalizeChecksumConfig(data.checksum || {})
+  const checksumSummary = checksum.path
+    ? `${checksum.algorithm.toUpperCase()} · ${checksum.path}${checksum.expected ? ' · 需匹配' : ''}`
+    : '未配置文件路径'
+  const archive = normalizeArchiveConfig(data.archive || {})
+  const archiveSummary = archive.path && archive.target_dir
+    ? `${archive.path} → ${archive.target_dir}`
+    : '未配置压缩包或目标目录'
+  const wait = normalizeWaitConfig(data.wait || {})
+  const waitSummary = wait.mode === 'poll'
+    ? `轮询 ${wait.poll_url || wait.poll_file || '未配置目标'}${wait.max_attempts ? ` · ${wait.max_attempts} 次` : ''}${wait.max_wait ? ` · 最长 ${wait.max_wait}` : ''}`
+    : `固定等待 ${wait.seconds || 0}s`
+  const notify = normalizeNotifyConfig(data.notify || {})
+  const notifyTarget = notify.channel === 'email'
+    ? `${notify.smtp_host || '未配置 SMTP'} → ${notify.to || '未配置收件人'}`
+    : notify.webhook || '未配置 Webhook'
+  const notifySummary = `${{webhook: 'Webhook', wecom: '企业微信', email: '邮件'}[notify.channel] || '通知'} · ${notifyTarget}`
   const helpText = type === 'loop'
     ? [loopSummary, runLoopSummary].filter(Boolean).join('；')
     : type === 'upload'
@@ -217,7 +239,17 @@ function ControlNode({id, data, selected}) {
         ? extractSummary
         : type === 'http_request'
           ? httpSummary
-          : controlNodeHelp(type)
+          : type === 'shell_script'
+            ? scriptSummary
+            : type === 'file_checksum'
+              ? checksumSummary
+              : type === 'archive'
+                ? archiveSummary
+                : type === 'wait'
+                  ? waitSummary
+                  : type === 'notify'
+                    ? notifySummary
+                    : controlNodeHelp(type)
   const runTitle = formatNodeRunTitle(data.run)
   const nodeTitle = [data.name || id, category.label, typeLabel, helpText, data.hostLabel, runTitle].filter(Boolean).join('\n')
   return (
@@ -332,6 +364,8 @@ export function runStatusLabel(status) {
   if (normalized === 'skipped') return '跳过'
   if (normalized === 'running') return '运行中'
   if (normalized === 'waiting') return '等待中'
+  if (normalized === 'pending') return '待处理'
+  if (normalized === 'rolled_back') return '已回滚'
   if (normalized === 'cancelled') return '已取消'
   return '未运行'
 }
@@ -343,7 +377,9 @@ export function normalizeRunStatus(status) {
   if (value === 'skip' || value === 'skipped') return 'skipped'
   if (value === 'running') return 'running'
   if (value === 'cancel' || value === 'cancelled' || value === 'canceled') return 'cancelled'
-  if (value === 'waiting' || value === 'pending' || value === 'queued') return 'waiting'
+  if (value === 'pending') return 'pending'
+  if (value === 'rolled_back' || value === 'rolled-back' || value === 'rolledback') return 'rolled_back'
+  if (value === 'waiting' || value === 'queued') return 'waiting'
   return value || 'idle'
 }
 

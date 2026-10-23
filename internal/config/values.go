@@ -307,18 +307,33 @@ func redactInto(out map[string]interface{}, prefix string, in map[string]interfa
 		if prefix != "" {
 			path = prefix + "." + k
 		}
-		if m, ok := asStringMap(v); ok {
-			nested := Values{}
-			redactInto(nested, path, m, explicit)
-			out[k] = nested
-			continue
-		}
-		if isSensitivePath(path, k, explicit) || isSecretReference(v) {
-			out[k] = "******"
-			continue
-		}
-		out[k] = copyValue(v)
+		out[k] = redactValue(v, path, k, explicit)
 	}
+}
+
+func redactValue(value interface{}, path, key string, explicit map[string]bool) interface{} {
+	if mapping, ok := value.(map[interface{}]interface{}); ok {
+		value = normalizeYAMLValue(mapping)
+	}
+	if mapping, ok := asStringMap(value); ok {
+		nested := Values{}
+		redactInto(nested, path, mapping, explicit)
+		return nested
+	}
+	if isSensitivePath(path, key, explicit) || isSecretReference(value) {
+		return "******"
+	}
+	if items, ok := value.([]interface{}); ok {
+		if items == nil {
+			return items
+		}
+		redacted := make([]interface{}, len(items))
+		for index, item := range items {
+			redacted[index] = redactValue(item, path, key, explicit)
+		}
+		return redacted
+	}
+	return copyValue(value)
 }
 
 func isSensitivePath(path, key string, explicit map[string]bool) bool {

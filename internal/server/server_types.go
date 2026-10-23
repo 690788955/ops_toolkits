@@ -105,10 +105,18 @@ type workflowValidation struct {
 }
 
 type runLogs struct {
-	Stdout string             `json:"stdout,omitempty"`
-	Stderr string             `json:"stderr,omitempty"`
-	Steps  map[string]runLogs `json:"steps,omitempty"`
-	Items  []runLogItem       `json:"items,omitempty"`
+	Stdout   string                    `json:"stdout,omitempty"`
+	Stderr   string                    `json:"stderr,omitempty"`
+	Steps    map[string]runLogs        `json:"steps,omitempty"`
+	Items    []runLogItem              `json:"items,omitempty"`
+	Attempts map[string]runAttemptLogs `json:"attempts,omitempty"`
+}
+
+// runAttemptLogs 保留恢复动作自己的证据，和原始步骤日志分开返回。
+type runAttemptLogs struct {
+	Summary string            `json:"summary,omitempty"`
+	Stdout  map[string]string `json:"stdout,omitempty"`
+	Stderr  map[string]string `json:"stderr,omitempty"`
 }
 
 type runLogItem struct {

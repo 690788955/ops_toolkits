@@ -11,7 +11,11 @@ plugins/config.deploy/
 ├── config/
 │   └── app.conf             # 受管配置文件（部署内容来源，可在 Web 端编辑）
 ├── scripts/
-│   └── push-config.sh       # 部署脚本（push / check 复用）
+│   ├── push-config.sh       # 部署脚本（push / check 复用）
+│   ├── rollback-config.sh   # 回滚脚本
+│   ├── service.sh           # 服务操作入口（Linux 直连，Windows 自动转交 PowerShell / sc）
+│   ├── service.cmd          # Windows 服务操作（全程 sc）
+│   └── service/             # Windows 服务操作实现（service.ps1 + service_api.cs、sc 兜底脚本）
 └── examples/
     └── params.yaml          # 参数示例
 ```
@@ -35,6 +39,14 @@ plugins/config.deploy/
 ### 2. `config.deploy.check` 检查配置差异
 
 只读工具，不写任何文件。参数为 `target_path` 与 `source`，输出 `status`（`identical` / `different` / `missing`）和 `changed`，并打印 unified diff（最多 200 行）。
+
+### 3. `config.deploy.service` 关联服务操作
+
+参数 `service`（服务名）、`action`（`restart` / `status`）、`manager`（默认 `auto`），输出 `service`、`action`、`status`（`ok` / `active`）和 `manager`。
+
+- Linux / Unix：`auto` 按 `systemctl` → `service` → `rc-service` 顺序探测；`status` 实际执行 `<manager> is-active`，返回非 `active` 即失败。
+- Windows：目标机为 git-bash/MSYS/WSL 时自动转交 `scripts/service/service.ps1`。为避免 `sc` 输出文本随系统语言变化（非英文系统没有 `RUNNING` 字样），脚本直接调用服务控制 API（`service_api.cs`）查询状态，`restart` 会等待服务真正进入 `running`。取不到 PowerShell 时退回 `sc.exe`。
+- Windows 目标只接受 `--manager auto` 或 `sc`，传 `systemctl` 等会被拒绝；服务名不能为空，也不接受 `*`、`?` 通配。
 
 ## 执行流程
 

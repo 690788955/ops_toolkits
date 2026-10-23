@@ -38,6 +38,7 @@ export default function RunRecordCanvas({catalog, workflow, detail}) {
           <strong>{workflow.name || workflow.id}</strong>
           <span>{nodes.length} 个节点 · {edges.length} 条依赖</span>
         </div>
+        <span className="runRecordCanvasReadonly" title="运行结束后保存的快照，不会随当前工作流配置变化">历史记录，只读</span>
       </div>
       <div className="runRecordCanvasViewport">
         <ReactFlow

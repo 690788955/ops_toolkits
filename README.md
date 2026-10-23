@@ -343,9 +343,9 @@ market:
 
 | 分类 | 形状 | 现有节点 |
 | --- | --- | --- |
-| 流程控制 `flow` | 菱形 | 条件分支、并行、合流、循环 |
-| 数据与文件 `data` | 文件块 | 上传文件、提取配置 |
-| 内置能力 `builtin` | 圆形 | HTTP 调用（CURL，已上线）、Shell 脚本与消息通知（规划中，面板内禁用） |
+| 流程控制 `flow` | 菱形 | 条件分支、循环、等待 / 轮询；并行分支与合流仅用于打开旧工作流，新建请改用阶段“并行模式” |
+| 数据与文件 `data` | 文件块 | 上传文件、提取配置、文件校验（MD5 / SHA256）、解压文件（tar / tar.gz / zip） |
+| 内置能力 `builtin` | 圆形 | HTTP 调用（CURL）、Shell 脚本、消息通知（Webhook / 企业微信 / 邮件） |
 
 节点的分类、形状、符号、标题和帮助文案集中在 `web/src/workflow/catalog.js` 的 `controlNodeCatalog`。新增内置节点时只需在该表追加一条元数据并把 `status` 改为 `ready`，画布渲染、选择面板分组、悬浮工具栏分区与搜索会自动跟随；运行侧再补对应的执行器与 Go 侧 `config.WorkflowNodeType*` 常量即可。
 
@@ -376,6 +376,29 @@ nodes:
 - `save_response` 只能是节点运行目录下的相对路径；响应体本身始终写入 `stdout.log`。
 - 下游可引用：`{{ .steps.<id>.stdout }}`（响应体）、`{{ .steps.<id>.http.status }}`、`{{ .steps.<id>.http.duration_ms }}`、`{{ .steps.<id>.http.saved_path }}`。
 - 校验在 `config.ValidateHTTPConfig`（`internal/config/types.go`），执行器在 `internal/runner/http.go`，Go 测试覆盖请求渲染、状态码失败与容错分支。
+
+### 内置消息通知节点
+
+`notify` 节点把上游结果推送到外部通道，适合放在流程末尾做收尾提示。标题、正文、地址与邮件主题都支持运行期模板；凭据按字面量保存，不渲染模板。
+
+```yaml
+nodes:
+  - id: alert
+    type: notify
+    name: 通知值班群
+    notify:
+      channel: wecom            # webhook | wecom | email
+      title: "部署完成 {{ .env }}"
+      message: "包 {{ .steps.upload.file.filename }} 已生效"
+      webhook: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
+      timeout: 10s
+```
+
+- `webhook`：POST JSON，字段为 `title`、`message`、`text`（标题+正文）、`timestamp`；可用 `headers` 附加鉴权头，非 2xx 即失败。
+- `wecom`：企业微信群机器人，按 markdown 消息发送，返回 `errcode` 非 0 即失败。
+- `email`：需要 `smtp_host`、`to`、`from`（可留空取 `smtp_user`）；`smtp_tls` 取 `starttls`（默认 587）、`tls`（默认 465）或 `none`（仅内网）；`subject` 留空用标题。
+- 模板渲染后仍残留 `{{` 视为失败，避免把未解析的占位符发出去；发送结果写入节点运行目录的 `notify.json`。
+- 通知节点在本机发起请求或连接 SMTP，不受操作机设置影响。校验在 `config.ValidateNotifyConfig`，执行器在 `internal/runner/notify.go`。
 
 选择面板中每个分类分组可点击标题折叠，默认全部展开，输入搜索词时强制展开。画布左上角的分类图例显示各类节点数量，点击某一类会在画布上仅高亮该类、其余节点淡化（再点取消）；该高亮只作用于显示层，不修改节点数据与连线。
 

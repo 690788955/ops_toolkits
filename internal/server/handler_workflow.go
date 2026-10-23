@@ -219,12 +219,29 @@ func applyWorkflowRunTarget(state *serverState, wf *config.WorkflowConfig, rawTa
 	}
 	for i := range clone.Nodes {
 		node := &clone.Nodes[i]
+		if !workflowNodeUsesHost(*node) {
+			node.Host = ""
+			continue
+		}
 		if node.Host != "" && !override {
 			continue
 		}
 		node.Host = target
 	}
 	return clone, nil
+}
+
+// 内置控制节点在控制端运行，只有工具、循环、Shell 和文件校验支持操作机。
+func workflowNodeUsesHost(node config.WorkflowNode) bool {
+	switch node.Type {
+	case config.WorkflowNodeTypeTool, config.WorkflowNodeTypeLoop, config.WorkflowNodeTypeShell, config.WorkflowNodeTypeChecksum:
+		return true
+	case "":
+		return node.Tool != "" || node.Loop.Tool != "" || node.Loop.Target != "" ||
+			node.Script.Script != "" || node.Checksum.Path != ""
+	default:
+		return false
+	}
 }
 
 func cloneWorkflowConfig(wf *config.WorkflowConfig) *config.WorkflowConfig {
@@ -252,6 +269,9 @@ func validateWorkflowTargets(state *serverState, wf *config.WorkflowConfig) erro
 		nodes[node.ID] = node
 	}
 	for _, node := range wf.Nodes {
+		if !workflowNodeUsesHost(node) {
+			continue
+		}
 		hostID := node.Host
 		if hostID == "" && node.Loop.Tool == "" && node.Loop.Target != "" {
 			hostID = nodes[node.Loop.Target].Host

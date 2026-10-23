@@ -1,10 +1,10 @@
-// 工作流节点目录（单一定义源）
+// 节点目录（单一定义源）
 //
 // 画布节点分为两个层次：
 //   1. 内置编排节点（本文件 controlNodeCatalog）：由平台自身实现，不依赖插件登记。
 //      再按用途分成三类，便于在选择面板分区展示、在画布上用颜色和形状区分：
-//        flow    流程控制：只决定执行路径与顺序，不执行业务动作
-//        data    数据与文件：运行前后搬运、沉淀、解析文件与配置
+//        flow    流程控制：决定执行路径、顺序与等待，不搬业务数据
+//        data    数据与文件：运行前后搬运、沉淀、校验、解析文件与配置
 //        builtin 内置能力：平台自带的执行器（HTTP 调用、脚本、通知等）
 //   2. 插件工具节点：由插件注册表提供，通过 tool 字段引用。
 //
@@ -26,20 +26,20 @@ export const nodeCategories = [
   {
     id: 'flow',
     label: '流程控制',
-    hint: '分支 / 并行 / 合流 / 循环',
+    hint: '分支 / 并行 / 合流 / 循环 / 等待',
     accent: '#4f46e5',
     surface: '#eef1ff',
     shape: 'decision',
-    description: '只决定执行路径与顺序，本身不执行业务动作'
+    description: '决定执行路径、顺序与等待条件，不直接搬运业务数据'
   },
   {
     id: 'data',
     label: '数据与文件',
-    hint: '上传 / 提取 / 解析',
+    hint: '上传 / 提取 / 校验 / 解压',
     accent: '#0f766e',
     surface: '#e8f6f3',
     shape: 'data',
-    description: '在运行前后搬运、沉淀和解析文件与配置'
+    description: '在运行前后搬运、沉淀、校验与解析文件'
   },
   {
     id: 'builtin',
@@ -85,29 +85,32 @@ export const controlNodeCatalog = [
     title: '条件分支',
     secondary: 'Switch / Case',
     description: '根据上游输出或工作流参数选择后续分支',
-    help: '适合根据巡检结果、返回文本、参数值做分流'
+    help: '适合根据巡检结果、返回文本、参数值做分流；分支可以落在条件节点所在的阶段或更靠后的阶段，未命中的分支会被跳过',
+    aliases: ['condition', 'switch', 'case', 'if', 'branch', '条件', '分支', '判断']
   },
   {
     type: 'parallel',
     category: 'flow',
-    status: 'ready',
+    status: 'legacy',
     shape: 'gateway',
     symbol: '+',
     title: '并行分支',
-    secondary: 'Parallel',
-    description: '将后续任务拆分为多个分支路径',
-    help: '用于明确 fan-out 分支结构；当前运行按 DAG 顺序调度'
+    secondary: 'Parallel · 旧流程兼容',
+    description: '旧流程专用标记：新建请改用阶段“并行模式”',
+    help: '旧工作流仍可照常加载和执行；新流程请把阶段执行方式切换为“并行”，再用显式依赖表达分支，不再新增该节点',
+    aliases: ['parallel', 'fanout', '并发', '并行', '分支']
   },
   {
     type: 'join',
     category: 'flow',
-    status: 'ready',
+    status: 'legacy',
     shape: 'gateway',
     symbol: '∧',
     title: '合流',
-    secondary: 'Join',
-    description: '等待多个上游分支完成后继续流程',
-    help: '用于明确 fan-in 汇聚点；入边完成后节点记为成功'
+    secondary: 'Join · 旧流程兼容',
+    description: '旧流程专用标记：阶段屏障已承担汇聚',
+    help: '旧工作流仍可照常加载和执行；新流程由阶段屏障在整段完成后自动进入下一阶段，不再新增该节点',
+    aliases: ['join', 'fanin', 'merge', '合流', '汇聚', '同步']
   },
   {
     type: 'loop',
@@ -118,7 +121,8 @@ export const controlNodeCatalog = [
     title: '循环',
     secondary: 'Loop',
     description: '按固定次数重复执行一个内嵌选择的插件工具',
-    help: '执行到循环节点时，按最大次数重复运行已选择的插件工具'
+    help: '执行到循环节点时，按最大次数重复运行已选择的插件工具',
+    aliases: ['loop', 'repeat', 'iterate', '循环', '重复', '迭代']
   },
   {
     type: 'upload',
@@ -129,7 +133,8 @@ export const controlNodeCatalog = [
     title: '上传文件',
     secondary: 'Upload',
     description: '运行前上传本地文件、批量文件或目录到平台受控目录',
-    help: '上传节点会在工作流启动前选择文件或目录，运行时输出上传结果 JSON'
+    help: '上传节点会在工作流启动前选择文件或目录，运行时输出上传结果 JSON',
+    aliases: ['upload', 'file', 'artifact', '上传', '文件', '目录', '产物']
   },
   {
     type: 'extract_config',
@@ -140,7 +145,8 @@ export const controlNodeCatalog = [
     title: '提取配置',
     secondary: 'Extract Config',
     description: '从上传结果提取文件到工作流配置目录',
-    help: '把上传结果里的文件按映射复制成稳定的工作流配置文件'
+    help: '把上传结果里的文件按映射复制成稳定的工作流配置文件',
+    aliases: ['config', 'extract', '配置', '提取', '沉淀']
   },
   {
     type: 'http_request',
@@ -151,29 +157,68 @@ export const controlNodeCatalog = [
     title: 'HTTP 调用',
     secondary: 'CURL / REST',
     description: '直接发起 HTTP 请求并把响应写入节点输出',
-    help: '等价于一条 curl 命令：支持方法、Header、Body、期望状态码，响应体可直接被下游引用'
+    help: '等价于一条 curl 命令：支持方法、Header、Body、期望状态码，响应体可直接被下游引用',
+    aliases: ['http', 'https', 'curl', 'rest', 'api', 'request', 'webhook', '请求', '接口']
   },
   {
     type: 'shell_script',
     category: 'builtin',
-    status: 'planned',
+    status: 'ready',
     shape: 'builtin',
     symbol: '$',
     title: 'Shell 脚本',
     secondary: 'Script',
     description: '在目标机上执行内联脚本，无需封装插件',
-    help: '规划中：适合一次性排障命令与轻量胶水逻辑'
+    help: '适合一次性排障命令与轻量胶水逻辑；可指定工作目录、环境变量与超时',
+    aliases: ['shell', 'bash', 'cmd', 'command', '脚本', '命令', '排障', '内联']
+  },
+  {
+    type: 'file_checksum',
+    category: 'data',
+    status: 'ready',
+    shape: 'data',
+    symbol: '#',
+    title: '文件校验',
+    secondary: 'Checksum',
+    description: '计算文件 MD5/SHA256，可要求与期望摘要一致',
+    help: '用于校验上传包、发布产物是否完整；摘要会写入节点输出供下游引用',
+    aliases: ['checksum', 'md5', 'sha256', 'hash', 'digest', '摘要', '哈希', '校验和', '完整性']
+  },
+  {
+    type: 'archive',
+    category: 'data',
+    status: 'ready',
+    shape: 'data',
+    symbol: '⧉',
+    title: '解压文件',
+    secondary: 'Archive',
+    description: '把 tar、tar.gz、zip 解压到目标目录',
+    help: '自动拦截绝对路径与 .. 逃逸；可去掉顶层目录并控制是否覆盖',
+    aliases: ['archive', 'unzip', 'untar', 'extract', 'tar', 'zip', '解压', '解包', '压缩包']
+  },
+  {
+    type: 'wait',
+    category: 'flow',
+    status: 'ready',
+    shape: 'gateway',
+    symbol: '⏱',
+    title: '等待 / 轮询',
+    secondary: 'Wait / Poll',
+    description: '固定等待，或有限轮询 HTTP 状态与文件出现',
+    help: '轮询支持最大尝试次数与最大等待时长，运行取消会立即结束等待',
+    aliases: ['wait', 'sleep', 'poll', 'delay', 'retry', '等待', '轮询', '延时', '重试']
   },
   {
     type: 'notify',
     category: 'builtin',
-    status: 'planned',
+    status: 'ready',
     shape: 'builtin',
     symbol: '✉',
     title: '消息通知',
     secondary: 'Notify',
-    description: '把上游结果推送到邮件、企业微信等通道',
-    help: '规划中：作为流程收尾的通用通知节点'
+    description: '把上游结果推送到 Webhook、企业微信或邮件',
+    help: '标题与正文支持运行期模板；发送失败会让节点失败，适合放在流程末尾',
+    aliases: ['notify', 'webhook', 'wecom', 'wechat', 'email', 'smtp', 'mail', 'alert', '通知', '告警', '邮件', '企业微信', '推送']
   }
 ]
 
@@ -197,8 +242,19 @@ export function controlNodeCategory(type) {
   return nodeCategory(controlNodeMeta(type)?.category)
 }
 
+// legacy 只用于打开旧工作流：可以加载、执行和转换，但不再作为新建节点的候选。
 export function isControlReady(control) {
-  return Boolean(control) && control.status !== 'planned'
+  return Boolean(control) && control.status !== 'planned' && control.status !== 'legacy'
+}
+
+export function isControlLegacy(control) {
+  return control?.status === 'legacy'
+}
+
+export function controlUnavailableReason(control) {
+  if (isControlLegacy(control)) return '仅用于打开旧工作流：新建请改用阶段“并行模式”和阶段屏障'
+  if (control?.status === 'planned') return '规划中：暂不可添加'
+  return ''
 }
 
 // 按分类分组，保持 nodeCategories 的声明顺序；空分组会被跳过。
@@ -214,7 +270,7 @@ export function groupControlsByCategory(controls = controlNodeCatalog) {
 export function controlNodeMatchesKeyword(control, keyword) {
   const word = String(keyword || '').trim().toLowerCase()
   if (!word) return true
-  return [control.title, control.secondary, control.description, control.help, control.type, nodeCategory(control.category).label]
+  return [control.title, control.secondary, control.description, control.help, control.type, nodeCategory(control.category).label, ...(control.aliases || [])]
     .filter(Boolean)
     .some(value => String(value).toLowerCase().includes(word))
 }

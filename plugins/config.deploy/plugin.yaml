@@ -159,3 +159,144 @@ contributes:
           json_path: changed
       confirm:
         required: false
+
+    - id: config.deploy.rollback
+      name: 回滚配置文件
+      category: config
+      description: 按运行记录中的备份恢复目标文件，回滚前检查目标是否被外部修改
+      tags: [config, rollback, restore, file]
+      command: scripts/rollback-config.sh
+      args:
+        - --action
+        - "{{ .action }}"
+        - --target
+        - "{{ .target_path }}"
+        - --backup
+        - "{{ .backup_path }}"
+        - --expected-sha256
+        - "{{ .expected_sha256 }}"
+        - --force
+        - "{{ .force }}"
+      workdir: .
+      timeout: 2m
+      parameters:
+        - name: action
+          type: string
+          description: check 只校验备份与目标状态；rollback 执行恢复
+          required: false
+          default: check
+          options:
+            - check
+            - rollback
+        - name: target_path
+          type: string
+          description: 需要恢复的目标文件绝对路径
+          required: true
+        - name: backup_path
+          type: string
+          description: 下发时生成的备份文件绝对路径
+          required: true
+        - name: expected_sha256
+          type: string
+          description: 下发完成后目标文件的 SHA256；目标被外部修改时默认拒绝回滚
+          required: false
+          default: ""
+        - name: force
+          type: string
+          description: 目标文件已被外部修改时是否仍强制回滚（会先保存当前文件）
+          required: false
+          default: "no"
+          options:
+            - "yes"
+            - "no"
+      outputs:
+        - name: target_path
+          description: 恢复的目标文件路径
+          type: string
+          required: true
+          json_path: target_path
+        - name: backup_path
+          description: 使用的备份文件路径
+          type: string
+          required: false
+          json_path: backup_path
+        - name: sha256
+          description: 恢复后目标文件的 SHA256
+          type: string
+          required: true
+          json_path: sha256
+        - name: status
+          description: 执行结果，ready / rolled_back
+          type: string
+          required: true
+          json_path: status
+        - name: safety_backup
+          description: 回滚前保留的当前文件路径
+          type: string
+          required: false
+          json_path: safety_backup
+      confirm:
+        required: true
+        message: 确认使用备份恢复目标配置文件？回滚前会检查文件是否被外部修改。
+
+    - id: config.deploy.service
+      name: 关联服务操作
+      category: config
+      description: 重启关联服务或检查服务状态，供配置变更后的恢复与健康检查使用；Linux 探测 systemctl/service/rc-service，Windows 使用 sc
+      tags: [config, service, restart, health]
+      command: scripts/service.sh
+      args:
+        - --service
+        - "{{ .service }}"
+        - --action
+        - "{{ .action }}"
+        - --manager
+        - "{{ .manager }}"
+      workdir: .
+      timeout: 1m
+      parameters:
+        - name: service
+          type: string
+          description: 服务名，例如 nginx
+          required: true
+        - name: action
+          type: string
+          description: restart 重启服务；status 检查服务是否运行
+          required: false
+          default: status
+          options:
+            - restart
+            - status
+        - name: manager
+          type: string
+          description: 服务管理方式；Linux 的 auto 按 systemctl、service、rc-service 顺序探测，Windows 目标固定使用 sc，选 systemctl/service/rc-service 会被拒绝
+          required: false
+          default: auto
+          options:
+            - auto
+            - systemctl
+            - service
+            - rc-service
+      outputs:
+        - name: service
+          description: 服务名
+          type: string
+          required: true
+          json_path: service
+        - name: action
+          description: 实际执行的动作
+          type: string
+          required: true
+          json_path: action
+        - name: status
+          description: ok 或 active；失败时命令返回非零
+          type: string
+          required: true
+          json_path: status
+        - name: manager
+          description: 实际使用的服务管理命令（systemctl、service、rc-service 或 Windows 的 sc）
+          type: string
+          required: false
+          json_path: manager
+      confirm:
+        required: false

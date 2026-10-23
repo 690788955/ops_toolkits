@@ -1,19 +1,38 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react'
 import {fetchUIPreferences} from './api.js'
 import XTerminal from './XTerminal.jsx'
-import {DEFAULT_LOG_FONT_SIZE, LOG_LEVELS, countLogsByLevel, detectLogLevel, exportLogText, formatLogLine, normalizeLogFontSize} from './logUtils.js'
+import {DEFAULT_LOG_FONT_SIZE, LOG_LEVELS, detectLogLevel, exportLogText, formatLogLine, normalizeLogFontSize} from './logUtils.js'
+
+// 终端缓冲与日志列表保持一致；超出后靠 xterm 自身的 scrollback 顶掉最早的行。
+const LOG_BUFFER_LIMIT = 50000
+const TERMINAL_BATCH_LINES = 400
+const TERMINAL_FLUSH_DELAY = 16
 
 export default function LiveRunTerminal({runID, running = false, initialItems = []}) {
   const terminalRef = useRef(null)
   const filtersRef = useRef(new Set(LOG_LEVELS))
   const autoScrollRef = useRef(true)
   const seenLogsRef = useRef(new Set())
+  const pendingTerminalRef = useRef({lines: [], timer: 0})
+  const replayOnFiltersRef = useRef(false)
   const [logs, setLogs] = useState([])
   const [filters, setFilters] = useState(() => new Set(LOG_LEVELS))
   const [search, setSearch] = useState('')
   const [autoScroll, setAutoScroll] = useState(true)
   const [fontSize, setFontSize] = useState(DEFAULT_LOG_FONT_SIZE)
-  const counts = useMemo(() => countLogsByLevel(logs), [logs])
+  // 终端要等挂载后才渲染，首屏日志在 onReady 里统一回放，避免写进尚未创建的终端被丢掉。
+  const bootedRef = useRef(false)
+  const initialItemsRef = useRef(initialItems)
+  const runningRef = useRef(running)
+  const runIDRef = useRef(runID)
+  initialItemsRef.current = initialItems
+  runningRef.current = running
+  runIDRef.current = runID
+  const counts = useMemo(() => {
+    const next = Object.fromEntries(LOG_LEVELS.map(level => [level, 0]))
+    logs.forEach(entry => { next[entry.level] = (next[entry.level] || 0) + 1 })
+    return next
+  }, [logs])
 
   useEffect(() => {
     let cancelled = false
@@ -40,11 +59,48 @@ export default function LiveRunTerminal({runID, running = false, initialItems = 
     autoScrollRef.current = autoScroll
   }, [autoScroll])
 
+  const flushTerminal = useCallback(() => {
+    const pending = pendingTerminalRef.current
+    if (pending.timer) {
+      window.clearTimeout(pending.timer)
+      pending.timer = 0
+    }
+    if (!pending.lines.length) return
+    const text = pending.lines.join('\r\n')
+    const scroll = autoScrollRef.current
+    pending.lines = []
+    terminalRef.current?.write(text, () => {
+      if (scroll) terminalRef.current?.scrollToBottom()
+    })
+  }, [])
+
+  // 流式日志逐行写会让长任务越来越卡：积攒到批次大小或下一帧再写。
+  // 打开运行快照时首屏会一次性灌入整份历史，这种批量直接整块写入。
+  const queueTerminalLines = useCallback(lines => {
+    if (!lines.length) return
+    const pending = pendingTerminalRef.current
+    if (lines.length >= TERMINAL_BATCH_LINES || pending.lines.length + lines.length >= TERMINAL_BATCH_LINES) {
+      pending.lines.push(...lines)
+      flushTerminal()
+      return
+    }
+    pending.lines.push(...lines)
+    if (!pending.timer) pending.timer = window.setTimeout(flushTerminal, TERMINAL_FLUSH_DELAY)
+  }, [flushTerminal])
+
+  useEffect(() => () => {
+    const pending = pendingTerminalRef.current
+    if (pending.timer) window.clearTimeout(pending.timer)
+    pending.timer = 0
+    pending.lines = []
+  }, [])
+
   useEffect(() => {
     seenLogsRef.current = new Set()
     setLogs([])
+    flushTerminal()
     terminalRef.current?.reset()
-  }, [runID])
+  }, [runID, flushTerminal])
 
   const appendEvents = useCallback((events, activeFilters = filtersRef.current) => {
     if (!events.length) return
@@ -57,24 +113,40 @@ export default function LiveRunTerminal({runID, running = false, initialItems = 
       accepted.push(entry)
     }
     if (!accepted.length) return
-    setLogs(previous => [...previous, ...accepted].slice(-50000))
-    accepted.forEach(entry => {
-      if (activeFilters.has(entry.level)) terminalRef.current?.writeln(formatLogLine(entry.text, entry))
-    })
-    if (accepted.length && autoScrollRef.current) terminalRef.current?.scrollToBottom()
-  }, [])
+    setLogs(previous => [...previous, ...accepted].slice(-LOG_BUFFER_LIMIT))
+    queueTerminalLines(
+      accepted
+        .filter(entry => activeFilters.has(entry.level))
+        .map(entry => formatLogLine(entry.text, entry)),
+    )
+  }, [queueTerminalLines])
 
   const replayTerminal = useCallback((nextFilters = filters) => {
+    if (pendingTerminalRef.current.timer) {
+      window.clearTimeout(pendingTerminalRef.current.timer)
+      pendingTerminalRef.current.timer = 0
+    }
+    pendingTerminalRef.current.lines = []
     terminalRef.current?.reset()
-    logs.forEach(entry => {
-      if (nextFilters.has(entry.level)) terminalRef.current?.writeln(formatLogLine(entry.text, entry))
-    })
-    terminalRef.current?.scrollToBottom()
-  }, [filters, logs])
+    const text = logs
+      .filter(entry => nextFilters.has(entry.level))
+      .map(entry => formatLogLine(entry.text, entry))
+      .join('\r\n')
+    if (!text) return
+    terminalRef.current?.write(text, () => terminalRef.current?.scrollToBottom())
+  }, [logs])
 
   useEffect(() => {
+    if (!bootedRef.current) return
     appendEvents(flattenLogItems(initialItems, runID, running))
   }, [appendEvents, initialItems, runID, running])
+
+  // 首屏快照和切换运行都重建终端 key，新终端就绪时只需重放当前日志，去重交给 seenLogsRef。
+  const handleTerminalReady = useCallback(() => {
+    bootedRef.current = true
+    appendEvents(flattenLogItems(initialItemsRef.current, runIDRef.current, runningRef.current))
+    replayTerminal(filtersRef.current)
+  }, [appendEvents, replayTerminal])
 
   useEffect(() => {
     if (!runID || !running) return undefined
@@ -93,32 +165,39 @@ export default function LiveRunTerminal({runID, running = false, initialItems = 
     return () => source.close()
   }, [appendEvents, runID, running])
 
+  // 筛选变化后由 effect 统一重放：日志会在同一帧里继续追加，重放必须用最新快照。
   function toggleFilter(level) {
     setFilters(previous => {
       const next = new Set(previous)
       if (next.has(level)) next.delete(level)
       else next.add(level)
       filtersRef.current = next
-      replayTerminal(next)
       return next
     })
+    replayOnFiltersRef.current = true
   }
 
   function showOnlyErrors() {
     const next = new Set(['fatal', 'error', 'warning'])
     filtersRef.current = next
     setFilters(next)
-    replayTerminal(next)
+    replayOnFiltersRef.current = true
   }
 
   function toggleAll() {
     setFilters(previous => {
       const next = previous.size === LOG_LEVELS.length ? new Set() : new Set(LOG_LEVELS)
       filtersRef.current = next
-      replayTerminal(next)
       return next
     })
+    replayOnFiltersRef.current = true
   }
+
+  useEffect(() => {
+    if (!replayOnFiltersRef.current) return
+    replayOnFiltersRef.current = false
+    replayTerminal(filters)
+  }, [filters, replayTerminal])
 
   function exportLogs() {
     const text = exportLogText(logs, filters)
@@ -161,11 +240,11 @@ export default function LiveRunTerminal({runID, running = false, initialItems = 
         </button>
         {LOG_LEVELS.map(level => (
           <button key={level} type="button" className={filters.has(level) ? 'tagChip active' : 'tagChip'} onClick={() => toggleFilter(level)}>
-            {level} {counts[level] || 0}
+            {level} {logs.length >= LOG_BUFFER_LIMIT ? `${counts[level] || 0}+` : counts[level] || 0}
           </button>
         ))}
       </div>
-      <XTerminal key={fontSize} ref={terminalRef} className="runXTerminal" options={{fontSize}} onReady={() => replayTerminal(filters)} />
+      <XTerminal key={`${runID}:${fontSize}`} ref={terminalRef} className="runXTerminal" options={{fontSize}} onReady={handleTerminalReady} />
     </div>
   )
 }

@@ -11,8 +11,41 @@ export function fetchRunSummary(id) {
   return fetchJSON(`/api/runs/${encodeURIComponent(id)}?summary=1`)
 }
 
+export function fetchPendingRuns(limit = 50) {
+  return fetchJSON(`/api/runs?status=pending&limit=${encodeURIComponent(limit)}`)
+}
+
+export function retryPendingRunCheck(runID) {
+  return postJSON(`/api/runs/${encodeURIComponent(runID)}/recovery/check`, {})
+}
+
+export function rollbackPendingRun(runID) {
+  return postJSON(`/api/runs/${encodeURIComponent(runID)}/recovery/rollback`, {})
+}
+
+export function resolvePendingRun(runID, note = '') {
+  return postJSON(`/api/runs/${encodeURIComponent(runID)}/recovery/resolve`, {note})
+}
+
+export function retryRunNotification(runID, index) {
+  return postJSON(`/api/runs/${encodeURIComponent(runID)}/notifications/${encodeURIComponent(index)}/retry`, {})
+}
+
 export function fetchUIPreferences() {
   return fetchJSON('/api/ui/preferences')
+}
+
+// Vite serves the SPA itself in dev, so ?token= never reaches the Go middleware.
+// Make one API call to let the backend set the HttpOnly session cookie.
+export async function bootstrapAuthTokenFromURL() {
+  if (typeof window === 'undefined') return
+  const token = new URLSearchParams(window.location.search).get('token')
+  if (!token) return
+  try {
+    await fetch(`/api/ui/preferences?token=${encodeURIComponent(token)}`, {credentials: 'same-origin'})
+  } catch {
+    // The app will surface the 401 on its own if the token is invalid.
+  }
 }
 
 export async function postJSON(path, payload) {

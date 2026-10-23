@@ -5,6 +5,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -45,6 +48,31 @@ func (e *Executor) DescribeHost(hostID string) (runner.RemoteHost, error) {
 		return runner.RemoteHost{}, fmt.Errorf("操作机 %s 已停用", host.Name)
 	}
 	return runner.RemoteHost{ID: host.ID, Name: host.Name}, nil
+}
+
+// HostIdentity 固定目标连接地址与用户，只返回摘要，不把连接配置或凭据写入运行快照。
+func (e *Executor) HostIdentity(hostID string) (string, error) {
+	if e == nil || e.ssh == nil {
+		return "", fmt.Errorf("远程执行未配置 SSH 操作机管理器")
+	}
+	host, err := e.ssh.HostByID(hostID)
+	if err != nil {
+		return "", err
+	}
+	if !host.IsEnabled() {
+		return "", fmt.Errorf("操作机 %s 已停用", host.Name)
+	}
+	identity := struct {
+		Address string
+		Port    int
+		User    string
+	}{Address: host.Address, Port: host.Port, User: host.User}
+	data, err := json.Marshal(identity)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func (e *Executor) RunTool(ctx context.Context, req runner.RemoteToolRequest, stdout, stderr io.Writer) error {

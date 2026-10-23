@@ -65,6 +65,18 @@ func (s *serverState) hasActiveRun(id string) bool {
 	return s.active[id] != nil
 }
 
+// claimRun 原子领取运行上的恢复动作；重复请求或运行中的任务会被拒绝。
+func (s *serverState) claimRun(id string) (context.Context, context.CancelFunc, bool) {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	if s.active[id] != nil {
+		return nil, nil, false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.active[id] = cancel
+	return ctx, cancel, true
+}
+
 func (s *serverState) cancelRun(id string) bool {
 	s.runMu.Lock()
 	cancel := s.active[id]
@@ -83,7 +95,16 @@ func (s *serverState) reconcileRunRecord(reg *registry.Registry, id string) (run
 	if err != nil {
 		return runner.RunRecord{}, err
 	}
-	if record.Status != "running" || s.hasActiveRun(record.ID) {
+	if s.hasActiveRun(record.ID) {
+		return record, nil
+	}
+	interrupted := markInterruptedRecoveryAttempts(&record)
+	if record.Status != "running" {
+		if interrupted {
+			if err := saveRunRecord(reg, &record); err != nil {
+				return runner.RunRecord{}, err
+			}
+		}
 		return record, nil
 	}
 	record.EndedAt = time.Now()
@@ -103,6 +124,34 @@ func (s *serverState) reconcileRunRecord(reg *registry.Registry, id string) (run
 	return record, nil
 }
 
+func markInterruptedRecoveryAttempts(record *runner.RunRecord) bool {
+	changed := false
+	for index := range record.Attempts {
+		if record.Attempts[index].Status != "running" {
+			continue
+		}
+		record.Attempts[index].Status = "failed"
+		record.Attempts[index].EndedAt = time.Now()
+		record.Attempts[index].Error = "恢复动作已异常退出或服务已重启，请检查本次日志后继续处理。"
+		changed = true
+	}
+	return changed
+}
+
+// 仅在已领取运行后调用，此时遗留 running attempt 一定来自已中断的恢复动作。
+func loadClaimedRunRecord(state *serverState, reg *registry.Registry, id string) (runner.RunRecord, error) {
+	record, err := loadRunRecord(state, reg, id)
+	if err != nil {
+		return record, err
+	}
+	if markInterruptedRecoveryAttempts(&record) {
+		if err := saveRunRecord(reg, &record); err != nil {
+			return record, err
+		}
+	}
+	return record, nil
+}
+
 func (s *serverState) reconcileOrphanRuns(reg *registry.Registry) {
 	if s == nil || reg == nil {
 		return
@@ -112,7 +161,7 @@ func (s *serverState) reconcileOrphanRuns(reg *registry.Registry) {
 		return
 	}
 	for _, item := range items {
-		if item.Status != "running" || s.hasActiveRun(item.ID) {
+		if (item.Status != "running" && item.Status != runner.RunStatusPending) || s.hasActiveRun(item.ID) {
 			continue
 		}
 		_, _ = s.reconcileRunRecord(reg, item.ID)

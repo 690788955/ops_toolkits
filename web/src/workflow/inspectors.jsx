@@ -3,52 +3,107 @@ import FileUploadInput from '../FileUploadInput.jsx'
 import {sshHostStatusLabel} from '../SshHostsModal.jsx'
 import {conditionOperators, controlNodeCategory, controlNodeHelp, controlNodeTitle} from './catalog.js'
 import {
+  archiveFormatFromPath,
+  archiveFormats,
+  checksumAlgorithms,
+  defaultArchiveConfig as modelDefaultArchiveConfig,
+  defaultChecksumConfig as modelDefaultChecksumConfig,
   defaultExtractConfig as modelDefaultExtractConfig,
   defaultCondition,
   defaultHttpRequest as modelDefaultHttpRequest,
   defaultLoop as modelDefaultLoop,
+  defaultScriptConfig as modelDefaultScriptConfig,
+  defaultNotifyConfig as modelDefaultNotifyConfig,
   defaultUpload as modelDefaultUpload,
+  defaultWaitConfig as modelDefaultWaitConfig,
   defaultParams,
   formatHTTPStatusList,
   httpBodyTypes,
   httpMethods,
+  normalizeArchiveConfig,
+  normalizeChecksumConfig,
   normalizeExtractConfig,
   normalizeHttpBodyType,
   normalizeHttpRequestConfig,
   normalizeHTTPStatusList,
   normalizeLoopConfig,
-  normalizeUploadConfig
+  normalizeNotifyConfig,
+  normalizeScriptConfig,
+  normalizeUploadConfig,
+  normalizeWaitConfig,
+  notifyChannels,
+  notifyDefaultPort,
+  notifyTLSModes,
+  splitMailRecipients,
+  waitModes
 } from './model.js'
 
 function NodeConfigModal({node, kindLabel, children, onClose, onSave}) {
   return (
-    <div className="modalBackdrop" onClick={onClose}>
-      <div className="modal nodeConfigModal" onClick={event => event.stopPropagation()}>
-        <div className="modalHeader">
+    <div className="modalBackdrop drawerBackdrop" onClick={onClose}>
+      <aside className="nodeConfigDrawer" role="dialog" aria-modal="true" aria-label="节点配置" onClick={event => event.stopPropagation()}>
+        <div className="modalHeader nodeConfigDrawerHeader">
           <div>
             <h3>节点配置</h3>
             <p>{kindLabel} · {node.data.name || node.id}</p>
           </div>
           <button type="button" className="modalClose" onClick={onClose}>×</button>
         </div>
-        {children}
-        <div className="modalFooter">
+        <div className="nodeConfigDrawerBody">{children}</div>
+        <div className="modalFooter nodeConfigDrawerFooter">
           <button type="button" className="secondary" onClick={onClose}>取消</button>
           <button type="button" className="primary" onClick={onSave}>保存配置</button>
         </div>
-      </div>
+      </aside>
     </div>
   )
 }
 
-function NodeConfigEditor({node, tool, loopTool, tools, nodes, hosts = [], sources, paramsText, setParamsText, onNameChange, onConditionChange, onLoopChange, onUploadChange, onExtractConfigChange, onHttpChange, onParamChange, onLoopParamChange, onApplyParams, onHostChange}) {
+function StageAssignmentEditor({node, stages = [], nodes = [], disabled = false, onStageChange, onStageMove}) {
+  if (!stages.length) return null
+  const stageId = node.data.stageId || ''
+  const stageNodes = (nodes || [])
+    .filter(item => (item.data?.stageId || '') === stageId)
+    .sort((left, right) => (Number(left.data?.order) || 0) - (Number(right.data?.order) || 0))
+  const index = stageNodes.findIndex(item => item.id === node.id)
+  return (
+    <div className="nodeStageAssignment">
+      <label>
+        <span>所属阶段</span>
+        <select value={stageId} disabled={disabled} onChange={event => onStageChange?.(event.target.value)}>
+          {stages.map(stage => (
+            <option key={stage.id} value={stage.id}>{stage.name || stage.id}</option>
+          ))}
+        </select>
+      </label>
+      <div className="nodeStageOrder">
+        <span>阶段内第 <strong>{index >= 0 ? index + 1 : '-'}</strong> / {stageNodes.length || 1} 步</span>
+        <div className="buttonRow">
+          <button type="button" className="secondary" disabled={disabled || index <= 0} onClick={() => onStageMove?.(-1)}>上移</button>
+          <button type="button" className="secondary" disabled={disabled || index < 0 || index >= stageNodes.length - 1} onClick={() => onStageMove?.(1)}>下移</button>
+        </div>
+      </div>
+      <small className="workflowSelectionHint">阶段归属和阶段内顺序会立即写回画布，其他配置保存后生效。</small>
+    </div>
+  )
+}
+
+function NodeConfigEditor({node, tool, loopTool, tools, nodes, stages = [], hosts = [], sources, paramsText, setParamsText, onNameChange, onConditionChange, onLoopChange, onUploadChange, onExtractConfigChange, onHttpChange, onScriptChange, onChecksumChange, onArchiveChange, onWaitChange, onNotifyChange, onParamChange, onLoopParamChange, onApplyParams, onHostChange, onStageChange, onStageMove, stageDisabled = false}) {
   if (!node) return null
   return (
     <div className="form nodeConfigEditor">
+      <StageAssignmentEditor
+        node={node}
+        stages={stages}
+        nodes={nodes}
+        disabled={stageDisabled}
+        onStageChange={onStageChange}
+        onStageMove={onStageMove}
+      />
       {node.type === 'conditionNode' ? (
         <ConditionEditor node={node} sources={sources} onNameChange={onNameChange} onChange={onConditionChange} />
       ) : node.type === 'controlNode' ? (
-        <ControlNodeInspector node={node} tools={tools} nodes={nodes} hosts={hosts} loopTool={loopTool} sources={sources} onNameChange={onNameChange} onLoopChange={onLoopChange} onUploadChange={onUploadChange} onExtractConfigChange={onExtractConfigChange} onHttpChange={onHttpChange} onLoopParamChange={onLoopParamChange} onHostChange={onHostChange} />
+        <ControlNodeInspector node={node} tools={tools} nodes={nodes} hosts={hosts} loopTool={loopTool} sources={sources} onNameChange={onNameChange} onLoopChange={onLoopChange} onUploadChange={onUploadChange} onExtractConfigChange={onExtractConfigChange} onHttpChange={onHttpChange} onScriptChange={onScriptChange} onChecksumChange={onChecksumChange} onArchiveChange={onArchiveChange} onWaitChange={onWaitChange} onNotifyChange={onNotifyChange} onLoopParamChange={onLoopParamChange} onHostChange={onHostChange} />
       ) : (
         <ToolNodeConfigEditor
           node={node}
@@ -211,16 +266,26 @@ function ConditionEditor({node, sources, onNameChange, onChange}) {
   )
 }
 
-function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onNameChange, onLoopChange, onUploadChange, onExtractConfigChange, onHttpChange, onLoopParamChange, onHostChange}) {
+function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onNameChange, onLoopChange, onUploadChange, onExtractConfigChange, onHttpChange, onScriptChange, onChecksumChange, onArchiveChange, onWaitChange, onNotifyChange, onLoopParamChange, onHostChange}) {
   const isLoop = node.data.controlType === 'loop'
   const loop = normalizeLoopConfig(node.data.loop || modelDefaultLoop())
   const isUpload = node.data.controlType === 'upload'
   const isExtractConfig = node.data.controlType === 'extract_config'
   const isHTTP = node.data.controlType === 'http_request'
+  const isScript = node.data.controlType === 'shell_script'
+  const isChecksum = node.data.controlType === 'file_checksum'
+  const isArchive = node.data.controlType === 'archive'
+  const isWait = node.data.controlType === 'wait'
+  const isNotify = node.data.controlType === 'notify'
   const category = controlNodeCategory(node.data.controlType)
   const upload = normalizeUploadConfig(node.data.upload || modelDefaultUpload())
   const extract = normalizeExtractConfig(node.data.extract_config || modelDefaultExtractConfig())
   const httpRequest = normalizeHttpRequestConfig(node.data.http || modelDefaultHttpRequest())
+  const script = normalizeScriptConfig(node.data.script || modelDefaultScriptConfig())
+  const checksum = normalizeChecksumConfig(node.data.checksum || modelDefaultChecksumConfig())
+  const archive = normalizeArchiveConfig(node.data.archive || modelDefaultArchiveConfig())
+  const wait = normalizeWaitConfig(node.data.wait || modelDefaultWaitConfig())
+  const notify = normalizeNotifyConfig(node.data.notify || modelDefaultNotifyConfig())
   function updateLoop(patch) {
     onLoopChange(normalizeLoopConfig({...loop, ...patch}))
   }
@@ -229,6 +294,21 @@ function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onN
   }
   function updateHttp(patch) {
     onHttpChange(normalizeHttpRequestConfig({...httpRequest, ...patch}))
+  }
+  function updateScript(patch) {
+    onScriptChange(normalizeScriptConfig({...script, ...patch}))
+  }
+  function updateChecksum(patch) {
+    onChecksumChange(normalizeChecksumConfig({...checksum, ...patch}))
+  }
+  function updateArchive(patch) {
+    onArchiveChange(normalizeArchiveConfig({...archive, ...patch}))
+  }
+  function updateWait(patch) {
+    onWaitChange(normalizeWaitConfig({...wait, ...patch}))
+  }
+  function updateNotify(patch) {
+    onNotifyChange(normalizeNotifyConfig({...notify, ...patch}))
   }
   function changeLoopTool(toolID) {
     const tool = (tools || []).find(item => item.id === toolID)
@@ -292,6 +372,22 @@ function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onN
         </>
       ) : isHTTP ? (
         <HttpRequestEditor http={httpRequest} sources={sources} onChange={updateHttp} />
+      ) : isScript ? (
+        <>
+          <HostTargetEditor node={node} hosts={hosts} onChange={onHostChange} />
+          <ScriptEditor script={script} sources={sources} onChange={updateScript} />
+        </>
+      ) : isChecksum ? (
+        <>
+          <HostTargetEditor node={node} hosts={hosts} onChange={onHostChange} />
+          <ChecksumEditor checksum={checksum} sources={sources} onChange={updateChecksum} />
+        </>
+      ) : isArchive ? (
+        <ArchiveEditor archive={archive} sources={sources} onChange={updateArchive} />
+      ) : isWait ? (
+        <WaitEditor wait={wait} onChange={updateWait} />
+      ) : isNotify ? (
+        <NotifyEditor notify={notify} onChange={updateNotify} />
       ) : (
         <div className="empty small">{controlNodeHelp(node.data.controlType)}。该节点不需要配置工具或参数，运行时自身记录为成功。</div>
       )}
@@ -378,6 +474,267 @@ function HttpRequestEditor({http, sources = [], onChange}) {
         <input value={http.timeout} placeholder="可留空，默认 30s，例如 10s、2m" onChange={event => onChange({timeout: event.target.value})} />
       </label>
       <div className="empty small">响应体写入节点 stdout，可在下游用 {"{{ .steps.节点ID.stdout }}"} 引用；状态码与耗时可用 {"{{ .steps.节点ID.http.status }}"}、{"{{ .steps.节点ID.http.duration_ms }}"} 引用。</div>
+    </>
+  )
+}
+
+function ScriptEditor({script, sources = [], onChange}) {
+  const env = script.env || []
+  const downstreamHint = (sources || []).find(source => source.value)?.value || '{{ .steps.节点ID.stdout }}'
+  function updateEnvRow(index, patch) {
+    onChange({env: env.map((item, current) => current === index ? {...item, ...patch} : item)})
+  }
+  function addEnvRow() {
+    onChange({env: [...env, {name: '', value: ''}]})
+  }
+  function removeEnvRow(index) {
+    onChange({env: env.filter((_, current) => current !== index)})
+  }
+  return (
+    <>
+      <label>
+        <span>脚本内容</span>
+        <textarea className="smallTextarea codeTextarea" value={script.script} placeholder={"set -eu\necho \"deploy {{ .env }}\""} onChange={event => onChange({script: event.target.value})} />
+      </label>
+      <div className="empty small">脚本在所选执行目标上通过 bash 运行，支持模板变量，例如 {downstreamHint}；输出写入节点 stdout，可直接被下游引用。</div>
+      <label>
+        <span>工作目录</span>
+        <input value={script.workdir} placeholder="可留空，默认执行目录；支持 {{ .path }}" onChange={event => onChange({workdir: event.target.value})} />
+      </label>
+      <label>
+        <span>超时</span>
+        <input value={script.timeout} placeholder="可留空，默认 30m，例如 30s、2m" onChange={event => onChange({timeout: event.target.value})} />
+      </label>
+      <label className="checkboxLabel">
+        <input type="checkbox" checked={script.fail_on_exit !== false} onChange={event => onChange({fail_on_exit: event.target.checked})} />
+        <span>非 0 退出码判定节点失败</span>
+      </label>
+      <div className="httpSectionHead">
+        <span>环境变量</span>
+        <button type="button" className="secondary small" onClick={addEnvRow}>添加变量</button>
+      </div>
+      {env.length === 0 && <div className="empty small">没有额外环境变量。</div>}
+      {env.map((item, index) => (
+        <div className="httpHeaderRow" key={`env-${index}`}>
+          <input value={item.name} placeholder="ENV_NAME" onChange={event => updateEnvRow(index, {name: event.target.value})} />
+          <input value={item.value} placeholder="{{ .env }}" onChange={event => updateEnvRow(index, {value: event.target.value})} />
+          <button type="button" className="secondary danger small" onClick={() => removeEnvRow(index)}>删除</button>
+        </div>
+      ))}
+    </>
+  )
+}
+
+function ChecksumEditor({checksum, sources = [], onChange}) {
+  return (
+    <>
+      <label>
+        <span>文件路径</span>
+        <select value={(sources || []).some(source => source.value === checksum.path) ? checksum.path : ''} onChange={event => onChange({path: event.target.value})}>
+          <option value="">手动输入文件路径</option>
+          {(sources || []).map(source => <option key={source.value} value={source.value}>{source.label}</option>)}
+        </select>
+        <input value={checksum.path} placeholder="/tmp/release.tar.gz 或 {{ .package_path }}" onChange={event => onChange({path: event.target.value})} />
+      </label>
+      <label>
+        <span>算法</span>
+        <select value={checksum.algorithm} onChange={event => onChange({algorithm: event.target.value, expected: ''})}>
+          {checksumAlgorithms.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+        </select>
+      </label>
+      <label>
+        <span>期望摘要</span>
+        <input value={checksum.expected} placeholder={checksum.algorithm === 'md5' ? '可留空，32 位十六进制' : '可留空，64 位十六进制'} onChange={event => onChange({expected: event.target.value})} />
+      </label>
+      <div className="empty small">留空只记录摘要；填写后摘要不一致会判定节点失败。结果写入 checksum.json，可用 {"{{ .steps.节点ID.stdout }}"} 引用实际摘要。</div>
+    </>
+  )
+}
+
+function ArchiveEditor({archive, sources = [], onChange}) {
+  const detected = archiveFormatFromPath(archive.path)
+  return (
+    <>
+      <label>
+        <span>压缩包路径</span>
+        <select value={(sources || []).some(source => source.value === archive.path) ? archive.path : ''} onChange={event => onChange({path: event.target.value})}>
+          <option value="">手动输入压缩包路径</option>
+          {(sources || []).map(source => <option key={source.value} value={source.value}>{source.label}</option>)}
+        </select>
+        <input value={archive.path} placeholder="/tmp/release.tar.gz 或 {{ .package_path }}" onChange={event => onChange({path: event.target.value})} />
+      </label>
+      <label>
+        <span>目标目录</span>
+        <input value={archive.target_dir} placeholder="/opt/app/release 或 {{ .deploy_dir }}" onChange={event => onChange({target_dir: event.target.value})} />
+      </label>
+      <label>
+        <span>压缩格式</span>
+        <select value={archive.format} onChange={event => onChange({format: event.target.value})}>
+          {archiveFormats.map(item => <option key={item.value || 'auto'} value={item.value}>{item.value ? item.label : detected ? `自动识别（${detected}）` : item.label}</option>)}
+        </select>
+      </label>
+      <label>
+        <span>去掉顶层目录层数</span>
+        <input type="number" min="0" max="6" value={archive.strip_components} onChange={event => onChange({strip_components: event.target.value})} />
+      </label>
+      <label className="checkboxLabel">
+        <input type="checkbox" checked={archive.overwrite} onChange={event => onChange({overwrite: event.target.checked})} />
+        <span>覆盖已存在的同名文件</span>
+      </label>
+      <div className="empty small">解压在本机执行；压缩包中包含绝对路径或 .. 的条目会被拒绝。解压清单写入 archive.json 与节点 stdout。</div>
+    </>
+  )
+}
+
+function WaitEditor({wait, onChange}) {
+  const polling = wait.mode === 'poll'
+  return (
+    <>
+      <label>
+        <span>等待方式</span>
+        <select value={wait.mode} onChange={event => onChange({mode: event.target.value})}>
+          {waitModes.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+        </select>
+      </label>
+      {polling ? (
+        <>
+          <label>
+            <span>轮询 URL</span>
+            <input value={wait.poll_url} placeholder="https://api.example.com/health 或留空改用文件" onChange={event => onChange({poll_url: event.target.value})} />
+          </label>
+          <label>
+            <span>轮询文件</span>
+            <input value={wait.poll_file} placeholder="/tmp/deploy.done 或 {{ .steps.notify.stdout }}" onChange={event => onChange({poll_file: event.target.value})} />
+          </label>
+          {wait.poll_url && (
+            <label>
+              <span>期望状态码</span>
+              <input value={formatHTTPStatusList(wait.expect_status)} placeholder="留空表示 2xx" onChange={event => onChange({expect_status: normalizeHTTPStatusList(event.target.value)})} />
+            </label>
+          )}
+          <label>
+            <span>轮询间隔</span>
+            <input value={wait.interval} placeholder="可留空，默认 5s" onChange={event => onChange({interval: event.target.value})} />
+          </label>
+          <label>
+            <span>最大尝试次数</span>
+            <input type="number" min="1" value={wait.max_attempts || ''} placeholder="可留空" onChange={event => onChange({max_attempts: event.target.value})} />
+          </label>
+          <label>
+            <span>最大等待时长</span>
+            <input value={wait.max_wait} placeholder="可留空，默认 5m" onChange={event => onChange({max_wait: event.target.value})} />
+          </label>
+          <div className="empty small">URL 与文件只能填写一个；尝试次数与等待时长同时生效，哪个先到就结束。运行取消会立即中止等待。</div>
+        </>
+      ) : (
+        <>
+          <label>
+            <span>等待秒数</span>
+            <input type="number" min="1" max="3600" step="0.5" value={wait.seconds || ''} onChange={event => onChange({seconds: event.target.value})} />
+          </label>
+          <div className="empty small">固定等待期间可以随时取消运行；最长 3600 秒。</div>
+        </>
+      )}
+    </>
+  )
+}
+
+function NotifyEditor({notify, onChange}) {
+  const headers = notify.headers || []
+  const email = notify.channel === 'email'
+  const templateHint = '支持运行期模板，例如 {{ .steps.节点ID.stdout }}'
+  function updateHeader(index, patch) {
+    onChange({headers: headers.map((item, current) => current === index ? {...item, ...patch} : item)})
+  }
+  return (
+    <>
+      <label>
+        <span>通知通道</span>
+        <select value={notify.channel} onChange={event => onChange({channel: event.target.value})}>
+          {notifyChannels.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+        </select>
+      </label>
+      <label>
+        <span>通知标题</span>
+        <input value={notify.title} placeholder="可留空，例如 部署完成 {{ .env }}" onChange={event => onChange({title: event.target.value})} />
+      </label>
+      <label>
+        <span>通知正文</span>
+        <textarea className="smallTextarea" value={notify.message} placeholder={email ? '邮件正文，可写多行' : '消息内容，建议引用上游输出摘要'} onChange={event => onChange({message: event.target.value})} />
+      </label>
+      {email ? (
+        <>
+          <div className="httpRequestLine">
+            <label>
+              <span>SMTP 服务器</span>
+              <input value={notify.smtp_host} placeholder="smtp.example.com" onChange={event => onChange({smtp_host: event.target.value})} />
+            </label>
+            <label>
+              <span>端口</span>
+              <input type="number" min="1" max="65535" value={notify.smtp_port || ''} placeholder={String(notifyDefaultPort(notify.smtp_tls))} onChange={event => onChange({smtp_port: event.target.value})} />
+            </label>
+          </div>
+          <label>
+            <span>加密方式</span>
+            <select value={notify.smtp_tls} onChange={event => {
+              const smtp_tls = event.target.value
+              onChange({smtp_tls, smtp_port: notify.smtp_port && notify.smtp_port === notifyDefaultPort(notify.smtp_tls) ? '' : notify.smtp_port})
+            }}>
+              {notifyTLSModes.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>SMTP 用户名</span>
+            <input value={notify.smtp_user} placeholder="ops@example.com，可留空表示匿名中继" onChange={event => onChange({smtp_user: event.target.value})} />
+          </label>
+          <label>
+            <span>SMTP 密码 / 授权码</span>
+            <input type="password" value={notify.smtp_pass} placeholder="会以明文写入工作流 YAML，注意共享范围" onChange={event => onChange({smtp_pass: event.target.value})} />
+          </label>
+          <label>
+            <span>发件人</span>
+            <input value={notify.from} placeholder="留空时使用 SMTP 用户名" onChange={event => onChange({from: event.target.value})} />
+          </label>
+          <label>
+            <span>收件人</span>
+            <input value={notify.to} placeholder="多人用逗号分隔：oncall@example.com, dev@example.com" onChange={event => onChange({to: event.target.value})} />
+          </label>
+          <label>
+            <span>邮件主题</span>
+            <input value={notify.subject} placeholder="留空时使用通知标题" onChange={event => onChange({subject: event.target.value})} />
+          </label>
+          <div className="empty small">收件人、主题和正文{templateHint}；SMTP 凭据按字面量保存，不会渲染模板。当前已识别 {splitMailRecipients(notify.to).length} 个收件人。</div>
+        </>
+      ) : (
+        <>
+          <label>
+            <span>{notify.channel === 'wecom' ? '企业微信机器人 Webhook' : 'Webhook 地址'}</span>
+            <input value={notify.webhook} placeholder={notify.channel === 'wecom' ? 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...' : 'https://hooks.example.com/ops'} onChange={event => onChange({webhook: event.target.value})} />
+          </label>
+          <div className="httpSectionHead">
+            <span>请求 Header</span>
+            <button type="button" className="secondary small" onClick={() => onChange({headers: [...headers, {name: '', value: ''}]})}>添加 Header</button>
+          </div>
+          {headers.length === 0 && <div className="empty small">没有自定义 Header；默认发送 JSON。</div>}
+          {headers.map((item, index) => (
+            <div className="httpHeaderRow" key={`notify-header-${index}`}>
+              <input value={item.name} placeholder="Authorization" onChange={event => updateHeader(index, {name: event.target.value})} />
+              <input value={item.value} placeholder="Bearer {{ .token }}" onChange={event => updateHeader(index, {value: event.target.value})} />
+              <button type="button" className="secondary danger small" onClick={() => onChange({headers: headers.filter((item, current) => current !== index)})}>删除</button>
+            </div>
+          ))}
+          <div className="empty small">
+            {notify.channel === 'wecom'
+              ? '企业微信通道按 markdown 消息发送，返回 errcode 非 0 时节点失败。'
+              : <>POST JSON：{"title、message、text（标题+正文）与 timestamp"}；Header 值{templateHint}。</>}
+          </div>
+        </>
+      )}
+      <label>
+        <span>发送超时</span>
+        <input value={notify.timeout} placeholder="可留空，默认 10s" onChange={event => onChange({timeout: event.target.value})} />
+      </label>
+      <div className="empty small">通知失败会让该节点失败，可在运行详情中看到错误；需要时把节点放在流程末尾，避免阻断后续变更。</div>
     </>
   )
 }

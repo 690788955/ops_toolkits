@@ -58,6 +58,9 @@ func (r *Registry) ValidateWorkflow(wf *config.WorkflowConfig) error {
 	if err := validateWorkflowConfigFiles(wf); err != nil {
 		return err
 	}
+	if err := validateWorkflowStages(wf, nodes); err != nil {
+		return err
+	}
 	if err := validateWorkflowEdges(wf, nodes); err != nil {
 		return err
 	}
@@ -242,6 +245,41 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		if _, err := config.ValidateHTTPConfig(node.ID, node.HTTP); err != nil {
 			return err
 		}
+	case config.WorkflowNodeTypeShell:
+		if node.Tool != "" || hasLoopConfig(node.Loop) || hasUploadConfig(node.Upload) || hasExtractConfig(node.Extract) {
+			return fmt.Errorf("Shell 节点 %s 不能同时配置 tool、loop、upload 或 extract_config", node.ID)
+		}
+		if _, err := config.ValidateScriptConfig(node.ID, node.Script); err != nil {
+			return err
+		}
+	case config.WorkflowNodeTypeChecksum:
+		if node.Tool != "" || hasLoopConfig(node.Loop) || hasUploadConfig(node.Upload) || hasExtractConfig(node.Extract) {
+			return fmt.Errorf("文件校验节点 %s 不能同时配置 tool、loop、upload 或 extract_config", node.ID)
+		}
+		if _, err := config.ValidateChecksumConfig(node.ID, node.Checksum); err != nil {
+			return err
+		}
+	case config.WorkflowNodeTypeArchive:
+		if node.Tool != "" || hasLoopConfig(node.Loop) || hasUploadConfig(node.Upload) || hasExtractConfig(node.Extract) {
+			return fmt.Errorf("解压节点 %s 不能同时配置 tool、loop、upload 或 extract_config", node.ID)
+		}
+		if _, err := config.ValidateArchiveConfig(node.ID, node.Archive); err != nil {
+			return err
+		}
+	case config.WorkflowNodeTypeWait:
+		if node.Tool != "" || hasLoopConfig(node.Loop) || hasUploadConfig(node.Upload) || hasExtractConfig(node.Extract) {
+			return fmt.Errorf("等待节点 %s 不能同时配置 tool、loop、upload 或 extract_config", node.ID)
+		}
+		if _, err := config.ValidateWaitConfig(node.ID, node.Wait); err != nil {
+			return err
+		}
+	case config.WorkflowNodeTypeNotify:
+		if node.Tool != "" || hasLoopConfig(node.Loop) || hasUploadConfig(node.Upload) || hasExtractConfig(node.Extract) {
+			return fmt.Errorf("通知节点 %s 不能同时配置 tool、loop、upload 或 extract_config", node.ID)
+		}
+		if _, err := config.ValidateNotifyConfig(node.ID, node.Notify); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("节点 %s 使用未知类型: %s", node.ID, nodeType)
 	}
@@ -328,6 +366,144 @@ func validateWorkflowRelativePath(value string) error {
 	return nil
 }
 
+func validateWorkflowStages(wf *config.WorkflowConfig, nodes map[string]config.WorkflowNode) error {
+	hasNodeStage := false
+	for _, node := range wf.Nodes {
+		if strings.TrimSpace(node.StageID) != "" {
+			hasNodeStage = true
+			break
+		}
+	}
+	if len(wf.Stages) == 0 {
+		if hasNodeStage {
+			return fmt.Errorf("工作流包含 stage_id 但未定义 stages")
+		}
+		return nil
+	}
+	stageOrder := map[string]int{}
+	for index, stage := range wf.Stages {
+		id := strings.TrimSpace(stage.ID)
+		if id == "" {
+			return fmt.Errorf("阶段 ID 必填")
+		}
+		if _, ok := stageOrder[id]; ok {
+			return fmt.Errorf("阶段 ID 重复: %s", id)
+		}
+		stageOrder[id] = index
+		if stage.ExecutionMode != "" && stage.ExecutionMode != config.WorkflowStageExecutionSerial && stage.ExecutionMode != config.WorkflowStageExecutionParallel {
+			return fmt.Errorf("阶段 %s 的 execution_mode 只支持 serial 或 parallel", id)
+		}
+		if stage.MaxConcurrency < 0 {
+			return fmt.Errorf("阶段 %s 的 max_concurrency 不能为负数", id)
+		}
+	}
+	modeByStage := map[string]string{}
+	for _, stage := range wf.Stages {
+		mode := stage.ExecutionMode
+		if mode == "" {
+			mode = config.WorkflowStageExecutionSerial
+		}
+		modeByStage[strings.TrimSpace(stage.ID)] = mode
+	}
+	orderSeen := map[string]map[int]string{}
+	for _, node := range wf.Nodes {
+		stageID := strings.TrimSpace(node.StageID)
+		if stageID == "" {
+			return fmt.Errorf("阶段工作流的节点 %s 缺少 stage_id", node.ID)
+		}
+		if _, ok := stageOrder[stageID]; !ok {
+			return fmt.Errorf("节点 %s 引用了不存在的阶段 %s", node.ID, stageID)
+		}
+		if modeByStage[stageID] == config.WorkflowStageExecutionParallel {
+			// 并行阶段不建立隐式串行链，order 只用于画布展示，不参与调度。
+			continue
+		}
+		if node.Order <= 0 {
+			return fmt.Errorf("节点 %s 的 order 必须大于 0", node.ID)
+		}
+		if orderSeen[stageID] == nil {
+			orderSeen[stageID] = map[int]string{}
+		}
+		if existing, ok := orderSeen[stageID][node.Order]; ok {
+			return fmt.Errorf("阶段 %s 内节点 %s 与 %s 的 order 重复: %d", stageID, existing, node.ID, node.Order)
+		}
+		orderSeen[stageID][node.Order] = node.ID
+	}
+	for _, edge := range wf.Edges {
+		from, fromOK := nodes[edge.From]
+		to, toOK := nodes[edge.To]
+		if !fromOK || !toOK {
+			continue
+		}
+		fromStage := stageOrder[strings.TrimSpace(from.StageID)]
+		toStage := stageOrder[strings.TrimSpace(to.StageID)]
+		if fromStage > toStage {
+			return fmt.Errorf("依赖 %s -> %s 与阶段顺序冲突", edge.From, edge.To)
+		}
+		fromStageID := strings.TrimSpace(from.StageID)
+		if fromStage == toStage && modeByStage[fromStageID] != config.WorkflowStageExecutionParallel && from.Order >= to.Order {
+			return fmt.Errorf("依赖 %s -> %s 与阶段 %s 的节点顺序冲突", edge.From, edge.To, from.StageID)
+		}
+	}
+	return validateParallelStageAcyclic(wf, modeByStage)
+}
+
+// validateParallelStageAcyclic 只检查并行阶段内部的显式依赖：串行阶段靠 order 保证无环，
+// 并行阶段没有隐式顺序，成环会让调度器永远等不到就绪节点。
+func validateParallelStageAcyclic(wf *config.WorkflowConfig, modeByStage map[string]string) error {
+	stageIDs := map[string]string{}
+	for _, node := range wf.Nodes {
+		stageIDs[node.ID] = strings.TrimSpace(node.StageID)
+	}
+	edges := make([]config.WorkflowEdge, 0, len(wf.Edges))
+	for _, edge := range wf.Edges {
+		stageID, ok := stageIDs[edge.From]
+		if !ok || modeByStage[stageID] != config.WorkflowStageExecutionParallel || stageIDs[edge.To] != stageID {
+			continue
+		}
+		edges = append(edges, edge)
+	}
+	if len(edges) == 0 {
+		return nil
+	}
+	return orderDependencyEdges(edges)
+}
+
+// orderDependencyEdges 只统计阶段内依赖入度；指向其他阶段的边不参与本阶段的环检测。
+func orderDependencyEdges(edges []config.WorkflowEdge) error {
+	children := map[string][]string{}
+	incoming := map[string]int{}
+	inStage := map[string]bool{}
+	for _, edge := range edges {
+		children[edge.From] = append(children[edge.From], edge.To)
+		incoming[edge.To]++
+		inStage[edge.From] = true
+		inStage[edge.To] = true
+	}
+	ready := []string{}
+	for id := range inStage {
+		if incoming[id] == 0 {
+			ready = append(ready, id)
+		}
+	}
+	visited := 0
+	for len(ready) > 0 {
+		id := ready[0]
+		ready = ready[1:]
+		visited++
+		for _, child := range children[id] {
+			incoming[child]--
+			if incoming[child] == 0 {
+				ready = append(ready, child)
+			}
+		}
+	}
+	if visited != len(inStage) {
+		return fmt.Errorf("并行阶段内的显式依赖存在环")
+	}
+	return nil
+}
+
 func validateWorkflowEdges(wf *config.WorkflowConfig, nodes map[string]config.WorkflowNode) error {
 	for _, edge := range wf.Edges {
 		from, ok := nodes[edge.From]
@@ -379,7 +555,42 @@ func effectiveNodeType(node config.WorkflowNode) string {
 	if hasHTTPConfig(node.HTTP) {
 		return config.WorkflowNodeTypeHTTP
 	}
+	if hasScriptConfig(node.Script) {
+		return config.WorkflowNodeTypeShell
+	}
+	if hasChecksumConfig(node.Checksum) {
+		return config.WorkflowNodeTypeChecksum
+	}
+	if hasArchiveConfig(node.Archive) {
+		return config.WorkflowNodeTypeArchive
+	}
+	if hasWaitConfig(node.Wait) {
+		return config.WorkflowNodeTypeWait
+	}
+	if hasNotifyConfig(node.Notify) {
+		return config.WorkflowNodeTypeNotify
+	}
 	return ""
+}
+
+func hasScriptConfig(item config.WorkflowScript) bool {
+	return strings.TrimSpace(item.Script) != ""
+}
+
+func hasChecksumConfig(item config.WorkflowChecksum) bool {
+	return strings.TrimSpace(item.Path) != ""
+}
+
+func hasArchiveConfig(item config.WorkflowArchive) bool {
+	return strings.TrimSpace(item.Path) != "" || strings.TrimSpace(item.TargetDir) != ""
+}
+
+func hasWaitConfig(item config.WorkflowWait) bool {
+	return item.Seconds > 0 || strings.TrimSpace(item.PollURL) != "" || strings.TrimSpace(item.PollFile) != ""
+}
+
+func hasNotifyConfig(item config.WorkflowNotify) bool {
+	return strings.TrimSpace(item.Channel) != "" || strings.TrimSpace(item.URL) != "" || strings.TrimSpace(item.Webhook) != "" || strings.TrimSpace(item.Message) != "" || strings.TrimSpace(item.SMTPHost) != "" || len(item.To) > 0
 }
 
 func hasHTTPConfig(item config.WorkflowHTTP) bool {
@@ -481,8 +692,6 @@ func conditionCaseExists(node config.WorkflowNode, caseID string) bool {
 
 func OrderWorkflow(wf *config.WorkflowConfig) ([]config.WorkflowNode, error) {
 	nodes := map[string]config.WorkflowNode{}
-	incoming := map[string]int{}
-	children := map[string][]string{}
 	for _, node := range wf.Nodes {
 		if node.ID == "" {
 			return nil, fmt.Errorf("节点 ID 必填")
@@ -491,7 +700,6 @@ func OrderWorkflow(wf *config.WorkflowConfig) ([]config.WorkflowNode, error) {
 			return nil, fmt.Errorf("节点 ID 重复: %s", node.ID)
 		}
 		nodes[node.ID] = node
-		incoming[node.ID] = 0
 	}
 	for _, edge := range wf.Edges {
 		if edge.From == "" || edge.To == "" {
@@ -503,6 +711,39 @@ func OrderWorkflow(wf *config.WorkflowConfig) ([]config.WorkflowNode, error) {
 		if _, ok := nodes[edge.To]; !ok {
 			return nil, fmt.Errorf("工作流依赖引用了不存在的节点 %s", edge.To)
 		}
+	}
+	if err := validateWorkflowStages(wf, nodes); err != nil {
+		return nil, err
+	}
+	if len(wf.Stages) == 0 {
+		return orderLegacyWorkflow(wf, nodes)
+	}
+	stageOrder := map[string]int{}
+	for index, stage := range wf.Stages {
+		stageOrder[strings.TrimSpace(stage.ID)] = index
+	}
+	// 串行阶段的合法依赖只能指向后续节点，校验通过后无需再次拓扑排序；
+	// 并行阶段没有隐式顺序，这里仍按 order 输出稳定顺序，调度时再按依赖与并发度派发。
+	ordered := append([]config.WorkflowNode(nil), wf.Nodes...)
+	sort.Slice(ordered, func(i, j int) bool {
+		left, right := ordered[i], ordered[j]
+		leftStage := stageOrder[strings.TrimSpace(left.StageID)]
+		rightStage := stageOrder[strings.TrimSpace(right.StageID)]
+		if leftStage != rightStage {
+			return leftStage < rightStage
+		}
+		return left.Order < right.Order
+	})
+	return ordered, nil
+}
+
+func orderLegacyWorkflow(wf *config.WorkflowConfig, nodes map[string]config.WorkflowNode) ([]config.WorkflowNode, error) {
+	incoming := map[string]int{}
+	children := map[string][]string{}
+	for id := range nodes {
+		incoming[id] = 0
+	}
+	for _, edge := range wf.Edges {
 		children[edge.From] = append(children[edge.From], edge.To)
 		incoming[edge.To]++
 	}

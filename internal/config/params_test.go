@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,47 @@ func TestNestedValuesDeepMergeSetPathAndRedaction(t *testing.T) {
 	redacted := RedactSensitive(merged, []string{"es.auth.password"})
 	if redacted["es"].(Values)["auth"].(Values)["password"] != "******" {
 		t.Fatalf("敏感字段未脱敏: %#v", redacted)
+	}
+}
+
+func TestRedactSensitiveNestedArrays(t *testing.T) {
+	input := Values{
+		"accounts": []interface{}{
+			Values{"name": "demo", "password": "account-credential", "access_code": "explicit-credential"},
+			[]interface{}{Values{"api_token": "nested-credential", "enabled": true}},
+			[]interface{}{"public", "secret:env:CREDENTIAL", nil},
+		},
+		"ports": []interface{}{8080, 9090},
+	}
+	want := Values{
+		"accounts": []interface{}{
+			Values{"name": "demo", "password": "******", "access_code": "******"},
+			[]interface{}{Values{"api_token": "******", "enabled": true}},
+			[]interface{}{"public", "******", nil},
+		},
+		"ports": []interface{}{8080, 9090},
+	}
+	before, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := json.Marshal(RedactSensitive(input, []string{"accounts.access_code"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, expected) {
+		t.Fatalf("数组脱敏结果 = %s，期望 %s", got, expected)
+	}
+	after, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("数组脱敏修改了原配置")
 	}
 }
 

@@ -324,10 +324,23 @@ func NormalizeWorkflow(cfg *WorkflowConfig) {
 			cfg.ConfigFiles[i].ID = cfg.ConfigFiles[i].Path
 		}
 	}
+	for i := range cfg.Stages {
+		stage := &cfg.Stages[i]
+		stage.ID = strings.TrimSpace(stage.ID)
+		stage.Name = strings.TrimSpace(stage.Name)
+		if stage.Name == "" {
+			stage.Name = stage.ID
+		}
+		stage.ExecutionMode = strings.ToLower(strings.TrimSpace(stage.ExecutionMode))
+		if stage.ExecutionMode == "" {
+			stage.ExecutionMode = WorkflowStageExecutionSerial
+		}
+	}
 	if len(cfg.Edges) == 0 {
-		cfg.Edges = edgesFromDependsOn(cfg.Nodes)
+		cfg.Edges = edgesFromDependsOn(cfg.Nodes, len(cfg.Stages) == 0)
 	}
 	for i := range cfg.Nodes {
+		cfg.Nodes[i].StageID = strings.TrimSpace(cfg.Nodes[i].StageID)
 		if cfg.Nodes[i].Type == "" {
 			if cfg.Nodes[i].Tool != "" {
 				cfg.Nodes[i].Type = WorkflowNodeTypeTool
@@ -341,6 +354,14 @@ func NormalizeWorkflow(cfg *WorkflowConfig) {
 				cfg.Nodes[i].Type = WorkflowNodeTypeExtractConfig
 			} else if strings.TrimSpace(cfg.Nodes[i].HTTP.URL) != "" {
 				cfg.Nodes[i].Type = WorkflowNodeTypeHTTP
+			} else if strings.TrimSpace(cfg.Nodes[i].Script.Script) != "" {
+				cfg.Nodes[i].Type = WorkflowNodeTypeShell
+			} else if strings.TrimSpace(cfg.Nodes[i].Checksum.Path) != "" {
+				cfg.Nodes[i].Type = WorkflowNodeTypeChecksum
+			} else if strings.TrimSpace(cfg.Nodes[i].Archive.Path) != "" {
+				cfg.Nodes[i].Type = WorkflowNodeTypeArchive
+			} else if cfg.Nodes[i].Wait.Seconds > 0 || strings.TrimSpace(cfg.Nodes[i].Wait.PollURL) != "" || strings.TrimSpace(cfg.Nodes[i].Wait.PollFile) != "" {
+				cfg.Nodes[i].Type = WorkflowNodeTypeWait
 			}
 		}
 		if cfg.Nodes[i].Type == WorkflowNodeTypeHTTP {
@@ -355,6 +376,77 @@ func NormalizeWorkflow(cfg *WorkflowConfig) {
 			cfg.Nodes[i].OnFailure = "stop"
 		}
 	}
+	normalizeWorkflowRecovery(cfg)
+}
+
+func normalizeWorkflowRecovery(cfg *WorkflowConfig) {
+	if cfg == nil || cfg.Recovery == nil {
+		return
+	}
+	recovery := cfg.Recovery
+	recovery.DiffNodeID = strings.TrimSpace(recovery.DiffNodeID)
+	recovery.ChangeNodeIDs = normalizeStringList(recovery.ChangeNodeIDs)
+	recovery.ServiceNodeIDs = normalizeStringList(recovery.ServiceNodeIDs)
+	recovery.HealthNodeIDs = normalizeStringList(recovery.HealthNodeIDs)
+	if recovery.Notification != nil {
+		notification := recovery.Notification
+		notification.URL = strings.TrimSpace(notification.URL)
+		notification.Timeout = strings.TrimSpace(notification.Timeout)
+		notification.Events = normalizeNotificationEvents(notification.Events)
+		if len(notification.Headers) == 0 {
+			notification.Headers = nil
+		}
+		if notification.URL == "" && len(notification.Events) == 0 && len(notification.Headers) == 0 && notification.Timeout == "" {
+			recovery.Notification = nil
+		}
+	}
+	if !recovery.PendingOnFailure && !recovery.SkipChangeOnNoDiff && recovery.DiffNodeID == "" &&
+		len(recovery.ChangeNodeIDs) == 0 && len(recovery.ServiceNodeIDs) == 0 && len(recovery.HealthNodeIDs) == 0 &&
+		recovery.Notification == nil {
+		cfg.Recovery = nil
+	}
+}
+
+func normalizeNotificationEvents(events []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(events))
+	for _, raw := range events {
+		event := strings.ToLower(strings.TrimSpace(raw))
+		switch event {
+		case WorkflowNotifySucceeded, WorkflowNotifyFailed, WorkflowNotifyPending, WorkflowNotifyRolledBack:
+		default:
+			continue
+		}
+		if seen[event] {
+			continue
+		}
+		seen[event] = true
+		out = append(out, event)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeStringList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func normalizeSharedWith(ids []string) []string {
@@ -378,14 +470,16 @@ func normalizeSharedWith(ids []string) []string {
 	return out
 }
 
-func edgesFromDependsOn(nodes []WorkflowNode) []WorkflowEdge {
+// edgesFromDependsOn 兼容旧工作流的 depends_on。没有显式依赖时，只有非阶段工作流
+// 才补一条串行链；阶段工作流的顺序由 stages + order 表达，不生成边。
+func edgesFromDependsOn(nodes []WorkflowNode, sequentialFallback bool) []WorkflowEdge {
 	edges := []WorkflowEdge{}
 	for _, node := range nodes {
 		for _, dep := range node.DependsOn {
 			edges = append(edges, WorkflowEdge{From: dep, To: node.ID})
 		}
 	}
-	if len(edges) > 0 || len(nodes) < 2 {
+	if len(edges) > 0 || len(nodes) < 2 || !sequentialFallback {
 		return edges
 	}
 	for i := 1; i < len(nodes); i++ {
