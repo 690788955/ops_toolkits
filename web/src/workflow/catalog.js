@@ -26,7 +26,7 @@ export const nodeCategories = [
   {
     id: 'flow',
     label: '流程控制',
-    hint: '分支 / 并行 / 合流 / 循环 / 等待',
+    hint: '分支 / 循环 / 等待',
     accent: '#4f46e5',
     surface: '#eef1ff',
     shape: 'decision',
@@ -87,30 +87,6 @@ export const controlNodeCatalog = [
     description: '根据上游输出或工作流参数选择后续分支',
     help: '适合根据巡检结果、返回文本、参数值做分流；分支可以落在条件节点所在的阶段或更靠后的阶段，未命中的分支会被跳过',
     aliases: ['condition', 'switch', 'case', 'if', 'branch', '条件', '分支', '判断']
-  },
-  {
-    type: 'parallel',
-    category: 'flow',
-    status: 'legacy',
-    shape: 'gateway',
-    symbol: '+',
-    title: '并行分支',
-    secondary: 'Parallel · 旧流程兼容',
-    description: '旧流程专用标记：新建请改用阶段“并行模式”',
-    help: '旧工作流仍可照常加载和执行；新流程请把阶段执行方式切换为“并行”，再用显式依赖表达分支，不再新增该节点',
-    aliases: ['parallel', 'fanout', '并发', '并行', '分支']
-  },
-  {
-    type: 'join',
-    category: 'flow',
-    status: 'legacy',
-    shape: 'gateway',
-    symbol: '∧',
-    title: '合流',
-    secondary: 'Join · 旧流程兼容',
-    description: '旧流程专用标记：阶段屏障已承担汇聚',
-    help: '旧工作流仍可照常加载和执行；新流程由阶段屏障在整段完成后自动进入下一阶段，不再新增该节点',
-    aliases: ['join', 'fanin', 'merge', '合流', '汇聚', '同步']
   },
   {
     type: 'loop',
@@ -242,17 +218,11 @@ export function controlNodeCategory(type) {
   return nodeCategory(controlNodeMeta(type)?.category)
 }
 
-// legacy 只用于打开旧工作流：可以加载、执行和转换，但不再作为新建节点的候选。
 export function isControlReady(control) {
-  return Boolean(control) && control.status !== 'planned' && control.status !== 'legacy'
-}
-
-export function isControlLegacy(control) {
-  return control?.status === 'legacy'
+  return Boolean(control) && control.status !== 'planned'
 }
 
 export function controlUnavailableReason(control) {
-  if (isControlLegacy(control)) return '仅用于打开旧工作流：新建请改用阶段“并行模式”和阶段屏障'
   if (control?.status === 'planned') return '规划中：暂不可添加'
   return ''
 }

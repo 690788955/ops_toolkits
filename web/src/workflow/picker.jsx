@@ -1,5 +1,6 @@
-import React, {useEffect, useMemo, useState} from 'react'
-import {controlNodeCatalog, controlNodeMatchesKeyword, controlUnavailableReason, groupControlsByCategory, isControlLegacy, isControlReady} from './catalog.js'
+import React, {useMemo, useState} from 'react'
+import {createPortal} from 'react-dom'
+import {controlNodeCatalog, controlNodeMatchesKeyword, controlUnavailableReason, groupControlsByCategory, isControlReady} from './catalog.js'
 import {controlShapeMarker} from './nodes.jsx'
 
 function toolPluginKey(tool) {
@@ -26,47 +27,103 @@ function groupToolsByPlugin(tools) {
   return groups
 }
 
-function ToolPluginSelect({tools, onAddTool}) {
-  const groups = useMemo(() => groupToolsByPlugin(tools), [tools])
-  const [pluginKey, setPluginKey] = useState(groups[0]?.key || '')
-  const [toolID, setToolID] = useState(groups[0]?.tools[0]?.id || '')
-  const activeGroup = groups.find(group => group.key === pluginKey) || groups[0] || null
-  const selectedTool = activeGroup?.tools.find(tool => tool.id === toolID) || activeGroup?.tools[0] || null
-
-  useEffect(() => {
-    const group = groups.find(item => item.key === pluginKey) || groups[0]
-    if (!group) {
-      if (pluginKey) setPluginKey('')
-      if (toolID) setToolID('')
-      return
-    }
-    if (group.key !== pluginKey) setPluginKey(group.key)
-    if (!group.tools.some(tool => tool.id === toolID)) {
-      setToolID(group.tools[0]?.id || '')
-    }
-  }, [groups, pluginKey, toolID])
-
-  if (groups.length === 0) return null
-
+function ToolPickerItem({tool, onAddTool}) {
+  const description = tool.description || ''
+  const title = [tool.name || tool.id, tool.id, description, ...(tool.tags || [])].filter(Boolean).join('\n')
   return (
-    <div className="toolPluginPicker">
-      <label>
-        <span>选择插件</span>
-        <select value={activeGroup?.key || ''} onChange={event => setPluginKey(event.target.value)}>
-          {groups.map(group => <option key={group.key} value={group.key}>{group.label}（{group.tools.length}）</option>)}
-        </select>
-      </label>
-      <label>
-        <span>选择工具</span>
-        <select value={selectedTool?.id || ''} onChange={event => setToolID(event.target.value)}>
-          {(activeGroup?.tools || []).map(tool => <option key={tool.id} value={tool.id}>{tool.name || tool.id}</option>)}
-        </select>
-      </label>
-      <button type="button" className="primary" disabled={!selectedTool} onClick={() => { if (selectedTool) onAddTool(selectedTool) }}>添加工具节点</button>
-      {selectedTool && (
-        <small className="toolPluginPickerHint">
-          {selectedTool.id}{selectedTool.description ? ` · ${selectedTool.description}` : ''}
-        </small>
+    <button
+      type="button"
+      className="nodePickerItem tool"
+      title={title}
+      aria-label={`添加工具节点 ${tool.name || tool.id}`}
+      onClick={() => onAddTool(tool)}
+    >
+      <span className="paletteShape tool" aria-hidden="true" />
+      <span className="nodePickerItemText">
+        <b>{tool.name || tool.id}</b>
+        <span className="toolPickerMeta">
+          <code>{tool.id}</code>
+          {description && <span>{description}</span>}
+        </span>
+      </span>
+      <span className="toolPickerAddBadge" aria-hidden="true">添加</span>
+    </button>
+  )
+}
+
+function ToolPickerList({tools, keyword, onAddTool}) {
+  const groups = useMemo(() => groupToolsByPlugin(tools), [tools])
+  // 工具通常较多，默认收起分组；搜索时强制展开，避免命中项被藏起来。
+  const [expandedGroups, setExpandedGroups] = useState({})
+  const [hoverPreview, setHoverPreview] = useState(null)
+  const isCollapsed = key => !keyword && !expandedGroups[key]
+  const toggleGroup = key => setExpandedGroups(current => ({...current, [key]: !current[key]}))
+  // 悬停只弹出只读备注卡，不展开列表；要添加工具必须先点开分组。
+  const showPreview = (group, event) => {
+    if (keyword || !isCollapsed(group.key)) return
+    const head = event.currentTarget.querySelector('.toolPickerGroupHead')
+    const rect = head?.getBoundingClientRect()
+    if (!rect) return
+    const viewportHeight = window.innerHeight || 800
+    // 分组头不在可视区域时不弹卡，避免备注卡贴到屏幕边缘。
+    if (rect.bottom < 0 || rect.top > viewportHeight) return
+    const cardWidth = 240
+    // 卡片只列工具名、不滚动，按条目数估算高度后再决定弹出位置。
+    const cardHeight = 56 + group.tools.length * 20
+    const openLeft = rect.right + cardWidth + 16 > window.innerWidth
+    setHoverPreview({
+      key: group.key,
+      label: group.label,
+      tools: group.tools,
+      left: openLeft ? Math.max(8, rect.left - cardWidth - 12) : rect.right + 12,
+      top: Math.max(8, Math.min(rect.top, viewportHeight - cardHeight - 8))
+    })
+  }
+  const clearPreview = key => setHoverPreview(current => current?.key === key ? null : current)
+  return (
+    <div className="toolPickerGroups">
+      {groups.map(group => {
+        const collapsed = isCollapsed(group.key)
+        const previewing = Boolean(hoverPreview && hoverPreview.key === group.key)
+        return (
+          <section
+            key={group.key}
+            className={`toolPickerGroup${collapsed ? ' collapsed' : ''}${previewing ? ' previewing' : ''}`}
+            onMouseEnter={event => showPreview(group, event)}
+            onMouseLeave={() => clearPreview(group.key)}
+          >
+            <button
+              type="button"
+              className="toolPickerGroupHead"
+              aria-expanded={!collapsed}
+              title={`${group.label}${collapsed ? '\n悬停查看工具，点击展开后可添加' : '\n点击收起'}`}
+              onClick={() => { clearPreview(group.key); toggleGroup(group.key) }}
+            >
+              <span>{group.label}</span>
+              <em>{group.tools.length}</em>
+              <span className="nodePickerCategoryCaret" aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
+            </button>
+            {collapsed ? null : (
+              <div className="toolPickerList">
+                {group.tools.map(tool => <ToolPickerItem key={tool.id} tool={tool} onAddTool={onAddTool} />)}
+              </div>
+            )}
+          </section>
+        )
+      })}
+      {hoverPreview && createPortal(
+        <div className="toolPickerHoverCard" style={{left: hoverPreview.left, top: hoverPreview.top}} role="tooltip">
+          <div className="toolPickerHoverCardHead">
+            <strong>{hoverPreview.label}</strong>
+            <span>{hoverPreview.tools.length}</span>
+          </div>
+          <ul>
+            {hoverPreview.tools.map(tool => (
+              <li key={tool.id} title={[tool.id, tool.description].filter(Boolean).join('\n')}>{tool.name || tool.id}</li>
+            ))}
+          </ul>
+        </div>,
+        document.body
       )}
     </div>
   )
@@ -74,7 +131,6 @@ function ToolPluginSelect({tools, onAddTool}) {
 
 function ControlPickerItem({control, onAddControl}) {
   const ready = isControlReady(control)
-  const legacy = isControlLegacy(control)
   const reason = controlUnavailableReason(control)
   const title = [
     control.title,
@@ -85,7 +141,7 @@ function ControlPickerItem({control, onAddControl}) {
   return (
     <button
       type="button"
-      className={`nodePickerItem control cat-${control.category}${ready ? '' : legacy ? ' legacy' : ' planned'}`}
+      className={`nodePickerItem control cat-${control.category}${ready ? '' : ' planned'}`}
       disabled={!ready}
       aria-disabled={!ready}
       onClick={ready ? () => onAddControl(control.type) : undefined}
@@ -94,10 +150,10 @@ function ControlPickerItem({control, onAddControl}) {
       <span className={`paletteShape ${control.shape} cat-${control.category}`} data-symbol={controlShapeMarker(control.type)} aria-hidden="true" />
       <span className="nodePickerItemText">
         <b>{control.title}</b>
-        <small>{control.secondary}{ready ? '' : ` · ${legacy ? '旧流程兼容' : '规划中'}`}</small>
+        <small>{control.secondary}{ready ? '' : ' · 规划中'}</small>
         {ready ? null : <small className="nodePickerUnavailableReason">{reason}</small>}
       </span>
-      {ready ? null : <span className={`nodePickerPlannedTag${legacy ? ' legacy' : ''}`}>{legacy ? '旧流程兼容' : '规划中'}</span>}
+      {ready ? null : <span className="nodePickerPlannedTag">规划中</span>}
     </button>
   )
 }
@@ -125,7 +181,7 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, missingT
     ? `选择后插入到 ${insertEdge.source} → ${insertEdge.target}`
     : quickAdd
       ? `选择后会自动连接到 ${connection.source}`
-      : '按分类选择：流程控制 / 数据与文件 / 内置能力，或搜索插件工具'
+      : '按分类选择编排节点，或搜索并点击插件工具直接添加'
   const matchingControls = controlNodeCatalog.filter(control => controlNodeMatchesKeyword(control, keyword))
   const controlGroups = groupControlsByCategory(matchingControls)
   // 默认全部分类展开；内置能力已有可用节点（HTTP 调用），不再默认收起。
@@ -174,13 +230,13 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, missingT
                 </div>
               )
             })}
-            {controlGroups.length === 0 && <div className="empty small">没有匹配的编排节点；可尝试搜索分支、并行、合流、上传、提取、HTTP 或分类名称。</div>}
+            {controlGroups.length === 0 && <div className="empty small">没有匹配的编排节点；可尝试搜索分支、循环、上传、提取、HTTP 或分类名称。</div>}
           </div>
         </div>
         <div className="nodePickerSection">
-          <span>插件工具 · {tools.length} / {totalTools}</span>
+          <span>插件工具 · {tools.length} / {totalTools} · 点击即添加</span>
           {tools.length > 0
-            ? <ToolPluginSelect tools={tools} onAddTool={onAddTool} />
+            ? <ToolPickerList tools={tools} keyword={keyword} onAddTool={onAddTool} />
             : <div className="empty small">没有匹配的插件工具；可换用工具名称、描述、ID 或标签继续搜索。</div>}
         </div>
         {missingTools.length > 0 && (
@@ -198,9 +254,15 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, missingT
   )
 }
 
-function CanvasDock({onZoomIn, onZoomOut, onFitView}) {
+function CanvasDock({onAddNode, onZoomIn, onZoomOut, onFitView}) {
   return (
     <div className="canvasDock nodrag nopan" onMouseDown={event => event.stopPropagation()} aria-label="画布操作">
+      {onAddNode && (
+        <button type="button" className="canvasDockAdd" onClick={onAddNode} title="添加节点（也可以双击画布空白处）" aria-label="添加节点">
+          <span aria-hidden="true">＋</span>
+          <span>添加节点</span>
+        </button>
+      )}
       <button type="button" onClick={onZoomOut} title="缩小画布" aria-label="缩小画布">−</button>
       <button type="button" onClick={onZoomIn} title="放大画布" aria-label="放大画布">+</button>
       <button type="button" onClick={onFitView} title="将全部节点适配到当前视图" aria-label="适配视图">⤢</button>

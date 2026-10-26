@@ -16,11 +16,12 @@ import {
   moveNodesToStage,
   newStageDraftErrors,
   orderedStageNodes,
-  moveWorkflowStage,
+  moveWorkflowStageTo,
   normalizeExtractConfig,
   normalizeHttpRequestConfig,
   normalizeLoopConfig,
   normalizeScriptConfig,
+  normalizeUploadTargetDir,
   normalizeStageConcurrency,
   normalizeStageNodeOrders,
   normalizeWorkflowStages,
@@ -204,6 +205,9 @@ describe("workflow model", () => {
       upload: { target_dir: "assets/release" },
     });
     expect(draft.edges).toEqual([{ from: "upload", to: "consume" }]);
+    // 绝对路径由服务端按上传白名单校验，前端只拦相对路径里的逃逸写法。
+    expect(normalizeUploadTargetDir("/opt/app/release")).toEqual({ value: "/opt/app/release", error: "" });
+    expect(normalizeUploadTargetDir("D:\\deploy\\packages")).toEqual({ value: "D:/deploy/packages", error: "" });
     expect(
       validateControlDraft(
         [
@@ -699,10 +703,15 @@ describe("阶段工作流模型", () => {
     ]);
     expect(validateStageDraft(batched, [], stages)).toEqual([]);
 
-    expect(moveWorkflowStage(stages, "change", -1).map((stage) => stage.id)).toEqual([
+    expect(moveWorkflowStageTo(stages, "change", 0).map((stage) => stage.id)).toEqual([
       "change",
       "prepare",
       "verify",
+    ]);
+    expect(moveWorkflowStageTo(stages, "prepare", 2).map((stage) => stage.id)).toEqual([
+      "change",
+      "verify",
+      "prepare",
     ]);
   });
 
@@ -783,6 +792,8 @@ describe("阶段工作流模型", () => {
     ]);
     expect(layout.stages[0].x).toBeLessThan(layout.stages[1].x);
     expect(layout.stages[1].x).toBeLessThan(layout.stages[2].x);
+    // 阶段头要能完整显示 7 个字的名称、执行模式和操作按钮。
+    expect(layout.stages.every((stage) => stage.width >= 324)).toBe(true);
     expect(layout.positions.inspect).toBeTruthy();
     expect(layout.positions.verify).toBeTruthy();
 

@@ -231,6 +231,16 @@ func normalizeRoot(cfg *RootConfig) {
 	if cfg.Server.Port == 0 && cfg.HTTP.Addr == "" {
 		cfg.Server.Port = 8080
 	}
+	// 上传白名单只保留非空项，避免空行被当成允许任意目录。
+	if len(cfg.Uploads.AllowedDirs) > 0 {
+		dirs := make([]string, 0, len(cfg.Uploads.AllowedDirs))
+		for _, dir := range cfg.Uploads.AllowedDirs {
+			if strings.TrimSpace(dir) != "" {
+				dirs = append(dirs, strings.TrimSpace(dir))
+			}
+		}
+		cfg.Uploads.AllowedDirs = dirs
+	}
 }
 
 func normalizeMarket(cfg *MarketConfig) {

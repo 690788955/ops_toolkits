@@ -7,7 +7,6 @@ import {
   countNodesByCategory,
   flowNodeCategoryID,
   groupControlsByCategory,
-  isControlLegacy,
   isControlReady,
   nodeCategories
 } from './catalog.js'
@@ -23,16 +22,13 @@ describe('节点分类目录', () => {
   it('按分类分组时保持声明顺序且不产生空分组', () => {
     const groups = groupControlsByCategory(controlNodeCatalog)
     expect(groups.map(group => group.category.id)).toEqual(['flow', 'data', 'builtin'])
-    expect(groups[0].controls.map(control => control.type)).toEqual(['condition', 'parallel', 'join', 'loop', 'wait'])
+    expect(groups[0].controls.map(control => control.type)).toEqual(['condition', 'loop', 'wait'])
     expect(groups[1].controls.map(control => control.type)).toEqual(['upload', 'extract_config', 'file_checksum', 'archive'])
     expect(groups.every(group => group.controls.length > 0)).toBe(true)
   })
 
-  it('并行/合流只作旧流程兼容，不再作为新建节点候选', () => {
-    const legacy = controlNodeCatalog.filter(control => ['parallel', 'join'].includes(control.type))
-    expect(legacy.every(control => isControlLegacy(control))).toBe(true)
-    expect(legacy.every(control => !isControlReady(control))).toBe(true)
-    expect(legacy.every(control => controlUnavailableReason(control).includes('阶段'))).toBe(true)
+  it('并行/合流不再作为新建节点候选', () => {
+    expect(controlNodeCatalog.some(control => ['parallel', 'join'].includes(control.type))).toBe(false)
     expect(controlUnavailableReason(controlNodeCatalog.find(control => control.type === 'notify'))).toBe('')
     expect(controlUnavailableReason(controlNodeCatalog.find(control => control.type === 'condition'))).toBe('')
   })

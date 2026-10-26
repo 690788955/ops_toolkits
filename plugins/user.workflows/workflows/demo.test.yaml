@@ -1,16 +1,28 @@
 id: demo.test
-name: test
+name: 测试
 description: ""
 version: 1.0.0
-category: docker
+category: global
 tags: []
 parameters: []
 config_files: []
+stages:
+  - id: prepare
+    name: 准备
+    execution_mode: serial
+  - id: change
+    name: 变更
+    execution_mode: serial
+  - id: verify
+    name: 验证
+    execution_mode: serial
 nodes:
-  - id: config_deploy_check_1
-    type: tool
-    name: 检查配置差异
-    tool: config.deploy.check
+  - id: shell_script_1
+    type: shell
+    name: shell_script_1
+    stage_id: prepare
+    order: 10
+    tool: ""
     condition:
       input: ""
       cases: []
@@ -28,17 +40,19 @@ nodes:
       target_path: ""
       label: ""
       replace: false
+    script:
+      script: echo "1111"
     depends_on: []
-    params:
-      source: app.conf
-      target_path: /tmp
+    params: {}
     optional: false
     timeout: ""
     confirm: false
     on_failure: stop
-  - id: extract_config_2
-    type: extract_config
-    name: extract_config_2
+  - id: shell_script_2
+    type: shell
+    name: shell_script_2
+    stage_id: change
+    order: 10
     tool: ""
     condition:
       input: ""
@@ -53,20 +67,50 @@ nodes:
       target_dir: ""
       config_exports: []
     extract_config:
-      file_name: app.yaml
-      target_path: app.yaml
+      file_name: ""
+      target_path: ""
       label: ""
       replace: false
+    script:
+      script: echo "1111"
     depends_on: []
     params: {}
     optional: false
     timeout: ""
     confirm: false
     on_failure: stop
-edges:
-  - from: config_deploy_check_1
-    to: extract_config_2
-    case: ""
+  - id: shell_script_3
+    type: shell
+    name: shell_script_3
+    stage_id: verify
+    order: 10
+    tool: ""
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    upload:
+      target_dir: ""
+      config_exports: []
+    extract_config:
+      file_name: ""
+      target_path: ""
+      label: ""
+      replace: false
+    script:
+      script: echo "1111"
+    depends_on: []
+    params: {}
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+edges: []
 steps: []
 confirm:
   required: false

@@ -19,6 +19,7 @@ type RootConfig struct {
 	Plugins           PluginsConfig          `yaml:"plugins" json:"plugins"`
 	Market            MarketConfig           `yaml:"market" json:"market"`
 	HostConfigFiles   HostConfigFilesConfig  `yaml:"host_config_files" json:"host_config_files"`
+	Uploads           UploadsConfig          `yaml:"uploads" json:"uploads"`
 	UI                UIConfig               `yaml:"ui" json:"ui"`
 	ConfigDefaults    map[string]interface{} `yaml:"config_defaults" json:"config_defaults"`
 	RuntimeCategories []Category             `yaml:"-" json:"-"`
@@ -28,6 +29,11 @@ type RootConfig struct {
 	Tools             []ToolEntry            `yaml:"tools" json:"-"`
 	Workflows         []WorkflowRef          `yaml:"workflows" json:"-"`
 	HTTP              HTTPConfig             `yaml:"http" json:"-"`
+}
+
+// UploadsConfig 限制上传节点可写入的绝对目录；留空时只允许 runs/uploads 下的相对子目录。
+type UploadsConfig struct {
+	AllowedDirs []string `yaml:"allowed_dirs" json:"allowed_dirs"`
 }
 
 type AppConfig struct {
@@ -718,21 +724,34 @@ func ValidateHTTPConfig(nodeID string, item WorkflowHTTP) (WorkflowHTTP, error) 
 	return out, nil
 }
 
+// NormalizeUploadTargetDir 校验上传目标目录。
+// 相对路径按 runs/uploads 下的子目录处理；绝对路径只有在 allowedDirs 白名单内才被接受。
 func NormalizeUploadTargetDir(value string) (string, error) {
+	return NormalizeUploadTargetDirWithAllowed(value, nil)
+}
+
+func NormalizeUploadTargetDirWithAllowed(value string, allowedDirs []string) (string, error) {
 	raw := strings.TrimSpace(value)
 	if raw == "" {
 		return "", nil
 	}
 	if strings.Contains(raw, "://") {
-		return "", fmt.Errorf("上传目标目录必须是 uploads 下的相对子目录")
+		return "", fmt.Errorf("上传目标目录必须是目录路径，不能是 URL")
 	}
-	if len(raw) >= 2 && raw[1] == ':' {
-		return "", fmt.Errorf("上传目标目录不能是绝对路径")
+	if isAbsoluteDirPath(raw) {
+		cleanAbs, err := filepath.Abs(filepath.Clean(filepath.FromSlash(strings.ReplaceAll(raw, "\\", "/"))))
+		if err != nil {
+			return "", fmt.Errorf("上传目标目录无效: %w", err)
+		}
+		if !dirWithinAllowed(cleanAbs, allowedDirs) {
+			if len(allowedDirs) == 0 {
+				return "", fmt.Errorf("上传目标目录不能是绝对路径；如需写入固定目录，请先在平台设置的上传白名单里配置")
+			}
+			return "", fmt.Errorf("上传目标目录不在白名单内: %s", cleanAbs)
+		}
+		return filepath.ToSlash(cleanAbs), nil
 	}
 	raw = strings.ReplaceAll(raw, "\\", "/")
-	if filepath.IsAbs(raw) || strings.HasPrefix(raw, "/") {
-		return "", fmt.Errorf("上传目标目录不能是绝对路径")
-	}
 	parts := strings.Split(raw, "/")
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
@@ -745,6 +764,35 @@ func NormalizeUploadTargetDir(value string) (string, error) {
 		return "", fmt.Errorf("上传目标目录不能逃逸 uploads 目录")
 	}
 	return clean, nil
+}
+
+func isAbsoluteDirPath(value string) bool {
+	if len(value) >= 2 && value[1] == ':' {
+		return true
+	}
+	normalized := strings.ReplaceAll(value, "\\", "/")
+	return strings.HasPrefix(normalized, "/") || filepath.IsAbs(normalized)
+}
+
+func dirWithinAllowed(target string, allowedDirs []string) bool {
+	for _, dir := range allowedDirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		abs, err := filepath.Abs(filepath.Clean(filepath.FromSlash(strings.ReplaceAll(dir, "\\", "/"))))
+		if err != nil {
+			continue
+		}
+		rel, err := filepath.Rel(abs, target)
+		if err != nil {
+			continue
+		}
+		if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c RootConfig) DisplayName() string {

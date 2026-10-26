@@ -22,6 +22,8 @@ type chunkedUploadSession struct {
 	ID           string                     `json:"id"`
 	UploadDir    string                     `json:"upload_dir"`
 	BaseDir      string                     `json:"base_dir"`
+	RunsPath     string                     `json:"runs_path"`
+	Direct       bool                       `json:"direct"`
 	Files        []chunkedUploadSessionFile `json:"files"`
 	ReceivedSize int64                      `json:"received_size"`
 	Received     map[int]int64              `json:"received"`
@@ -75,7 +77,26 @@ func savePlatformUpload(reg *registry.Registry, req *http.Request) (config.Workf
 	if reg != nil && reg.Root != nil {
 		runsPath = reg.Root.Paths.Runs
 	}
-	return savePlatformUploadFromMultipart(reg.BaseDir, runsPath, req)
+	return savePlatformUploadFromMultipart(reg.BaseDir, runsPath, uploadAllowedDirs(reg), req)
+}
+
+func uploadAllowedDirs(reg *registry.Registry) []string {
+	if reg == nil || reg.Root == nil {
+		return nil
+	}
+	return reg.Root.Uploads.AllowedDirs
+}
+
+// resolveUploadDir 决定本次上传的落盘目录：
+// 绝对路径（白名单内）直接作为目标目录；相对路径沿用 runs/uploads/<target>/upload-xxx。
+func resolveUploadDir(baseDir, runsPath, targetDir string) (string, bool, error) {
+	if targetDir == "" {
+		return "", false, nil
+	}
+	if filepath.IsAbs(filepath.FromSlash(targetDir)) || (len(targetDir) >= 2 && targetDir[1] == ':') {
+		return filepath.FromSlash(targetDir), true, nil
+	}
+	return filepath.Join(baseDir, filepath.FromSlash(platformRunsPathValue(runsPath)), "uploads", filepath.FromSlash(targetDir)), false, nil
 }
 
 func platformRunsPath(reg *registry.Registry) string {
@@ -85,7 +106,7 @@ func platformRunsPath(reg *registry.Registry) string {
 	return reg.Root.Paths.Runs
 }
 
-func savePlatformUploadFromMultipart(baseDir, runsPath string, req *http.Request) (config.WorkflowUploadResult, error) {
+func savePlatformUploadFromMultipart(baseDir, runsPath string, allowedDirs []string, req *http.Request) (config.WorkflowUploadResult, error) {
 	if err := req.ParseMultipartForm(32 << 20); err != nil {
 		return config.WorkflowUploadResult{}, fmt.Errorf("读取上传文件失败: %w", err)
 	}
@@ -93,22 +114,33 @@ func savePlatformUploadFromMultipart(baseDir, runsPath string, req *http.Request
 	if err != nil {
 		return config.WorkflowUploadResult{}, err
 	}
-	targetDir, err := config.NormalizeUploadTargetDir(req.FormValue("target_dir"))
+	targetDir, err := config.NormalizeUploadTargetDirWithAllowed(req.FormValue("target_dir"), allowedDirs)
 	if err != nil {
 		return config.WorkflowUploadResult{}, err
 	}
 	uploadID := fmt.Sprintf("upload-%d", time.Now().UnixNano())
-	if strings.TrimSpace(runsPath) == "" {
-		runsPath = "runs"
+	uploadDir, directTarget, err := resolveUploadDir(baseDir, runsPath, targetDir)
+	if err != nil {
+		return config.WorkflowUploadResult{}, err
 	}
-	uploadParts := []string{baseDir, filepath.FromSlash(runsPath), "uploads"}
-	if targetDir != "" {
-		uploadParts = append(uploadParts, filepath.FromSlash(targetDir))
+	if uploadDir == "" {
+		uploadDir = filepath.Join(baseDir, filepath.FromSlash(platformRunsPathValue(runsPath)), "uploads", uploadID)
+	} else if !directTarget {
+		// 相对子目录下仍按次生成独立目录，避免多次上传互相覆盖。
+		uploadDir = filepath.Join(uploadDir, uploadID)
 	}
-	uploadParts = append(uploadParts, uploadID)
-	uploadDir := filepath.Join(uploadParts...)
 	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
 		return config.WorkflowUploadResult{}, fmt.Errorf("创建上传目录失败: %w", err)
+	}
+	// 直接写入白名单目录时只清理本次写入的文件，绝不删除目标目录本身。
+	cleanup := func(saved []config.WorkflowUploadFile) {
+		if directTarget {
+			for _, item := range saved {
+				_ = os.Remove(item.Path)
+			}
+			return
+		}
+		_ = os.RemoveAll(uploadDir)
 	}
 	relativePaths := req.MultipartForm.Value["relative_path"]
 	uploadedFiles := make([]config.WorkflowUploadFile, 0, len(files))
@@ -116,13 +148,16 @@ func savePlatformUploadFromMultipart(baseDir, runsPath string, req *http.Request
 	for index, header := range files {
 		item, err := savePlatformUploadFile(baseDir, uploadDir, header, relativePathAt(relativePaths, index))
 		if err != nil {
-			_ = os.RemoveAll(uploadDir)
+			cleanup(uploadedFiles)
 			return config.WorkflowUploadResult{}, err
+		}
+		if directTarget && !pathWithin(baseDir, item.Path) {
+			item.RelativePath = filepath.ToSlash(item.Path)
 		}
 		uploadedFiles = append(uploadedFiles, item)
 		totalSize += item.Size
 		if totalSize > maxPlatformFileUploadBytes {
-			_ = os.RemoveAll(uploadDir)
+			cleanup(uploadedFiles)
 			return config.WorkflowUploadResult{}, fmt.Errorf("上传文件总大小超过 %s", formatUploadSizeLimit(maxPlatformFileUploadBytes))
 		}
 	}
@@ -139,11 +174,18 @@ func savePlatformUploadFromMultipart(baseDir, runsPath string, req *http.Request
 	}, nil
 }
 
+func platformRunsPathValue(runsPath string) string {
+	if strings.TrimSpace(runsPath) == "" {
+		return "runs"
+	}
+	return runsPath
+}
+
 func startChunkedPlatformUpload(reg *registry.Registry, req chunkedUploadStartRequest) (chunkedUploadSession, error) {
 	if reg == nil {
 		return chunkedUploadSession{}, fmt.Errorf("运行注册表未初始化")
 	}
-	targetDir, err := config.NormalizeUploadTargetDir(req.TargetDir)
+	targetDir, err := config.NormalizeUploadTargetDirWithAllowed(req.TargetDir, uploadAllowedDirs(reg))
 	if err != nil {
 		return chunkedUploadSession{}, err
 	}
@@ -151,12 +193,13 @@ func startChunkedPlatformUpload(reg *registry.Registry, req chunkedUploadStartRe
 		return chunkedUploadSession{}, fmt.Errorf("缺少上传文件")
 	}
 	uploadID := fmt.Sprintf("upload-%d", time.Now().UnixNano())
-	uploadParts := []string{reg.BaseDir, filepath.FromSlash(platformRunsPath(reg)), "uploads"}
-	if targetDir != "" {
-		uploadParts = append(uploadParts, filepath.FromSlash(targetDir))
+	uploadDir, directTarget, err := resolveUploadDir(reg.BaseDir, platformRunsPath(reg), targetDir)
+	if err != nil {
+		return chunkedUploadSession{}, err
 	}
-	uploadParts = append(uploadParts, uploadID)
-	uploadDir := filepath.Join(uploadParts...)
+	if uploadDir == "" {
+		uploadDir = filepath.Join(reg.BaseDir, filepath.FromSlash(platformRunsPath(reg)), "uploads", uploadID)
+	}
 	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
 		return chunkedUploadSession{}, fmt.Errorf("创建上传目录失败: %w", err)
 	}
@@ -164,6 +207,8 @@ func startChunkedPlatformUpload(reg *registry.Registry, req chunkedUploadStartRe
 		ID:        uploadID,
 		UploadDir: uploadDir,
 		BaseDir:   reg.BaseDir,
+		RunsPath:  platformRunsPath(reg),
+		Direct:    directTarget,
 		Received:  map[int]int64{},
 	}
 	var totalSize int64
@@ -276,7 +321,7 @@ func finishChunkedPlatformUpload(reg *registry.Registry, sessionID string) (conf
 			return config.WorkflowUploadResult{}, fmt.Errorf("上传文件 %s 大小不匹配", file.FileName)
 		}
 		rel, err := filepath.Rel(session.BaseDir, file.Path)
-		if err != nil {
+		if err != nil || strings.HasPrefix(filepath.ToSlash(rel), "../") {
 			rel = file.Path
 		}
 		uploadedFiles = append(uploadedFiles, config.WorkflowUploadFile{
@@ -303,8 +348,15 @@ func finishChunkedPlatformUpload(reg *registry.Registry, sessionID string) (conf
 	}, nil
 }
 
-func chunkedUploadSessionPath(uploadDir string) string {
-	return filepath.Join(uploadDir, ".upload-session.json")
+func chunkedUploadSessionDir(baseDir, runsPath string) string {
+	if strings.TrimSpace(runsPath) == "" {
+		runsPath = "runs"
+	}
+	return filepath.Join(baseDir, filepath.FromSlash(runsPath), "uploads", ".upload-sessions")
+}
+
+func chunkedUploadSessionPath(session chunkedUploadSession) string {
+	return filepath.Join(chunkedUploadSessionDir(session.BaseDir, session.RunsPath), session.ID+".json")
 }
 
 func writeChunkedUploadSession(session chunkedUploadSession) error {
@@ -312,7 +364,11 @@ func writeChunkedUploadSession(session chunkedUploadSession) error {
 	if err != nil {
 		return err
 	}
-	path := chunkedUploadSessionPath(session.UploadDir)
+	dir := chunkedUploadSessionDir(session.BaseDir, session.RunsPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	path := chunkedUploadSessionPath(session)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
@@ -327,37 +383,31 @@ func readChunkedUploadSession(reg *registry.Registry, sessionID string) (chunked
 	if !safeUploadID(sessionID) {
 		return chunkedUploadSession{}, fmt.Errorf("上传会话无效")
 	}
-	root := filepath.Join(reg.BaseDir, filepath.FromSlash(platformRunsPath(reg)), "uploads")
-	var found string
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || found != "" {
-			return err
-		}
-		if !d.IsDir() || d.Name() != sessionID {
-			return nil
-		}
-		if !pathWithin(root, path) {
-			return fmt.Errorf("上传会话路径无效")
-		}
-		found = path
-		return filepath.SkipDir
-	})
+	path := filepath.Join(chunkedUploadSessionDir(reg.BaseDir, platformRunsPath(reg)), sessionID+".json")
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return chunkedUploadSession{}, err
-	}
-	if found == "" {
-		return chunkedUploadSession{}, fmt.Errorf("上传会话不存在")
-	}
-	data, err := os.ReadFile(chunkedUploadSessionPath(found))
-	if err != nil {
+		if os.IsNotExist(err) {
+			return chunkedUploadSession{}, fmt.Errorf("上传会话不存在")
+		}
 		return chunkedUploadSession{}, err
 	}
 	var session chunkedUploadSession
 	if err := json.Unmarshal(data, &session); err != nil {
 		return chunkedUploadSession{}, err
 	}
-	if !pathWithin(root, session.UploadDir) {
+	if session.UploadDir == "" {
 		return chunkedUploadSession{}, fmt.Errorf("上传会话路径无效")
+	}
+	if session.Direct {
+		// 直接写入白名单目录时，会话目录必须仍在白名单内。
+		if _, err := config.NormalizeUploadTargetDirWithAllowed(session.UploadDir, uploadAllowedDirs(reg)); err != nil {
+			return chunkedUploadSession{}, fmt.Errorf("上传会话路径无效: %w", err)
+		}
+	} else {
+		root := filepath.Join(reg.BaseDir, filepath.FromSlash(platformRunsPath(reg)), "uploads")
+		if !pathWithin(root, session.UploadDir) {
+			return chunkedUploadSession{}, fmt.Errorf("上传会话路径无效")
+		}
 	}
 	return session, nil
 }

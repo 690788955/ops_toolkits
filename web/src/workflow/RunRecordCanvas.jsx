@@ -20,7 +20,7 @@ export default function RunRecordCanvas({catalog, workflow, detail}) {
 
   const {nodes, edges} = useMemo(() => flowFromWorkflow(workflow), [workflow])
   const canvasRunState = useMemo(() => buildCanvasRunStateFromDetail(detail, nodes), [detail, nodes])
-  const displayNodes = useMemo(() => buildDisplayNodes(nodes, canvasRunState, catalog?.tools || [], null, false), [nodes, canvasRunState, catalog?.tools])
+  const displayNodes = useMemo(() => buildDisplayNodes(nodes, canvasRunState, catalog?.tools || [], false), [nodes, canvasRunState, catalog?.tools])
   const displayEdges = useMemo(() => buildDisplayEdges(edges, displayNodes, canvasRunState), [edges, displayNodes, canvasRunState])
   const canvasLogItem = useMemo(() => findRunLogItem(detail?.logs?.items || [], canvasLogNodeID), [detail, canvasLogNodeID])
 

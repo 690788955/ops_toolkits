@@ -541,9 +541,10 @@ export function normalizeUploadTargetDir(value) {
   const raw = String(value || "").trim();
   if (!raw) return { value: "", error: "" };
   if (raw.includes("://"))
-    return { value: "", error: "上传目标目录必须是 uploads 下的相对子目录。" };
+    return { value: "", error: "上传目标目录必须是目录路径，不能是 URL。" };
+  // 绝对路径由服务端按平台设置的上传白名单校验，这里只做格式检查。
   if (/^[A-Za-z]:/.test(raw) || raw.startsWith("/") || raw.startsWith("\\"))
-    return { value: "", error: "上传目标目录不能是绝对路径。" };
+    return { value: raw.replace(/\\/g, "/"), error: "" };
   const normalized = raw.replace(/\\/g, "/");
   const parts = normalized.split("/");
   if (parts.some((part) => !part.trim() || part === "." || part === ".."))
@@ -963,12 +964,12 @@ export function renumberStageForSerial(nodes, edges, stageId) {
   return updated;
 }
 
-export function moveWorkflowStage(stages, stageId, direction) {
+export function moveWorkflowStageTo(stages, stageId, targetIndex) {
   const list = [...(stages || [])];
-  const index = list.findIndex((stage) => stage.id === stageId);
-  const target = index + direction;
-  if (index < 0 || target < 0 || target >= list.length) return list;
-  const [stage] = list.splice(index, 1);
+  const from = list.findIndex((stage) => stage.id === stageId);
+  const target = Math.max(0, Math.min(Number(targetIndex), list.length - 1));
+  if (from < 0 || !Number.isFinite(target) || from === target) return list;
+  const [stage] = list.splice(from, 1);
   list.splice(target, 0, stage);
   return list;
 }
@@ -981,13 +982,17 @@ export function stageLayout(nodes, stages) {
   const headerHeight = 72;
   const nodeGap = 36;
   const footerHeight = 52;
+  // 阶段头固定要放下：序号、至少 7 个字的阶段名、执行模式（并行时多一个并发输入框）和操作按钮。
+  const stageMinWidth = 324;
+  const parallelStageMinWidth = 386;
   const positions = {};
   let x = 60;
   const layouts = normalizedStages.map((stage, index) => {
     const stageNodes = orderedStageNodes(nodes, stage.id);
     const sizes = stageNodes.map(autoLayoutNodeSize);
     const contentWidth = Math.max(0, ...sizes.map((size) => size.width));
-    const width = Math.max(296, contentWidth + stagePadding * 2);
+    const minWidth = stage.execution_mode === "parallel" ? parallelStageMinWidth : stageMinWidth;
+    const width = Math.max(minWidth, contentWidth + stagePadding * 2);
     const contentHeight =
       sizes.reduce((total, size) => total + size.height, 0) +
       Math.max(0, stageNodes.length - 1) * nodeGap;

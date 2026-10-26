@@ -2,9 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {Background, MiniMap, ReactFlow, ViewportPortal, reconnectEdge, useEdgesState, useNodesState} from '@xyflow/react'
 import {deleteJSON, fetchJSON, fetchPendingRuns, fetchRunDetail, postJSON, postRunUploadNodeChunked, resolvePendingRun, retryPendingRunCheck, retryRunNotification, rollbackPendingRun} from '../api.js'
 import {filterEntries, readableAPIError, summarizeAPIResponse} from '../utils.js'
-import {allNodeCategories, controlNodeCatalog, controlNodeHelp, controlNodeTitle, controlUnavailableReason, countNodesByCategory, flowNodeCategoryID, groupControlsByCategory, isControlReady} from './catalog.js'
+import {allNodeCategories, controlNodeCatalog, controlNodeTitle, countNodesByCategory, flowNodeCategoryID, isControlReady} from './catalog.js'
 import * as workflowModel from './model.js'
-import {controlShapeMarker, nodeTypes, normalizeRunStatus, runStatusLabel} from './nodes.jsx'
+import {nodeTypes, normalizeRunStatus, runStatusLabel} from './nodes.jsx'
 import {EdgeConfigModal, NodeConfigEditor, NodeConfigModal, ValidationSummary} from './inspectors.jsx'
 import {sshHostStatusLabel} from '../SshHostsModal.jsx'
 import {CanvasDock, NodePickerPanel} from './picker.jsx'
@@ -12,7 +12,6 @@ import FileUploadInput from '../FileUploadInput.jsx'
 import {DRAFT_WINDOW_SAVED_KEY, clearDraftWindowSaved, clearDraftWindowTransfer, draftWindowSavedRefValue, draftWindowURL, formatDraftWindowTime, readDraftWindowSaved, readDraftWindowTransfer, writeDraftWindowSaved, writeDraftWindowTransfer} from './draftWindow.js'
 
 const MAX_PLATFORM_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
-const REMEMBERED_WORKFLOW_PREFIX = 'ops.workflowEditor.selectedWorkflow'
 const RECENT_WORKFLOW_KEY = 'ops.workflowEditor.recentWorkflows'
 const RECENT_WORKFLOW_LIMIT = 5
 const UNCATEGORIZED_WORKFLOW_CATEGORY = '__uncategorized__'
@@ -70,12 +69,16 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   const pendingWorkflowSelectRef = useRef('')
   const [flowInstance, setFlowInstance] = useState(null)
   const canvasCardRef = useRef(null)
+  const runDockNavRef = useRef(null)
   const [stageLayerSize, setStageLayerSize] = useState(null)
   const quickConnectRef = useRef(null)
   const [nodePicker, setNodePicker] = useState({open: false, mode: 'add', position: null, panelPosition: null, connection: null, insertEdge: null, stageId: ''})
   const [nodePickerSearchText, setNodePickerSearchText] = useState('')
   const [pendingInsertEdge, setPendingInsertEdge] = useState(null)
-  const [batchStageMenuStageID, setBatchStageMenuStageID] = useState('')
+  const [batchStageMenuOpen, setBatchStageMenuOpen] = useState(false)
+  const [draftStarted, setDraftStarted] = useState(false)
+  const [stageDragID, setStageDragID] = useState('')
+  const [stageDropTargetID, setStageDropTargetID] = useState('')
   const [batchStageMove, setBatchStageMove] = useState(null)
   const [canvasSelection, setCanvasSelection] = useState({nodeIDs: [], edgeIDs: []})
   const canvasSelectionRef = useRef(canvasSelection)
@@ -182,7 +185,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   }, [])
 
   const clearCanvasSelection = useCallback(() => {
-    setBatchStageMenuStageID('')
+    setBatchStageMenuOpen(false)
     if (canvasSelectionRef.current.nodeIDs.length === 0 && canvasSelectionRef.current.edgeIDs.length === 0) return
     const next = {nodeIDs: [], edgeIDs: []}
     canvasSelectionRef.current = next
@@ -197,13 +200,18 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   }, [canvasSelection])
 
   useEffect(() => {
-    if (!batchStageMenuStageID) return undefined
+    if (!batchStageMenuOpen) return undefined
     const closeMenu = event => {
-      if (!event.target?.closest?.('.workflowStageBatchMenuWrap')) setBatchStageMenuStageID('')
+      if (!event.target?.closest?.('.workflowStageBatchMenuWrap')) setBatchStageMenuOpen(false)
     }
     document.addEventListener('mousedown', closeMenu)
     return () => document.removeEventListener('mousedown', closeMenu)
-  }, [batchStageMenuStageID])
+  }, [batchStageMenuOpen])
+
+  useEffect(() => {
+    if (!runDockOpen || !runDockNodeID) return
+    runDockNavRef.current?.querySelector('button.active')?.scrollIntoView?.({block: 'nearest'})
+  }, [runDockOpen, runDockNodeID])
 
   // 多选后删除、撤销或切换工作流都会让节点消失，批量入口只取仍存在的 ID。
   const canvasSelectedNodeIDs = useMemo(() => {
@@ -361,12 +369,12 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     nodes,
     canvasRunState,
     catalog.tools || [],
-    isEditingCanvas ? openDownstreamNodePicker : null,
     isEditingCanvas,
     isActiveRunRunning || activeRunHasRecovery ? null : rerunWorkflowNode,
     activeRunID,
-    hosts
-  ), [nodes, canvasRunState, catalog.tools, isEditingCanvas, isActiveRunRunning, activeRunHasRecovery, activeRunID, rerunWorkflowNode, hosts])
+    hosts,
+    runDockNodeID
+  ), [nodes, canvasRunState, catalog.tools, isEditingCanvas, isActiveRunRunning, activeRunHasRecovery, activeRunID, rerunWorkflowNode, hosts, runDockNodeID])
   const displayEdges = useMemo(() => buildDisplayEdges(edges, displayNodes, canvasRunState), [edges, displayNodes, canvasRunState])
   const workflowStageLayouts = useMemo(() => workflowModel.stageLayout(nodes, stages).stages, [nodes, stages])
   const workflowStageAddPosition = useMemo(() => {
@@ -427,17 +435,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     return () => window.removeEventListener('storage', handleStorage)
   }, [])
 
-  useEffect(() => {
-    if (selectedWorkflowID || nodes.length > 0 || isActiveRunRunning) return
-    if (draftWindow) return
-    const rememberedID = readRememberedWorkflowID('')
-    if (!rememberedID) return
-    if (!workflowOptions.some(item => item.id === rememberedID)) {
-      forgetRememberedWorkflowID('', rememberedID)
-      return
-    }
-    loadWorkflow(rememberedID, {silent: true})
-  }, [selectedWorkflowID, nodes.length, isActiveRunRunning, workflowOptions])
+  // 进入工作流管理时保持空白画布，由用户从顶部选择已保存工作流或新建草稿。
 
   useEffect(() => {
     if (!hasUnsavedChanges) return undefined
@@ -514,11 +512,15 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   }
 
   function handleCanvasNodeClick(nodeID) {
-    if (isActiveRunRunning) {
-      closeNodePicker()
+    closeNodePicker()
+    // 运行结果可见时，点击节点用于定位日志；其余情况单击只选中节点，避免配置抽屉挡住画布。
+    if (runVisible && canvasRunState.nodes?.[nodeID]) {
       openRunDockNode(nodeID)
-      return
     }
+  }
+
+  function handleCanvasNodeDoubleClick(nodeID) {
+    if (!isEditingCanvas || isActiveRunRunning) return
     openNodeConfigModal(nodeID)
   }
 
@@ -851,9 +853,9 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       const source = body.data.Source || body.data.source || {}
       applyWorkflowConfig(config, source, {id})
       setSelectedWorkflowID(id)
+      setDraftStarted(true)
       // 独立草稿窗口只借用画布，不写主窗口的“最近使用”。
       if (!draftWindow) {
-        rememberWorkflowID('', id)
         setRecentWorkflowIDs(pushRecentWorkflowID(id))
       }
       if (!options.silent) setResult({message: `已加载工作流 ${id}`})
@@ -870,6 +872,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     clearCanvasRunOverlay()
     const applied = applyWorkflowConfig(transfer.draft, {plugin_id: transfer.ownerID, type: transfer.ownerLocked ? 'builtin' : 'plugin'}, {id: transfer.id})
     setSelectedWorkflowID(transfer.id)
+    setDraftStarted(true)
     setSavedDraftSignature(DRAFT_WINDOW_TRANSFER_SIGNATURE)
     setEditorValidation(null)
     setDraftWindowTransfer({id: transfer.id, name: transfer.name, ts: transfer.ts, dirty: transfer.dirty, ownerID: applied.ownerID})
@@ -1019,7 +1022,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     setEdgeConfigModalOpen(false)
     setEditorValidation(null)
     setSavedDraftSignature(workflowDraftSignature(next, [], [], '', '[]', 'user.workflows', next.stages))
-    forgetRememberedWorkflowID('')
+    setDraftStarted(true)
     closeNodePicker()
     fitCanvasViewAfterLayout({nodes: [], stages: next.stages})
     setResult({message: '已创建空白工作流草稿'})
@@ -1141,6 +1144,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   }
 
   function addNodeAndMaybeConnect(nextNode, options = {}) {
+    setDraftStarted(true)
     const pendingConnection = options.connection || null
     const insertEdge = options.insertEdge || null
     if (insertEdge && !canInsertIntoEdge(insertEdge, edges, nodes)) {
@@ -1330,22 +1334,6 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     })
   }
 
-  function openDownstreamNodePicker(nodeID, event) {
-    event?.stopPropagation()
-    if (!isEditingCanvas) return
-    const sourceNode = nodes.find(node => node.id === nodeID)
-    if (!sourceNode || sourceNode.type === 'conditionNode') return
-    const position = downstreamInsertPosition(sourceNode)
-    const panelPosition = position && flowInstance
-      ? panelPositionFromFlowPosition(position, flowInstance, canvasCardRef.current)
-      : null
-    openNodePicker(position, {
-      mode: 'connect',
-      panelPosition,
-      connection: {source: nodeID, sourceHandle: ''}
-    })
-  }
-
   function handlePaneDoubleClick(event) {
     if (!isEditingCanvas) return
     if (!isPaneDoubleClick(event)) return
@@ -1519,18 +1507,74 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     setEditorValidation(null)
   }
 
-  function moveWorkflowStageBy(stageId, direction) {
-    if (!isEditingCanvas || isActiveRunRunning) return
-    const next = workflowModel.moveWorkflowStage(stages, stageId, direction)
-    if (next === stages || next.every((stage, index) => stage.id === stages[index]?.id)) return
+  function applyStageOrder(next) {
+    const unchanged = next.every((stage, index) => stage.id === stages[index]?.id)
+    if (unchanged) return
     const conflict = stageEdgeConflicts(next)
     if (conflict) {
-      setResult({message: conflict})
+      setResult({message: `无法调整阶段顺序：${conflict}`})
       return
     }
     setStages(next)
     setNodes(current => workflowModel.autoLayoutWorkflowNodes(current, edges, next))
     setEditorValidation(null)
+  }
+
+  function moveStageTo(stageId, targetIndex) {
+    if (!isEditingCanvas || isActiveRunRunning) return
+    applyStageOrder(workflowModel.moveWorkflowStageTo(stages, stageId, targetIndex))
+  }
+
+  function handleStageDragStart(event, stageId) {
+    // 输入框、下拉和按钮保留原生交互，不触发阶段拖拽。
+    if (!isEditingCanvas || isActiveRunRunning || event.target.closest('input, select, textarea, button')) {
+      event.preventDefault()
+      return
+    }
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', stageId)
+    setStageDragID(stageId)
+    setStageDropTargetID('')
+  }
+
+  // 拖动时指针下方可能是节点或其它画布元素，按阶段列的实际矩形判定目标，避免放过节点就失效。
+  function stageAtPoint(x, y) {
+    if (!canvasCardRef.current || !Number.isFinite(x) || !Number.isFinite(y)) return ''
+    const columns = canvasCardRef.current.querySelectorAll('.workflowStageColumn')
+    for (const column of columns) {
+      const rect = column.getBoundingClientRect()
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return column.dataset.stageId || ''
+    }
+    return ''
+  }
+
+  function handleCanvasStageDragOver(event) {
+    if (!stageDragID) return
+    const stageId = stageAtPoint(event.clientX, event.clientY)
+    if (!stageId || stageId === stageDragID) {
+      if (stageDropTargetID) setStageDropTargetID('')
+      return
+    }
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    if (stageDropTargetID !== stageId) setStageDropTargetID(stageId)
+  }
+
+  function handleCanvasStageDrop(event) {
+    if (!stageDragID) return
+    event.preventDefault()
+    const stageId = stageAtPoint(event.clientX, event.clientY)
+    const dragged = stageDragID
+    setStageDragID('')
+    setStageDropTargetID('')
+    if (!stageId || stageId === dragged) return
+    const targetIndex = stages.findIndex(stage => stage.id === stageId)
+    if (targetIndex >= 0) moveStageTo(dragged, targetIndex)
+  }
+
+  function handleStageDragEnd() {
+    setStageDragID('')
+    setStageDropTargetID('')
   }
 
   function deleteWorkflowStage(stageId) {
@@ -1607,7 +1651,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   function applyBatchStageMove(targetStageId = batchStageMove?.targetStageId) {
     if (!targetStageId) return
     const plan = batchMovePlan(targetStageId)
-    setBatchStageMenuStageID('')
+    setBatchStageMenuOpen(false)
     if (!plan.selected.length) {
       setBatchStageMove(null)
       explainSelectionFilter(plan.shadowed)
@@ -1844,42 +1888,6 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     }))
   }
 
-  function handleToolDragStart(event, tool) {
-    if (!isEditingCanvas) return
-    event.dataTransfer.setData('application/ops-tool', tool.id)
-    event.dataTransfer.effectAllowed = 'move'
-  }
-
-  function handleControlDragStart(event, control) {
-    if (!isEditingCanvas) return
-    event.dataTransfer.setData('application/ops-control', control.type)
-    event.dataTransfer.effectAllowed = 'move'
-  }
-
-  function handleCanvasDragOver(event) {
-    if (!isEditingCanvas) return
-    event.preventDefault()
-    event.dataTransfer.dropEffect = 'move'
-  }
-
-  function handleCanvasDrop(event) {
-    if (!isEditingCanvas) return
-    event.preventDefault()
-    const position = flowInstance
-      ? flowInstance.screenToFlowPosition({x: event.clientX, y: event.clientY})
-      : {x: event.clientX - 420, y: event.clientY - 180}
-    const stageId = stageIDAtFlowPosition(position)
-    const controlType = event.dataTransfer.getData('application/ops-control')
-    if (controlType) {
-      addControlNode(controlType, position, {stageId})
-      return
-    }
-    const toolID = event.dataTransfer.getData('application/ops-tool')
-    const tool = (catalog.tools || []).find(item => item.id === toolID)
-    if (!tool) return
-    addToolNode(tool, position, {stageId})
-  }
-
   function clearSelection() {
     setNodeConfigModalOpen(false)
     setNodeConfigDraft(null)
@@ -2057,7 +2065,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     workflowModel.validateConditionDraft(nodes, edges).forEach(error => errors.push(error))
     workflowModel.validateControlDraft(nodes, edges, catalog.tools || []).forEach(error => errors.push(error))
     if (stages.length === 0 && nodes.length > 1 && edges.length === 0 && draft.edges.length === 0) {
-      errors.push('多个节点没有连线，无法确定执行顺序。请为条件、并行、合流等控制节点显式连接依赖关系。')
+      errors.push('多个节点没有连线，无法确定执行顺序。请为条件、循环等控制节点显式连接依赖关系。')
     }
     if (!String(draft.id || '').trim()) {
       if (mode === 'save') {
@@ -2161,8 +2169,8 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       }
       pendingWorkflowSelectRef.current = check.draft.id
       setSelectedWorkflowID(check.draft.id)
+      setDraftStarted(true)
       setSavedDraftSignature(workflowDraftSignature(check.draft, nodes, edges, '', workflowParamsText, source?.plugin_id || workflowOwnerID, stages))
-      rememberWorkflowID('', check.draft.id)
       setRecentWorkflowIDs(pushRecentWorkflowID(check.draft.id))
       setSaveModalOpen(false)
       setSaveModalSettings(false)
@@ -2206,9 +2214,9 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       setStages(next.stages)
       flowHistory.resetHistory([], [], next.stages)
       setSelectedWorkflowID('')
+      setDraftStarted(false)
       setWorkflowOwnerID('user.workflows')
       setWorkflowOwnerLocked(false)
-      forgetRememberedWorkflowID('', id)
       setRecentWorkflowIDs(forgetRecentWorkflowID(id))
       setSelectedNodeID('')
       setSelectedEdgeID('')
@@ -2376,7 +2384,6 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     return null
   }
 
-  const quickToolOptions = toolOptions.slice(0, 4)
   const draftCheck = preflightWorkflowDraft('save')
   const draftStatus = draftCheck.errors.length > 0
     ? {kind: 'warning', title: `${draftCheck.errors.length} 项待配置`, detail: draftCheck.errors[0]}
@@ -2487,46 +2494,6 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       </button>
     )
   }
-  const addControlNodeGrid = groupControlsByCategory(controlNodeCatalog).map(({category, controls}) => (
-    <div key={category.id} className={`canvasHoverToolbarSection cat-${category.id}`} title={category.description}>
-      <span>
-        <i className={`catDot ${category.id}`} aria-hidden="true" />
-        {category.label}
-      </span>
-      <div className="canvasHoverToolbarGrid">
-        {controls.map(control => {
-          const disabled = !isControlReady(control)
-          return (
-            <button
-              key={control.type}
-              type="button"
-              className={disabled ? 'planned' : undefined}
-              draggable={!disabled}
-              disabled={disabled}
-              aria-disabled={disabled}
-              onDragStart={disabled ? undefined : event => handleControlDragStart(event, control)}
-              onClick={disabled ? undefined : () => addControlNode(control.type)}
-              title={`${control.title}\n${control.secondary}\n${control.help || control.description}${disabled ? `\n${controlUnavailableReason(control)}` : ''}`}
-            >
-              <span className={`paletteShape ${control.shape} cat-${control.category}`} data-symbol={controlShapeMarker(control.type)} aria-hidden="true" />
-              <span>{control.title}</span>
-            </button>
-          )
-        })}
-      </div>
-    </div>
-  ))
-  const addToolNodeGrid = (
-    <div className="canvasHoverToolbarGrid tools">
-      {quickToolOptions.map(tool => (
-        <button key={tool.id} type="button" draggable onDragStart={event => handleToolDragStart(event, tool)} onClick={() => addToolNode(tool)} title={`${tool.name || tool.id}\n${tool.id}${tool.description ? `\n${tool.description}` : ''}`}>
-          <span className="paletteShape tool" aria-hidden="true" />
-          <span>{tool.name || tool.id}</span>
-        </button>
-      ))}
-      {quickToolOptions.length === 0 && <button type="button" onClick={() => openNodePicker()}>搜索插件工具</button>}
-    </div>
-  )
   const canvasCategoryLegend = isEditingCanvas && nodes.length > 0 ? (
     <div className="canvasCategoryLegend nodrag nopan" onMouseDown={event => event.stopPropagation()} role="group" aria-label="按节点分类高亮">
       <button
@@ -2560,28 +2527,6 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
         )
       })}
     </div>
-  ) : null
-  const canvasHoverToolbar = isEditingCanvas ? (
-    <section className="canvasHoverToolbar nodrag nopan" onMouseDown={event => event.stopPropagation()} aria-label="画布节点工具栏">
-      <div className="canvasHoverToolbarPanel">
-        <div className="canvasHoverToolbarHeader">
-          <strong>添加节点</strong>
-          <button type="button" onClick={() => openNodePicker()}>搜索全部</button>
-        </div>
-        {addControlNodeGrid}
-        <div className="canvasHoverToolbarSection cat-tool">
-          <span>
-            <i className="catDot tool" aria-hidden="true" />
-            插件工具
-          </span>
-          {addToolNodeGrid}
-        </div>
-      </div>
-      <button type="button" className="canvasHoverToolbarTrigger" aria-label="添加节点工具栏" title="悬停展开快捷节点；拖动节点卡片到画布添加">
-        <span aria-hidden="true">+</span>
-        <span>添加节点</span>
-      </button>
-    </section>
   ) : null
   const workflowTopBar = (
     <header className={`workflowTopBar${workflowNameMenuOpen ? ' menuOpen' : ''}`}>
@@ -2770,11 +2715,16 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   ) : null
   const workflowRunParamsContent = (
     <div className="form compact workflowRunSetup">
-      <section className="workflowRunParamSection">
-        <div className="workflowRunParamGroupHeader">
-          <strong>工作流参数</strong>
-          <span>节点参数请在画布中打开对应节点配置，这里只填写工作流级参数。</span>
+      <div className="workflowRunInputGroup" aria-label="运行入参">
+        <div className="workflowRunInputGroupHeader">
+          <strong>运行入参</strong>
+          <span className="workflowRunInputGroupTag">填写 / 选择</span>
         </div>
+        <section className="workflowRunParamSection">
+          <div className="workflowRunParamGroupHeader">
+            <strong>工作流参数</strong>
+            <span>节点参数请在画布中打开对应节点配置，这里只填写工作流级参数。</span>
+          </div>
         {workflowParameters.length === 0 && <div className="empty small">当前工作流无需工作流级参数。</div>}
         {workflowParameters.map((param, index) => (
           <label key={param.name || index} className={param.required ? 'requiredField' : ''}>
@@ -2827,26 +2777,32 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
             placeholder='{"host":"127.0.0.1"}'
           />
         </details>
-      </section>
-      {uploadFlowNodes(nodes).length > 0 && (
-        <section className="workflowRunParamSection">
-          <div className="workflowRunParamGroupHeader">
-            <strong>上传文件</strong>
-            <span>上传节点在运行时会等待这里选择的文件，然后按节点配置的目标目录上传。</span>
-          </div>
-          {uploadFlowNodes(nodes).map(node => (
-            <UploadNodeFilePicker
-              key={node.id}
-              node={node}
-              state={uploadStateForNode(uploadNodeFiles, node.id)}
-              summary={uploadFileSummary(uploadNodeFiles, node.id)}
-              disabled={isActiveRunRunning}
-              onFilesChange={(mode, files) => updateUploadNodeFiles(node.id, mode, files)}
-              onClear={() => clearUploadNodeFiles(node.id)}
-            />
-          ))}
         </section>
-      )}
+        {uploadFlowNodes(nodes).length > 0 && (
+          <section className="workflowRunParamSection">
+            <div className="workflowRunParamGroupHeader">
+              <strong>上传文件</strong>
+              <span>上传节点在运行时会等待这里选择的文件，然后按节点配置的目标目录上传。</span>
+            </div>
+            {uploadFlowNodes(nodes).map(node => (
+              <UploadNodeFilePicker
+                key={node.id}
+                node={node}
+                state={uploadStateForNode(uploadNodeFiles, node.id)}
+                summary={uploadFileSummary(uploadNodeFiles, node.id)}
+                disabled={isActiveRunRunning}
+                onFilesChange={(mode, files) => updateUploadNodeFiles(node.id, mode, files)}
+                onClear={() => clearUploadNodeFiles(node.id)}
+              />
+            ))}
+          </section>
+        )}
+      </div>
+      <div className="workflowRunSettingGroup" aria-label="执行设置">
+        <div className="workflowRunInputGroupHeader">
+          <strong>执行设置</strong>
+          <span className="workflowRunInputGroupTag neutral">可调整</span>
+        </div>
       <section className="workflowRunParamSection">
         <strong>执行机器</strong>
         <div className="workflowTargetOptions" role="radiogroup" aria-label="工作流执行机器">
@@ -2912,8 +2868,13 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
           </>
         )}
       </section>
+      </div>
+      <div className="workflowRunInfoGroup" aria-label="运行摘要">
+        <div className="workflowRunInputGroupHeader">
+          <strong>运行摘要</strong>
+          <span className="workflowRunInputGroupTag muted">只读预览</span>
+        </div>
       <section className="workflowRunParamSection">
-        <strong>运行摘要</strong>
         <div className="workflowRunSummary">
           <span>工作流</span>
           <strong>{workflow.name || workflow.id || '未保存草稿'}</strong>
@@ -2953,6 +2914,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
           <div className="workflowRunDraftNotice">当前有未保存修改，运行会使用画布上的最新内容。</div>
         )}
       </section>
+      </div>
     </div>
   )
   const batchStageMoveModal = batchStageMove && (
@@ -2991,8 +2953,45 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       </section>
     </div>
   )
+  const canvasSelectionBar = isEditingCanvas && canvasSelectedNodeIDs.length > 0 ? (
+    <div className="canvasSelectionBar nodrag nopan" role="status" onMouseDown={event => event.stopPropagation()}>
+      <span className="canvasSelectionBarCount">已选 {canvasSelectedNodeIDs.length} 个步骤</span>
+      <span className="workflowStageBatchMenuWrap">
+        <button
+          type="button"
+          className="secondary small workflowStageBatchTarget"
+          aria-haspopup="menu"
+          aria-expanded={batchStageMenuOpen}
+          disabled={isActiveRunRunning}
+          onClick={() => setBatchStageMenuOpen(open => !open)}
+        >
+          移入阶段 ▾
+        </button>
+        {batchStageMenuOpen && (
+          <div className="workflowStageBatchMenu" role="menu" aria-label="把选中的步骤移入阶段">
+            {stages.length < 2 && <span className="workflowStageBatchMenuEmpty">请先添加其他阶段</span>}
+            {stages.filter(stage => !canvasSelectedNodeIDs.every(id => nodes.find(node => node.id === id)?.data?.stageId === stage.id)).map(stage => (
+              <button
+                key={stage.id}
+                type="button"
+                role="menuitem"
+                onClick={() => applyBatchStageMove(stage.id)}
+              >{stage.name || stage.id}</button>
+            ))}
+          </div>
+        )}
+      </span>
+      <button type="button" className="secondary small" onClick={clearCanvasSelection}>取消选择</button>
+    </div>
+  ) : null
   const workflowCanvas = (
-    <section className={`card canvasCard${nodeCategoryFocus ? ` cat-focus-${nodeCategoryFocus}` : ''}`} ref={canvasCardRef} onDragOver={handleCanvasDragOver} onDrop={handleCanvasDrop} onDoubleClick={handlePaneDoubleClick}>
+    <section
+      className={`card canvasCard${nodeCategoryFocus ? ` cat-focus-${nodeCategoryFocus}` : ''}`}
+      ref={canvasCardRef}
+      onDoubleClick={handlePaneDoubleClick}
+      onDragOver={handleCanvasStageDragOver}
+      onDrop={handleCanvasStageDrop}
+    >
       {mixedStageNotice && (
         <div className="workflowLegacyNotice workflowMixedStageNotice" role="status">
           <div>
@@ -3012,6 +3011,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
         onConnectEnd={handleConnectEnd}
         onReconnect={onReconnect}
         onNodeClick={(_, node) => handleCanvasNodeClick(node.id)}
+        onNodeDoubleClick={(_, node) => handleCanvasNodeDoubleClick(node.id)}
         onNodeDragStop={handleStageNodeDragStop}
         onSelectionChange={handleCanvasSelectionChange}
         onSelectionDragStop={handleStageSelectionDragStop}
@@ -3028,32 +3028,44 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       >
         <MiniMap />
         <Background />
-        {workflowStageLayouts.length > 0 && (
+        {workflowStageLayouts.length > 0 && (selectedWorkflowID || draftStarted || nodes.length > 0) && (
           <ViewportPortal>
             <div className="workflowStageLayer" style={stageLayerSize ? {width: stageLayerSize.width, height: stageLayerSize.height} : undefined}>
               {workflowStageLayouts.map(stage => {
                 const run = stageRunSummary(stage.id)
+                const dragging = stageDragID === stage.id
                 return (
                   <section
                     key={stage.id}
-                    className={`workflowStageColumn${run ? ` run-${run.kind}` : ''}`}
+                    data-stage-id={stage.id}
+                    className={`workflowStageColumn${run ? ` run-${run.kind}` : ''}${dragging ? ' stageDragging' : ''}${stageDropTargetID === stage.id ? ' stageDropTarget' : ''}`}
                     style={{left: stage.x, top: stage.y, width: stage.width, height: stage.height}}
                     aria-label={`阶段 ${stage.index + 1}：${stage.name}`}
                   >
-                    <header className="workflowStageHeader nodrag nopan">
+                    <header
+                      className={`workflowStageHeader nodrag nopan${isEditingCanvas && !isActiveRunRunning ? ' draggable' : ''}`}
+                      draggable={isEditingCanvas && !isActiveRunRunning}
+                      title={isEditingCanvas && !isActiveRunRunning ? '拖动阶段顶部调整顺序' : undefined}
+                      onDragStart={event => handleStageDragStart(event, stage.id)}
+                      onDragEnd={handleStageDragEnd}
+                    >
                       <div className="workflowStageHeading">
-                        <span className="workflowStageIndex" aria-hidden="true">{stage.index + 1}</span>
+                        <span
+                          className="workflowStageIndex"
+                          aria-hidden="true"
+                        >{stage.index + 1}</span>
                         {isEditingCanvas ? (
                           <input
                             className="workflowStageNameInput nodrag nopan"
                             value={stage.name}
+                            title={stage.name}
                             aria-label={`阶段 ${stage.index + 1} 名称`}
                             disabled={isActiveRunRunning}
                             onChange={event => renameWorkflowStage(stage.id, event.target.value)}
                             onBlur={event => { if (!event.target.value.trim()) renameWorkflowStage(stage.id, stage.id) }}
                           />
                         ) : (
-                          <strong className="workflowStageName">{stage.name}</strong>
+                          <strong className="workflowStageName" title={stage.name}>{stage.name}</strong>
                         )}
                         {isEditingCanvas ? (
                           <span className="workflowStageModeControls">
@@ -3093,55 +3105,8 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
                         )}
                         {run && <span className={`workflowStageRunStatus ${run.kind}`}>{run.label}</span>}
                       </div>
-                      {isEditingCanvas && canvasSelectedNodeIDs.length > 0 && (
-                        <div className="workflowStageBatchBar nodrag nopan" role="status">
-                          <span>已选 {canvasSelectedNodeIDs.length} 个步骤</span>
-                          <span className="workflowStageBatchMenuWrap">
-                            <button
-                              type="button"
-                              className="secondary small workflowStageBatchTarget"
-                              aria-haspopup="menu"
-                              aria-expanded={batchStageMenuStageID === stage.id}
-                              disabled={isActiveRunRunning}
-                              onClick={() => setBatchStageMenuStageID(current => current === stage.id ? '' : stage.id)}
-                            >
-                              移入阶段 ▾
-                            </button>
-                            {batchStageMenuStageID === stage.id && (
-                              <div className="workflowStageBatchMenu nodrag nopan" role="menu" aria-label={`把选中的步骤移入阶段`}>
-                                {stages.length < 2 && <span className="workflowStageBatchMenuEmpty">请先添加其他阶段</span>}
-                                {stages.filter(item => item.id !== stage.id).map(item => (
-                                  <button
-                                    key={item.id}
-                                    type="button"
-                                    role="menuitem"
-                                    onClick={() => applyBatchStageMove(item.id)}
-                                  >{item.name || item.id}</button>
-                                ))}
-                              </div>
-                            )}
-                          </span>
-                          <button type="button" className="secondary small" onClick={clearCanvasSelection}>取消选择</button>
-                        </div>
-                      )}
                       {isEditingCanvas && (
                         <div className="workflowStageActions">
-                          <button
-                            type="button"
-                            className="workflowStageIconButton"
-                            title="阶段左移"
-                            aria-label={`把阶段 ${stage.name} 左移`}
-                            disabled={stage.index === 0 || isActiveRunRunning}
-                            onClick={() => moveWorkflowStageBy(stage.id, -1)}
-                          >←</button>
-                          <button
-                            type="button"
-                            className="workflowStageIconButton"
-                            title="阶段右移"
-                            aria-label={`把阶段 ${stage.name} 右移`}
-                            disabled={stage.index === workflowStageLayouts.length - 1 || isActiveRunRunning}
-                            onClick={() => moveWorkflowStageBy(stage.id, 1)}
-                          >→</button>
                           <button
                             type="button"
                             className="workflowStageIconButton"
@@ -3195,10 +3160,22 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
             </div>
           </ViewportPortal>
         )}
-        {isEditingCanvas && stages.length === 0 && nodes.length === 0 && !nodePicker.open && (
+        {isEditingCanvas && !draftWindow && !selectedWorkflowID && !draftStarted && nodes.length === 0 && !nodePicker.open && (
+          <div className="canvasEmptyCallout nodrag nopan" onMouseDown={event => event.stopPropagation()}>
+            <strong>先选择一个工作流</strong>
+            <span>从顶部名称下拉里打开已有工作流，或新建一个空白草稿再添加步骤。</span>
+            <div className="canvasEmptyCalloutActions">
+              <button type="button" className="primary" onClick={() => { setWorkflowMoreOpen(false); setWorkflowNameMenuOpen(true) }}>选择工作流</button>
+              <button type="button" className="secondary" onClick={createWorkflow} disabled={isActiveRunRunning}>新建工作流</button>
+            </div>
+          </div>
+        )}
+        {isEditingCanvas && (selectedWorkflowID || draftStarted) && nodes.length === 0 && !nodePicker.open && (
           <div className="canvasEmptyCallout nodrag nopan" onMouseDown={event => event.stopPropagation()}>
             <strong>从添加节点开始编排</strong>
-            <span>悬停画布底部工具栏，或拖出连线后选择下游节点。</span>
+            <span>{stages.length > 0
+              ? '点击阶段右上角的 ＋ 添加步骤，或双击画布空白处、拖出连线后选择下游节点。'
+              : '点击右上角「添加节点」或双击画布空白处开始。'}</span>
             <button type="button" className="secondary" onClick={openNodePickerFromEvent}>添加节点</button>
           </div>
         )}
@@ -3221,9 +3198,10 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
             onClose={closeNodePicker}
           />
         )}
-        {canvasHoverToolbar}
+        {canvasSelectionBar}
         {canvasCategoryLegend}
         <CanvasDock
+          onAddNode={isEditingCanvas ? () => openNodePicker() : undefined}
           onZoomIn={() => zoomCanvas('in')}
           onZoomOut={() => zoomCanvas('out')}
           onFitView={fitCanvasView}
@@ -3252,7 +3230,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       </header>
       {runDockOpen && (
         <div className="workflowRunDockBody">
-          <nav className="workflowRunDockNodes" aria-label="运行节点列表">
+          <nav className="workflowRunDockNodes" aria-label="运行节点列表" ref={runDockNavRef}>
             {runDockNodes.map(node => {
               const run = canvasRunState.nodes?.[node.id]
               return (
@@ -3279,7 +3257,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
                 run={canvasRunState.nodes?.[runDockNodeID]}
               />
             ) : (
-              <div className="empty small">选择左侧节点查看逐节点日志。</div>
+              <div className="empty small">点击画布节点或左侧列表，查看对应的逐节点日志。</div>
             )}
           </div>
         </div>
@@ -3768,37 +3746,6 @@ function workflowCategoryLabel(category, labels) {
   if (category === UNCATEGORIZED_WORKFLOW_CATEGORY) return '未分类'
   if (category === 'global') return '全局'
   return labels.get(category) || category
-}
-
-function rememberedWorkflowKey(category) {
-  return `${REMEMBERED_WORKFLOW_PREFIX}:${category || 'global'}`
-}
-
-function readRememberedWorkflowID(category) {
-  try {
-    return window.localStorage?.getItem(rememberedWorkflowKey(category)) || ''
-  } catch {
-    return ''
-  }
-}
-
-function rememberWorkflowID(category, id) {
-  if (!id) return
-  try {
-    window.localStorage?.setItem(rememberedWorkflowKey(category), id)
-  } catch {
-    // Ignore storage failures; workflow selection still works for this session.
-  }
-}
-
-function forgetRememberedWorkflowID(category, id = '') {
-  try {
-    const key = rememberedWorkflowKey(category)
-    if (id && window.localStorage?.getItem(key) !== id) return
-    window.localStorage?.removeItem(key)
-  } catch {
-    // Ignore storage failures; stale selections are non-critical.
-  }
 }
 
 function readRecentWorkflowIDs() {
@@ -4698,15 +4645,6 @@ function stripRuntimeEdgeState(edge) {
   }
 }
 
-function downstreamInsertPosition(node) {
-  const position = node?.position || {x: 80, y: 120}
-  const size = autoLayoutNodeSize(node)
-  return {
-    x: position.x + size.width + 120,
-    y: position.y + Math.max(0, size.height / 2 - 36)
-  }
-}
-
 function edgeMidpoint(edge, nodes) {
   const sourceNode = (nodes || []).find(node => node.id === edge?.source)
   const targetNode = (nodes || []).find(node => node.id === edge?.target)
@@ -4842,7 +4780,7 @@ function hasConfiguredParamValue(value) {
   return String(value).trim() !== ''
 }
 
-export function buildDisplayNodes(nodes, runState, tools = [], onAddDownstream = null, canRemove = true, onRerun = null, activeRunID = '', hosts = []) {
+export function buildDisplayNodes(nodes, runState, tools = [], canRemove = true, onRerun = null, activeRunID = '', hosts = [], logNodeID = '') {
   const overlayNodes = runState?.nodes || {}
   const toolMap = new Map((tools || []).map(tool => [tool.id, tool]))
   const hostMap = new Map((hosts || []).map(host => [host.id, host]))
@@ -4855,7 +4793,7 @@ export function buildDisplayNodes(nodes, runState, tools = [], onAddDownstream =
     const categoryID = flowNodeCategoryID(node)
     return {
       ...node,
-      className: [node.className, 'cat-node', `cat-${categoryID}`].filter(Boolean).join(' '),
+      className: [node.className, 'cat-node', `cat-${categoryID}`, logNodeID === node.id ? 'logFocused' : ''].filter(Boolean).join(' '),
       data: {
         ...node.data,
         categoryID,
@@ -4864,7 +4802,6 @@ export function buildDisplayNodes(nodes, runState, tools = [], onAddDownstream =
         onRemove: canRemove ? node.data?.onRemove : null,
         onRerun: onRerun && activeRunID ? onRerun : null,
         rerunDisabled: runState?.status === 'running',
-        ...(node.type !== 'conditionNode' && onAddDownstream ? {onAddDownstream} : {}),
         ...(node.type === 'toolNode' ? {
           paramStatus: toolParamStatus(tool, node.data?.params || {}),
           toolMeta: {

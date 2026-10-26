@@ -2352,8 +2352,6 @@ pre {
 .paletteShape.decision,
 .paletteShape.gateway,
 .paletteShape.condition,
-.paletteShape.parallel,
-.paletteShape.join,
 .paletteShape.loop {
   border-radius: 7px;
   transform: rotate(45deg);
@@ -2362,8 +2360,6 @@ pre {
 .paletteShape.decision::after,
 .paletteShape.gateway::after,
 .paletteShape.condition::after,
-.paletteShape.parallel::after,
-.paletteShape.join::after,
 .paletteShape.loop::after {
   content: attr(data-symbol);
   transform: rotate(-45deg);
@@ -2422,187 +2418,6 @@ pre {
 .controlIcon,
 .controlContent em { display: none; }
 
-.canvasHoverToolbar {
-  position: absolute;
-  left: 50%;
-  bottom: 18px;
-  z-index: 7;
-  display: grid;
-  justify-items: center;
-  gap: 8px;
-  pointer-events: auto;
-  transform: translateX(-50%);
-}
-
-.canvasHoverToolbar::before {
-  content: "";
-  position: absolute;
-  left: 50%;
-  bottom: 34px;
-  width: min(520px, calc(100vw - 44px));
-  height: 24px;
-  transform: translateX(-50%);
-}
-
-.canvasHoverToolbarTrigger {
-  display: inline-flex;
-  min-width: 112px;
-  height: 36px;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  border: 1px solid rgba(185,189,196,.82);
-  border-radius: 10px;
-  padding: 0 13px;
-  color: var(--color-text);
-  background: rgba(255,255,255,.9);
-  box-shadow: var(--shadow-whisper);
-  backdrop-filter: blur(8px);
-  font-size: 12px;
-  font-weight: 900;
-  line-height: 1;
-  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease, background .15s ease;
-}
-
-.canvasHoverToolbarTrigger span:first-child {
-  display: grid;
-  width: 17px;
-  height: 17px;
-  place-items: center;
-  border: 1px solid var(--color-black);
-  border-radius: var(--radius-pill);
-  color: var(--color-surface);
-  background: var(--color-black);
-  font-size: 16px;
-  line-height: 1;
-}
-
-.canvasHoverToolbarTrigger:hover,
-.canvasHoverToolbar:focus-within .canvasHoverToolbarTrigger,
-.canvasHoverToolbar:hover .canvasHoverToolbarTrigger {
-  transform: translateY(-1px);
-  border-color: var(--color-black);
-  background: rgba(255,255,255,.98);
-  box-shadow: 0 0 0 3px rgba(37,71,208,.1), var(--shadow-whisper);
-}
-
-.canvasHoverToolbarPanel {
-  position: absolute;
-  left: 50%;
-  bottom: 50px;
-  z-index: 1;
-  display: grid;
-  width: min(640px, calc(100vw - 44px));
-  max-height: min(420px, calc(100vh - 190px));
-  gap: 14px;
-  overflow: auto;
-  border: 1px solid rgba(185,189,196,.78);
-  border-radius: 14px;
-  padding: 14px;
-  background: rgba(255,255,255,.98);
-  box-shadow: var(--shadow-standard);
-  opacity: 0;
-  transform: translate(-50%, 8px);
-  pointer-events: none;
-  transition: opacity .16s ease, transform .16s ease;
-}
-
-.canvasHoverToolbar:hover .canvasHoverToolbarPanel,
-.canvasHoverToolbar:focus-within .canvasHoverToolbarPanel {
-  opacity: 1;
-  transform: translate(-50%, 0);
-  pointer-events: auto;
-}
-
-.canvasHoverToolbarHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.canvasHoverToolbarHeader strong {
-  color: var(--color-black);
-  font-size: 15px;
-  font-weight: 900;
-}
-
-.canvasHoverToolbarHeader button {
-  border: 1px solid var(--color-input-border);
-  border-radius: 8px;
-  padding: 7px 10px;
-  color: var(--color-text);
-  background: var(--color-surface);
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.canvasHoverToolbarSection {
-  display: grid;
-  gap: 8px;
-}
-
-.canvasHoverToolbarSection > span {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--color-muted);
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.canvasHoverToolbarGrid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.canvasHoverToolbarGrid button {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 10px;
-  min-height: 48px;
-  border: 1px solid var(--color-border);
-  border-radius: 10px;
-  padding: 9px 10px;
-  color: var(--color-text);
-  background: var(--color-surface);
-  text-align: left;
-  transition: border-color .15s ease, box-shadow .15s ease, background .15s ease, transform .15s ease;
-}
-
-.canvasHoverToolbarGrid button[draggable="true"] {
-  cursor: grab;
-}
-
-.canvasHoverToolbarGrid button[draggable="true"]:active {
-  cursor: grabbing;
-}
-
-.canvasHoverToolbarGrid button:hover:not(:disabled),
-.canvasHoverToolbarHeader button:hover {
-  border-color: var(--color-black);
-  background: var(--color-surface-muted);
-  box-shadow: var(--shadow-whisper);
-  transform: translateY(-1px);
-}
-
-.canvasHoverToolbarGrid button:disabled {
-  cursor: not-allowed;
-  opacity: .48;
-  background: var(--color-panel);
-}
-
-.canvasHoverToolbarGrid button > span:last-child {
-  overflow: hidden;
-  color: var(--color-black);
-  font-size: 13px;
-  font-weight: 900;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .canvasCard {
   position: relative;
   grid-area: canvas;
@@ -2645,7 +2460,12 @@ pre {
   background: rgba(248,250,252,.72);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.9);
   pointer-events: none;
-  transition: border-color .18s ease, background .18s ease;
+  transition: border-color .18s ease, background .18s ease, box-shadow .18s ease, opacity .18s ease;
+}
+.workflowStageColumn.stageDragging { opacity: .5; border-style: dashed; }
+.workflowStageColumn.stageDropTarget {
+  border-color: var(--color-black);
+  box-shadow: inset 0 0 0 1px rgba(15,23,42,.18);
 }
 .workflowStageColumn.run-running { border-color: rgba(37,99,235,.5); background: rgba(239,246,255,.68); }
 .workflowStageColumn.run-succeeded { border-color: rgba(22,163,74,.4); background: rgba(240,253,244,.62); }
@@ -2661,6 +2481,7 @@ pre {
   padding: 10px 10px 10px 16px;
   background: rgba(255,255,255,.88);
   pointer-events: auto;
+  overflow: hidden;
 }
 .workflowStageHeading {
   display: flex;
@@ -2683,17 +2504,35 @@ pre {
   font-size: 11px;
   font-weight: 900;
 }
+/* 阶段顶部整体可拖动排序，输入框和按钮保持各自的交互光标。 */
+.workflowStageHeader.draggable {
+  cursor: grab;
+  user-select: none;
+}
+.workflowStageHeader.draggable:active { cursor: grabbing; }
+.workflowStageHeader.draggable input { cursor: text; user-select: text; }
+.workflowStageHeader.draggable select,
+.workflowStageHeader.draggable button { cursor: pointer; }
 .workflowStageName,
 .workflowStageNameInput {
   flex: 1 1 auto;
-  min-width: 0;
+  min-width: 7em;
   color: var(--color-black);
   font-size: 14px;
   font-weight: 900;
   letter-spacing: 0;
   line-height: 1.3;
 }
+.workflowStageName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .workflowStageNameInput {
+  min-width: calc(7em + 16px);
+}
+/* 全局 input 规则的伪类权重更高，这里用元素选择器加回来，避免紧凑输入框被拉成通用表单尺寸。 */
+.workflowStageHeader input.workflowStageNameInput {
   width: 100%;
   height: 24px;
   padding: 2px 5px;
@@ -2702,8 +2541,8 @@ pre {
   border-radius: 6px;
   background: transparent;
 }
-.workflowStageNameInput:hover,
-.workflowStageNameInput:focus {
+.workflowStageHeader input.workflowStageNameInput:hover,
+.workflowStageHeader input.workflowStageNameInput:focus {
   border-color: var(--color-border);
   background: var(--color-surface);
   outline: none;
@@ -2726,8 +2565,8 @@ pre {
   justify-content: flex-end;
   gap: 4px;
 }
-.workflowStageModeSelect,
-.workflowStageConcurrency {
+.workflowStageHeader .workflowStageModeSelect,
+.workflowStageHeader input.workflowStageConcurrency {
   width: auto;
   height: 26px;
   min-height: 26px;
@@ -2741,7 +2580,7 @@ pre {
   line-height: 1;
 }
 .workflowStageModeSelect { flex: 0 0 auto; cursor: pointer; }
-.workflowStageConcurrency { width: 58px; }
+.workflowStageHeader input.workflowStageConcurrency { width: 58px; }
 .workflowStageModeSelect:disabled,
 .workflowStageConcurrency:disabled { cursor: not-allowed; opacity: .55; }
 .workflowStageWarning {
@@ -2797,23 +2636,30 @@ pre {
 .workflowStageIconButton.accent { color: var(--color-link); }
 .workflowStageIconButton.danger { color: var(--color-danger, #b91c1c); }
 .workflowStageIconButton:disabled { cursor: not-allowed; opacity: .4; }
-.workflowStageBatchBar {
+/* 多选后的批量操作条固定在画布顶部（分类图例下方），不挤占阶段头部 */
+.canvasSelectionBar {
+  position: absolute;
+  top: 62px;
+  left: 18px;
+  z-index: 8;
   display: flex;
-  min-width: 0;
-  flex: 0 0 auto;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  max-width: calc(100% - 36px);
   border: 1px solid rgba(37,99,235,.35);
-  border-radius: 9px;
-  padding: 3px 4px 3px 8px;
+  border-radius: 12px;
+  padding: 6px 6px 6px 12px;
   color: #1d4ed8;
-  background: rgba(239,246,255,.96);
-  font-size: 11px;
+  background: rgba(239,246,255,.97);
+  box-shadow: var(--shadow-standard);
+  font-size: 12px;
   font-weight: 800;
-  white-space: nowrap;
   pointer-events: auto;
 }
-.workflowStageBatchBar button { height: 24px; min-height: 24px; padding: 0 6px; font-size: 11px; }
+.canvasSelectionBarCount { white-space: nowrap; }
+.canvasSelectionBar button { height: 28px; min-height: 28px; padding: 0 10px; font-size: 12px; }
+.canvasSelectionBar .workflowStageBatchMenu { min-width: 148px; }
 .workflowStageBatchMenuWrap { position: relative; display: inline-flex; }
 .workflowStageBatchMenu {
   position: absolute;
@@ -3362,6 +3208,14 @@ pre {
   50% { box-shadow: 0 0 0 5px rgba(13,116,206,.08), rgba(15,23,42,.08) 0 10px 24px; }
 }
 
+/* 运行日志当前查看的节点，在画布上同步高亮，便于来回定位。 */
+.react-flow__node.logFocused .toolNode,
+.react-flow__node.logFocused .conditionNode,
+.react-flow__node.logFocused .controlNode {
+  outline: 2px solid var(--color-link);
+  outline-offset: 3px;
+}
+
 .conditionBranchRow.matched {
   border-color: var(--color-success-border);
   background: var(--color-success-bg);
@@ -3438,44 +3292,20 @@ pre {
   opacity: .58;
 }
 
-.quickNodeActions {
-  position: absolute;
-  top: calc(50% - 34px);
-  right: -14px;
-  z-index: 16;
+.react-flow__node .react-flow__handle {
+  transition: opacity .15s ease, box-shadow .15s ease, transform .15s ease, background .15s ease;
 }
-
-.quickNodeActionsTrigger {
-  display: grid;
-  width: 25px;
-  height: 25px;
-  place-items: center;
-  border: 1px solid rgba(37,71,208,.28);
-  border-radius: var(--radius-pill);
-  padding: 0;
-  color: var(--color-focus);
-  background: rgba(255,255,255,.96);
-  box-shadow: 0 8px 18px rgba(15,23,42,.12);
-  cursor: pointer;
-  font-size: 17px;
-  font-weight: 900;
-  line-height: 1;
-  transition: border-color .15s ease, background .15s ease, color .15s ease, transform .15s ease;
+/* 连线手柄只在选中节点时出现，平时保持画布干净。 */
+.react-flow__node:not(.selected) .react-flow__handle {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
-
-.quickNodeActionsTrigger:hover,
-.quickNodeActionsTrigger:focus-visible,
-.quickNodeActions:hover,
-.quickNodeActions:focus-visible {
-  border-color: var(--color-focus);
-  outline: none;
-}
-
-.quickNodeActionsTrigger:hover,
-.quickNodeActionsTrigger:focus-visible {
-  color: var(--color-surface);
-  background: var(--color-focus);
-  transform: translateY(-1px) scale(1.04);
+/* 拖线过程中临时显示所有端点，方便确认落点。 */
+.react-flow__renderer:has(.react-flow__handle.connectingfrom) .react-flow__node .react-flow__handle {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .react-flow__handle {
@@ -3611,27 +3441,124 @@ pre {
   font-weight: 900;
 }
 
-.toolPluginPicker {
+.toolPickerGroups { display: grid; gap: 10px; }
+.toolPickerGroup {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) auto;
-  align-items: end;
-  gap: 10px;
+  gap: 8px;
+  border: 1px solid var(--color-border);
+  border-left: 4px solid #2563eb;
+  border-radius: 12px;
+  padding: 10px;
+  background: var(--color-panel);
 }
-
-.toolPluginPicker label { display: grid; min-width: 0; gap: 6px; }
-.toolPluginPicker label > span { color: var(--color-muted); font-size: 11px; font-weight: 900; }
-.toolPluginPicker select { width: 100%; min-height: 40px; }
-.toolPluginPicker button { min-height: 40px; white-space: nowrap; }
-.toolPluginPickerHint {
-  grid-column: 1 / -1;
+.toolPickerGroup.collapsed { padding-top: 8px; padding-bottom: 8px; }
+/* 收起分组悬停时弹出工具名列表，不展开列表、不滚动 */
+.toolPickerGroup.previewing { border-color: var(--color-black); }
+.toolPickerHoverCard {
+  position: fixed;
+  z-index: 40;
+  display: grid;
+  width: 240px;
+  gap: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  color: var(--color-text);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-standard);
+  pointer-events: none;
+  animation: toolPickerPreviewIn .12s ease-out;
+}
+.toolPickerHoverCardHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 6px;
+}
+.toolPickerHoverCardHead strong { color: var(--color-black); font-size: 12px; font-weight: 900; }
+.toolPickerHoverCardHead span { color: var(--color-muted); font-size: 11px; font-weight: 800; }
+.toolPickerHoverCard ul { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.toolPickerHoverCard li {
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@keyframes toolPickerPreviewIn {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+.toolPickerGroupHead {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.toolPickerGroupHead:hover > span { text-decoration: underline; }
+.toolPickerGroupHead > span { color: var(--color-black); font-size: 12px; font-weight: 900; }
+.toolPickerGroupHead em {
+  margin-left: auto;
+  color: var(--color-muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+}
+.toolPickerList {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding-right: 2px;
+}
+.nodePickerItem.tool {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 9px;
+  padding: 9px 11px;
+  background: var(--color-surface);
+}
+.toolPickerMeta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+.toolPickerMeta code {
+  flex: 0 0 auto;
+  color: var(--color-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 700;
+}
+.toolPickerMeta span {
   overflow: hidden;
   color: var(--color-muted);
   font-size: 11px;
   font-weight: 800;
-  line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.toolPickerAddBadge {
+  align-self: center;
+  border-radius: var(--radius-pill);
+  padding: 3px 8px;
+  color: var(--color-muted);
+  background: var(--color-panel);
+  font-size: 10px;
+  font-weight: 900;
+  white-space: nowrap;
+  transition: color .15s ease, background .15s ease;
+}
+.nodePickerItem.tool:hover .toolPickerAddBadge { color: var(--color-surface); background: var(--color-black); }
 .nodePickerList {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3748,15 +3675,13 @@ pre {
   white-space: nowrap;
 }
 .nodePickerItem .paletteShape { width: 28px; height: 28px; font-size: 13px; }
-.nodePickerItem .paletteShape.tool { height: 22px; }
+.nodePickerItem .paletteShape.tool { height: 28px; }
+/* 菱形旋转后外接框是基础尺寸的 1.41 倍，缩小基础尺寸让视觉大小与其它图标一致 */
+.nodePickerItem .paletteShape.decision,
+.nodePickerItem .paletteShape.gateway,
+.nodePickerItem .paletteShape.condition,
+.nodePickerItem .paletteShape.loop { width: 20px; height: 20px; }
 
-.nodePickerPlannedTag.legacy {
-  border-style: solid;
-  border-color: var(--color-border);
-  color: var(--color-muted);
-  background: var(--color-bg);
-}
-.nodePickerItem.legacy { background: var(--color-panel); }
 .nodePickerItem small.nodePickerUnavailableReason {
   overflow: visible;
   color: var(--color-warning-text);
@@ -3765,7 +3690,6 @@ pre {
   text-overflow: clip;
   white-space: normal;
 }
-.nodePickerItem.legacy small.nodePickerUnavailableReason { color: var(--color-muted); }
 
 .nodePickerMissing { display: grid; gap: 8px; }
 .nodePickerMissingList {
@@ -3822,6 +3746,29 @@ pre {
   transition: background .15s ease, border-color .15s ease, box-shadow .15s ease, transform .15s ease;
 }
 .canvasDock button:hover { border-color: var(--color-black); background: var(--color-bg); box-shadow: var(--shadow-whisper); transform: translateY(-1px); }
+.canvasDock button.canvasDockAdd {
+  display: inline-flex;
+  width: auto;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  color: var(--color-surface);
+  background: var(--color-black);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.canvasDock button.canvasDockAdd:hover { color: var(--color-surface); background: var(--color-black); }
+.canvasDock button.canvasDockAdd span:first-child {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  color: var(--color-black);
+  background: var(--color-surface);
+  font-size: 13px;
+}
 
 /* 分类高亮条：点击某一类时画布上其它分类整体淡化，不改变节点数据 */
 .canvasCategoryLegend {
@@ -3902,6 +3849,144 @@ pre {
   margin: 0;
   padding: 24px 26px 18px;
   border-bottom: 1px solid var(--color-border);
+}
+
+/* 全局变量弹窗：路径/统计条 + 自适应高度的等宽编辑器 + 固定底部操作区 */
+.globalEnvModal {
+  width: min(880px, 100%);
+  height: min(720px, calc(100vh - 48px));
+}
+
+.globalEnvPanel {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.globalEnvBody {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 26px 14px;
+  overflow: hidden;
+}
+
+.globalEnvMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.globalEnvMeta code {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  color: var(--color-text);
+  background: var(--color-panel);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.globalEnvCount { color: var(--color-muted); font-size: 12px; font-weight: 800; }
+
+.globalEnvState {
+  margin-left: auto;
+  border: 1px solid var(--color-success-border);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+  color: var(--color-success);
+  background: var(--color-success-bg);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.globalEnvState.dirty {
+  border-color: var(--color-warning-border);
+  color: var(--color-warning-text);
+  background: var(--color-warning-bg);
+}
+
+.globalEnvEditor {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-panel);
+}
+
+.globalEnvEditorHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  border-bottom: 1px solid var(--color-border);
+  padding: 10px 14px;
+}
+
+.globalEnvEditorHead strong { color: var(--color-black); font-size: 13px; font-weight: 900; }
+.globalEnvEditorHead span { color: var(--color-muted); font-size: 11px; font-weight: 600; line-height: 1.4; }
+
+.globalEnvEditorSurface {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  padding: 6px;
+}
+
+.globalEnvPanel .globalEnvTextarea {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 12px 14px;
+  resize: none;
+  color: var(--color-text);
+  background: var(--color-surface);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+}
+
+.globalEnvPanel .globalEnvTextarea:focus {
+  border: 0;
+  box-shadow: inset 0 0 0 2px rgba(37,71,208,.35);
+}
+
+.globalEnvFooter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 26px;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.globalEnvStatus { flex: 1; min-width: 0; color: var(--color-muted); font-size: 12px; font-weight: 700; line-height: 1.4; }
+.globalEnvStatus.ok { color: var(--color-success); }
+.globalEnvStatus.error { color: var(--color-danger); }
+.globalEnvActions { display: flex; gap: 10px; }
+.globalEnvActions button { min-width: 112px; }
+
+@media (max-width: 720px) {
+  .globalEnvBody { padding: 14px 16px 12px; }
+  .globalEnvFooter { padding: 12px 16px; }
+  .globalEnvActions { width: 100%; }
+  .globalEnvActions button { flex: 1; }
 }
 
 .platformSettingsPanel {
@@ -4095,6 +4180,7 @@ pre {
 }
 
 .settingsStatus.success { color: var(--color-success); }
+.settingsStatus.error { color: var(--color-danger); font-weight: 700; }
 .settingsStatus.dirty { color: var(--color-warning-text); font-weight: 700; }
 .settingsCard .runCleanupBox .inlineNumberField input { width: 96px; }
 .settingsFooterActions { display: flex; flex-wrap: wrap; gap: 10px; }
@@ -4636,20 +4722,11 @@ fieldset legend {
     right: 10px;
     max-width: calc(100% - 20px);
   }
-  .canvasHoverToolbar {
-    bottom: 10px;
-  }
-  .canvasHoverToolbarPanel {
-    width: min(360px, calc(100vw - 34px));
-    max-height: min(420px, calc(100vh - 160px));
-  }
-  .canvasHoverToolbarGrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
   .nodePickerPanel {
     width: min(360px, calc(100% - 24px));
   }
-  .nodePickerList {
+  .nodePickerList,
+  .toolPickerList {
     grid-template-columns: 1fr;
   }
 }
@@ -6063,6 +6140,77 @@ fieldset legend {
   background: var(--color-surface);
 }
 
+/* 运行抽屉里把“要填的入参”和“只读的执行设置/摘要”视觉分组 */
+.workflowRunInputGroup {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(13,116,206,.32);
+  border-radius: 14px;
+  padding: 12px;
+  background: #f8fbff;
+}
+
+.workflowRunInfoGroup {
+  display: grid;
+  gap: 10px;
+  border: 1px dashed var(--color-border);
+  border-radius: 14px;
+  padding: 12px;
+  background: var(--color-panel);
+}
+
+.workflowRunSettingGroup {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  padding: 12px;
+  background: var(--color-surface-muted);
+}
+
+.workflowRunInputGroupHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+}
+
+.workflowRunInputGroupHeader strong { color: var(--color-black); font-size: 14px; font-weight: 900; }
+
+.workflowRunInputGroupTag {
+  border: 1px solid rgba(13,116,206,.35);
+  border-radius: var(--radius-pill);
+  padding: 2px 9px;
+  color: var(--color-link);
+  background: var(--color-surface);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.workflowRunInputGroupTag.muted {
+  border-color: var(--color-border);
+  color: var(--color-muted);
+}
+
+.workflowRunInputGroupTag.neutral {
+  border-color: var(--color-border);
+  color: var(--color-text);
+  background: var(--color-panel);
+}
+
+.workflowRunInputGroup .workflowRunParamSection,
+.workflowRunSettingGroup .workflowRunParamSection,
+.workflowRunInfoGroup .workflowRunParamSection {
+  border-color: rgba(148,163,184,.36);
+  background: var(--color-surface);
+}
+
+.workflowRunInfoGroup .workflowRunParamSection { background: var(--color-panel); }
+
+.canvasEmptyCalloutActions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.canvasEmptyCalloutActions button { min-width: 110px; }
+
 .workflowRunParamSection > strong,
 .workflowRunParamGroupHeader strong {
   color: var(--color-black);
@@ -6253,11 +6401,8 @@ fieldset legend {
     width: min(360px, calc(100% - 24px));
   }
 
-  .nodePickerList {
-    grid-template-columns: 1fr;
-  }
-
-  .toolPluginPicker {
+  .nodePickerList,
+  .toolPickerList {
     grid-template-columns: 1fr;
   }
 

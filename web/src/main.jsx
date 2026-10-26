@@ -2040,11 +2040,11 @@ function GlobalEnvModal({onClose, onSaved}) {
 
   return (
     <div className="modalBackdrop" onMouseDown={event => { if (event.target === event.currentTarget) requestClose() }}>
-      <div className="modal platformSettingsModal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="global-env-title">
+      <div className="modal platformSettingsModal globalEnvModal" ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="global-env-title">
         <div className="modalHeader">
           <div>
             <h3 id="global-env-title">全局变量</h3>
-            <p>配置工具和插件脚本运行时可引用的全局变量。变量会直接导出到工具进程环境（本地与远程执行都生效），脚本也可通过 $OPS_GLOBAL_ENV_FILE 读取完整文件。</p>
+            <p>配置工具和插件脚本运行时可引用的环境变量，保存后立即重新加载。</p>
           </div>
           <button className="modalClose" type="button" onClick={requestClose} aria-label="关闭">×</button>
         </div>
@@ -2062,6 +2062,7 @@ const SETTINGS_SECTIONS = [
   {id: 'paths', label: '路径与清理', hint: '运行目录、日志与旧记录'},
   {id: 'versions', label: '版本快照', hint: '保存、载入与回滚配置'},
   {id: 'ui', label: '界面', hint: '日志终端显示'},
+  {id: 'upload', label: '上传目录', hint: '上传节点可写入的绝对目录'},
   {id: 'host', label: '宿主配置白名单', hint: '允许读取的宿主目录'}
 ]
 
@@ -2071,6 +2072,7 @@ function GlobalConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('正在加载配置...')
+  const [saveError, setSaveError] = useState('')
   const [editMode, setEditMode] = useState('form') // 'form' | 'yaml'
   const [activeSection, setActiveSection] = useState('app')
   const [dirty, setDirty] = useState(false)
@@ -2101,7 +2103,8 @@ function GlobalConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) 
     pathsRuns: 'runs',
     pathsLogs: 'runs/logs',
     uiLogFontSize: 14,
-    hostConfigAllowedDirs: ''
+    hostConfigAllowedDirs: '',
+    uploadAllowedDirs: ''
   })
 
   useEffect(() => {
@@ -2132,13 +2135,15 @@ function GlobalConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) 
             pathsRuns: config.paths?.runs || 'runs',
             pathsLogs: config.paths?.logs || 'runs/logs',
             uiLogFontSize: normalizeLogFontSize(config.ui?.log_font_size),
-            hostConfigAllowedDirs: (config.host_config_files?.allowed_dirs || []).join('\n')
+            hostConfigAllowedDirs: (config.host_config_files?.allowed_dirs || []).join('\n'),
+            uploadAllowedDirs: (config.uploads?.allowed_dirs || []).join('\n')
           })
         } catch (parseErr) {
           console.warn('YAML 解析失败，使用默认表单值', parseErr)
         }
 
         setMessage('配置已加载')
+        setSaveError('')
         setDirty(false)
       } catch (err) {
         if (!cancelled) setMessage(readableAPIError(err, '加载配置失败'))
@@ -2263,6 +2268,7 @@ function GlobalConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) 
 
   function updateFormField(field, value) {
     setDirty(true)
+    setSaveError('')
     setFormData(prev => ({...prev, [field]: value}))
   }
 
@@ -2311,6 +2317,10 @@ function GlobalConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) 
       host_config_files: {
         ...(base.host_config_files || {}),
         allowed_dirs: formLines(formData.hostConfigAllowedDirs)
+      },
+      uploads: {
+        ...(base.uploads || {}),
+        allowed_dirs: formLines(formData.uploadAllowedDirs)
       }
     }
   }
@@ -2338,7 +2348,8 @@ function GlobalConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) 
         pathsRuns: config.paths?.runs || 'runs',
         pathsLogs: config.paths?.logs || 'runs/logs',
         uiLogFontSize: normalizeLogFontSize(config.ui?.log_font_size),
-        hostConfigAllowedDirs: (config.host_config_files?.allowed_dirs || []).join('\n')
+        hostConfigAllowedDirs: (config.host_config_files?.allowed_dirs || []).join('\n'),
+        uploadAllowedDirs: (config.uploads?.allowed_dirs || []).join('\n')
       })
       setEditMode('form')
     } catch (err) {
@@ -2349,6 +2360,7 @@ function GlobalConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) 
   async function saveConfig() {
     setSaving(true)
     setMessage('正在保存...')
+    setSaveError('')
     try {
       let yamlToSave = content
       if (editMode === 'form') {
@@ -2360,7 +2372,9 @@ function GlobalConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) 
       setDirty(false)
       await onSaved(body)
     } catch (err) {
-      setMessage(readableAPIError(err, '保存失败'))
+      const detail = readableAPIError(err, '保存失败')
+      setSaveError(detail)
+      setMessage(detail)
     } finally {
       setSaving(false)
     }
@@ -2389,10 +2403,13 @@ function GlobalConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) 
   }
 
   const dirtyNotice = dirty && !saving && !loading
-  const statusText = loading ? '正在加载配置...' : dirtyNotice ? '有未保存的修改，保存后生效' : message
-  const statusClass = dirtyNotice
-    ? 'settingsStatus dirty'
-    : message.startsWith('设置已保存') ? 'settingsStatus success' : 'settingsStatus'
+  // 保存失败时必须优先展示错误，否则会被“有未保存的修改”覆盖，看起来像点击没反应。
+  const statusText = loading ? '正在加载配置...' : saveError ? saveError : dirtyNotice ? '有未保存的修改，保存后生效' : message
+  const statusClass = saveError
+    ? 'settingsStatus error'
+    : dirtyNotice
+      ? 'settingsStatus dirty'
+      : message.startsWith('设置已保存') ? 'settingsStatus success' : 'settingsStatus'
 
   const body = (
     <div className={editMode === 'form' ? 'settingsLayout' : 'settingsLayout settingsLayoutSolo'}>
@@ -2421,7 +2438,7 @@ function GlobalConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) 
             </div>
             <label className="settingsField settingsWide">
               <span>配置内容（YAML 格式）</span>
-              <textarea className="settingsYamlEditor" value={content} disabled={loading || saving} placeholder="app:&#10;  name: 运维控制台&#10;server:&#10;  port: 8080" onChange={event => { setDirty(true); setContent(event.target.value) }} />
+              <textarea className="settingsYamlEditor" value={content} disabled={loading || saving} placeholder="app:&#10;  name: 运维控制台&#10;server:&#10;  port: 8080" onChange={event => { setDirty(true); setSaveError(''); setContent(event.target.value) }} />
             </label>
           </section>
         )}
@@ -2446,7 +2463,7 @@ function GlobalConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) 
           ) : (
             <button className="secondary" disabled={loading || saving} onClick={switchToForm}>返回表单</button>
           )}
-          <button className="primary" disabled={loading || saving} onClick={saveConfig}>保存设置</button>
+          <button className="primary" disabled={loading || saving} onClick={saveConfig}>{saving ? '正在保存...' : '保存设置'}</button>
         </div>
       </div>
     </>
@@ -2664,6 +2681,22 @@ function GlobalConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false}) 
             </div>
           </section>
         )
+      case 'upload':
+        return (
+          <section className="settingsCard">
+            <div className="settingsCardHead">
+              <h4>上传目录白名单</h4>
+              <p>上传节点的“目标目录”可以填写这里的绝对目录，文件会直接写入该目录；未列出的绝对路径会被拒绝。</p>
+            </div>
+            <div className="settingsGrid">
+              <label className="settingsField settingsWide">
+                <span>允许的绝对目录（每行一个）</span>
+                <textarea className="settingsTextarea settingsTextareaHost" value={formData.uploadAllowedDirs} disabled={loading || saving} placeholder="/opt/app/release&#10;D:\deploy\packages" onChange={e => updateFormField('uploadAllowedDirs', e.target.value)} />
+              </label>
+              <p className="settingsHint settingsWide">留空时上传节点只允许写入 runs/uploads 下的相对子目录；白名单内的子目录同样允许。</p>
+            </div>
+          </section>
+        )
       case 'host':
         return (
           <section className="settingsCard">
@@ -2714,7 +2747,9 @@ function GlobalEnvConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('正在读取全局环境配置...')
+  const [messageTone, setMessageTone] = useState('loading')
   const dirty = content !== savedContent
+  const envStats = useMemo(() => summarizeEnvContent(content), [content])
 
   useEffect(() => {
     onDirtyChange?.(dirty)
@@ -2725,6 +2760,7 @@ function GlobalEnvConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false
     async function loadConfig() {
       setLoading(true)
       setMessage('正在读取全局环境配置...')
+      setMessageTone('loading')
       try {
         const body = await fetchJSON('/api/config/global-env')
         if (cancelled) return
@@ -2733,8 +2769,12 @@ function GlobalEnvConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false
         setSavedContent(loadedContent)
         setPath(body.data?.path || 'configs/global-env.conf')
         setMessage('已加载全局环境配置文件。')
+        setMessageTone('ok')
       } catch (err) {
-        if (!cancelled) setMessage(readableAPIError(err, '读取全局环境配置失败。'))
+        if (!cancelled) {
+          setMessage(readableAPIError(err, '读取全局环境配置失败。'))
+          setMessageTone('error')
+        }
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -2746,45 +2786,72 @@ function GlobalEnvConfigPanel({onBack, onSaved, onDirtyChange, modalMode = false
   async function saveConfig() {
     setSaving(true)
     setMessage('正在保存全局环境配置...')
+    setMessageTone('loading')
     try {
       const body = await putJSON('/api/config/global-env', {content})
       setSavedContent(content)
       setMessage('全局环境配置已保存并重新加载运行时配置。')
+      setMessageTone('ok')
       await onSaved(body)
     } catch (err) {
       setMessage(readableAPIError(err, '保存全局环境配置失败。'))
+      setMessageTone('error')
     } finally {
       setSaving(false)
     }
   }
 
   return (
-    <div className={modalMode ? 'platformSettingsPanel' : 'grid'}>
-      <section className={modalMode ? 'platformSettingsContent' : 'card pluginConfigCard'}>
-        {!modalMode && (
-          <div className="cardHeader">
-            <div>
-              <h3>全局变量</h3>
-              <p>{path} - 存储工具和插件脚本运行时可引用的全局变量</p>
-            </div>
+    <div className="globalEnvPanel">
+      <section className="globalEnvBody">
+        <div className="globalEnvMeta">
+          <code title={path || 'configs/global-env.conf'}>{path || 'configs/global-env.conf'}</code>
+          <span className="globalEnvCount">{envStats.variables} 个变量 · {envStats.comments} 行注释</span>
+          <span className={dirty ? 'globalEnvState dirty' : 'globalEnvState'}>{dirty ? '有未保存修改' : '已保存'}</span>
+        </div>
+        <div className="globalEnvEditor">
+          <div className="globalEnvEditorHead">
+            <strong>.env 文件内容</strong>
+            <span>每行一个 KEY=value，# 开头为注释；保存后变量会注入工具进程环境。</span>
           </div>
-        )}
-        <div className="pluginConfigEditor">
-          <div className="empty small">编辑全局变量配置文件（.env 格式），保存后会重新加载运行时配置。保存的变量会导出到工具进程环境，插件脚本也可通过 $OPS_GLOBAL_ENV_FILE 环境变量访问此文件。</div>
-          <label>
-            <span>.env 格式内容</span>
-            <textarea value={content} disabled={loading || saving} placeholder="# 数据库配置&#10;DB_HOST=localhost&#10;DB_PORT=5432&#10;&#10;# API 配置&#10;API_BASE_URL=https://api.example.com&#10;&#10;# 环境标识&#10;ENVIRONMENT=dev" onChange={event => setContent(event.target.value)} />
-          </label>
-          {dirty && !saving && <div className="configFileSaveHint">有未保存的修改，保存后才会写入。</div>}
-          <div className="buttonRow">
-            <button className="primary" disabled={loading || saving} onClick={saveConfig}>保存全局变量</button>
-            <button className="secondary" disabled={saving} onClick={onBack}>{modalMode ? '关闭' : '返回列表'}</button>
+          <div className="globalEnvEditorSurface">
+            <textarea
+              className="globalEnvTextarea"
+              value={content}
+              disabled={loading || saving}
+              spellCheck={false}
+              wrap="off"
+              aria-label="全局变量 .env 文件内容"
+              placeholder="# 数据库配置&#10;DB_HOST=localhost&#10;DB_PORT=5432&#10;&#10;# API 配置&#10;API_BASE_URL=https://api.example.com&#10;&#10;# 环境标识&#10;ENVIRONMENT=dev"
+              onChange={event => setContent(event.target.value)}
+            />
           </div>
-          <pre className="modalResult">{message}</pre>
         </div>
       </section>
+      <div className="globalEnvFooter">
+        <div className={`globalEnvStatus ${messageTone}`} role="status">{message}</div>
+        <div className="globalEnvActions">
+          <button type="button" className="secondary" disabled={saving} onClick={onBack}>{modalMode ? '关闭' : '返回列表'}</button>
+          <button type="button" className="primary" disabled={loading || saving || !dirty} onClick={saveConfig}>{saving ? '正在保存...' : '保存全局变量'}</button>
+        </div>
+      </div>
     </div>
   )
+}
+
+function summarizeEnvContent(content) {
+  let variables = 0
+  let comments = 0
+  String(content || '').split(/\r?\n/).forEach(line => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    if (trimmed.startsWith('#')) {
+      comments += 1
+      return
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*\s*=/.test(trimmed)) variables += 1
+  })
+  return {variables, comments}
 }
 
 function PluginConfigPanel({plugin, onBack, onSaved}) {

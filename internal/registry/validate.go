@@ -24,12 +24,44 @@ func (r *Registry) Validate() error {
 	if _, err := normalizeHostAllowedDirs(r.Root); err != nil {
 		return err
 	}
+	if err := validateUploadAllowedDirs(r.Root); err != nil {
+		return err
+	}
 	for id, wf := range r.Workflows {
 		if err := r.ValidateWorkflow(wf.Config); err != nil {
 			return fmt.Errorf("工作流 %s: %w", id, err)
 		}
 	}
 	return nil
+}
+
+// validateUploadAllowedDirs 要求上传白名单每项都是绝对目录，避免相对路径被误解为 uploads 子目录。
+func validateUploadAllowedDirs(root *config.RootConfig) error {
+	if root == nil {
+		return nil
+	}
+	for index, dir := range root.Uploads.AllowedDirs {
+		trimmed := strings.TrimSpace(dir)
+		if trimmed == "" {
+			return fmt.Errorf("uploads.allowed_dirs 第 %d 项不能为空", index+1)
+		}
+		normalized := strings.ReplaceAll(trimmed, "\\", "/")
+		if !filepath.IsAbs(filepath.FromSlash(normalized)) && !(len(normalized) >= 2 && normalized[1] == ':') {
+			return fmt.Errorf("uploads.allowed_dirs 第 %d 项必须是当前平台可识别的绝对目录", index+1)
+		}
+		if strings.Contains(normalized, "://") {
+			return fmt.Errorf("uploads.allowed_dirs 第 %d 项不能是 URL", index+1)
+		}
+	}
+	return nil
+}
+
+// uploadAllowedDirs 返回平台设置里允许上传写入的绝对目录白名单。
+func (r *Registry) uploadAllowedDirs() []string {
+	if r == nil || r.Root == nil {
+		return nil
+	}
+	return r.Root.Uploads.AllowedDirs
 }
 
 func (r *Registry) ValidateWorkflow(wf *config.WorkflowConfig) error {
@@ -162,7 +194,7 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		if hasExtractConfig(node.Extract) {
 			return fmt.Errorf("上传节点 %s 不能配置 extract_config", node.ID)
 		}
-		if _, err := config.NormalizeUploadTargetDir(node.Upload.TargetDir); err != nil {
+		if _, err := config.NormalizeUploadTargetDirWithAllowed(node.Upload.TargetDir, r.uploadAllowedDirs()); err != nil {
 			return fmt.Errorf("上传节点 %s 的 upload.target_dir 无效: %w", node.ID, err)
 		}
 		seenExports := map[string]bool{}

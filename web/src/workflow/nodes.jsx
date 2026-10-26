@@ -131,7 +131,6 @@ function ToolNode({id, data, selected}) {
         {data.tool && <span className="nodeHoverMeta">{data.tool}</span>}
       </div>
       <Handle type="source" position={Position.Right} />
-      <QuickAddDownstreamButton id={id} onAddDownstream={data.onAddDownstream} />
     </div>
   )
 }
@@ -268,7 +267,6 @@ function ControlNode({id, data, selected}) {
         {data.hostLabel && <small className="nodeHostLine">{data.hostLabel}</small>}
       </div>
       <Handle type="source" position={Position.Right} />
-      <QuickAddDownstreamButton id={id} onAddDownstream={data.onAddDownstream} />
     </div>
   )
 }
@@ -305,26 +303,6 @@ function NodeRerunButton({id, onRerun, disabled}) {
       }}
     >
       重跑
-    </button>
-  )
-}
-
-function QuickAddDownstreamButton({id, onAddDownstream}) {
-  if (!onAddDownstream) return null
-  return (
-    <button
-      type="button"
-      className="quickNodeActions quickNodeActionsTrigger nodrag nopan"
-      title="添加下游节点并自动连接"
-      aria-label="添加下游节点"
-      onPointerDown={event => event.stopPropagation()}
-      onMouseDown={event => event.stopPropagation()}
-      onClick={event => {
-        event.stopPropagation()
-        onAddDownstream(id, event)
-      }}
-    >
-      +
     </button>
   )
 }

@@ -330,6 +330,14 @@ async function clickButtonByText(host, text) {
   })
 }
 
+async function clickAddNodeButton(host) {
+  const button = host.querySelector('.canvasDockAdd')
+  if (!button) throw new Error('未找到画布添加节点按钮')
+  await act(async () => {
+    button.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+  })
+}
+
 describe('WorkflowEditor 阶段批量移动', () => {
   const workflow = {
     id: 'batch-flow',
@@ -396,22 +404,53 @@ describe('WorkflowEditor 阶段批量移动', () => {
     expect(nodesIn('准备')).toEqual([])
   })
 
-  it('选中节点后在阶段头部弹出批量入口，并可从下拉选择目标阶段', async () => {
+  it('选中节点后从画布顶部批量条选择目标阶段', async () => {
     const host = await mountEditorWithHosts({hosts: [], workflow})
     await selectNodes(host, ['deploy'])
-    const prepareColumn = stageColumn(host, '准备')
-    const toggle = prepareColumn.querySelector('.workflowStageBatchTarget')
+    const bar = host.querySelector('.canvasSelectionBar')
+    expect(bar?.textContent).toContain('已选 1 个步骤')
+    const toggle = bar.querySelector('.workflowStageBatchTarget')
     expect(toggle).toBeTruthy()
     await act(async () => {
       toggle.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
     })
-    const item = Array.from(prepareColumn.querySelectorAll('.workflowStageBatchMenu button'))
-      .find(button => button.textContent === '变更')
+    const item = Array.from(bar.querySelectorAll('.workflowStageBatchMenu button'))
+      .find(button => button.textContent === '准备')
     expect(item).toBeTruthy()
     await act(async () => {
       item.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
     })
-    expect(await stageColumn(host, '变更')).toBeTruthy()
+    const deployLeft = parseFloat(host.querySelector('.react-flow__node[data-id="deploy"]')?.style.transform?.match(/translate\(([-\d.]+)px/)?.[1] || '0')
+    const prepareLeft = parseFloat(stageColumn(host, '准备').style.left)
+    const prepareWidth = parseFloat(stageColumn(host, '准备').style.width)
+    expect(deployLeft >= prepareLeft && deployLeft <= prepareLeft + prepareWidth).toBe(true)
+  })
+
+  it('阶段顶部整块都能拖动，输入框和按钮不触发拖拽', async () => {
+    const host = await mountEditorWithHosts({hosts: [], workflow})
+    const headers = Array.from(host.querySelectorAll('.workflowStageHeader'))
+    expect(headers.length).toBe(3)
+    expect(headers.every(header => header.draggable)).toBe(true)
+    expect(stageColumn(host, '准备').querySelector('.workflowStageIndex').draggable).toBe(false)
+
+    const dataTransfer = {effectAllowed: '', dropEffect: '', setData: vi.fn(), getData: () => 'prepare'}
+    const dragEvent = type => {
+      const event = new Event(type, {bubbles: true, cancelable: true})
+      Object.defineProperty(event, 'dataTransfer', {value: dataTransfer})
+      return event
+    }
+
+    const header = stageColumn(host, '准备').querySelector('.workflowStageHeader')
+    await act(async () => { header.dispatchEvent(dragEvent('dragstart')) })
+    expect(stageColumn(host, '准备').className).toContain('stageDragging')
+    expect(dataTransfer.setData).toHaveBeenCalledWith('text/plain', 'prepare')
+
+    await act(async () => { header.dispatchEvent(dragEvent('dragend')) })
+    expect(stageColumn(host, '准备').className).not.toContain('stageDragging')
+
+    const nameInput = header.querySelector('input.workflowStageNameInput')
+    await act(async () => { nameInput.dispatchEvent(dragEvent('dragstart')) })
+    expect(stageColumn(host, '准备').className).not.toContain('stageDragging')
   })
 })
 
@@ -438,6 +477,9 @@ describe('WorkflowEditor 执行机器步骤', () => {
     expect(drawer.textContent).toContain('工作流参数')
     expect(drawer.textContent).toContain('执行机器')
     expect(drawer.textContent).toContain('运行摘要')
+    expect(drawer.querySelector('.workflowRunInputGroup')?.textContent).toContain('工作流参数')
+    expect(drawer.querySelector('.workflowRunSettingGroup')?.textContent).toContain('执行机器')
+    expect(drawer.querySelector('.workflowRunInfoGroup')?.textContent).toContain('运行摘要')
     const options = Array.from(drawer.querySelectorAll('.workflowTargetOption'))
     expect(options.map(option => option.querySelector('strong').textContent)).toEqual(['跟随节点配置', '本机', 'B 机', 'C 机'])
 
@@ -500,6 +542,76 @@ describe('WorkflowEditor 执行机器步骤', () => {
     expect(host.querySelector('button[aria-label="取消当前工作流运行"]').textContent).toBe('启动中...')
 
     await act(async () => { releaseRun(response({id: 'run-2', target: workflow.id, status: 'succeeded'})) })
+  })
+})
+
+describe('WorkflowEditor 节点日志联动', () => {
+  const workflow = {
+    id: 'log-flow',
+    name: '日志联动流程',
+    category: 'docker',
+    parameters: [],
+    nodes: [
+      {id: 'first', name: '第一步', tool: 'demo.hello'},
+      {id: 'second', name: '第二步', tool: 'demo.hello'}
+    ],
+    edges: [{from: 'first', to: 'second'}]
+  }
+  const detail = {
+    record: {
+      id: 'run-log',
+      target: workflow.id,
+      status: 'succeeded',
+      steps: [
+        {id: 'first', type: 'tool', status: 'succeeded'},
+        {id: 'second', type: 'tool', status: 'succeeded'}
+      ]
+    },
+    logs: {
+      items: [
+        {id: 'first', status: 'succeeded', title: '第一步', stdout: 'first-output'},
+        {id: 'second', status: 'succeeded', title: '第二步', stdout: 'second-output'}
+      ]
+    }
+  }
+
+  it('运行结束后点击画布节点直接查看该节点日志，双击再进入配置', async () => {
+    const host = await mountEditorWithHosts({hosts: [], workflow})
+    const response = body => ({ok: true, json: async () => body, text: async () => ''})
+    vi.stubGlobal('fetch', vi.fn(async path => {
+      if (path.includes('/run?')) return response({id: 'run-log', target: workflow.id, status: 'running'})
+      if (path === '/api/runs/run-log') return response({data: detail})
+      return response({})
+    }))
+
+    await clickButtonByAriaLabel(host, '运行工作流')
+    await clickButtonByText(host.querySelector('[aria-label="运行准备"]'), '开始运行')
+
+    const second = host.querySelector('.react-flow__node[data-id="second"]')
+    expect(second).toBeTruthy()
+    await act(async () => { second.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})) })
+
+    expect(host.querySelector('.workflowRunDockNodes button.active')?.textContent).toContain('第二步')
+    expect(host.querySelector('.workflowRunDockDetail').textContent).toContain('second-output')
+    expect(host.querySelector('.workflowRunDockDetail').textContent).not.toContain('first-output')
+    expect(host.querySelector('.react-flow__node[data-id="second"]').className).toContain('logFocused')
+    expect(host.querySelector('.react-flow__node[data-id="first"]').className).not.toContain('logFocused')
+    expect(host.querySelector('[role="dialog"][aria-label="节点配置"]')).toBeNull()
+
+    await act(async () => { second.dispatchEvent(new MouseEvent('dblclick', {bubbles: true, cancelable: true})) })
+    expect(host.querySelector('[role="dialog"][aria-label="节点配置"]')).toBeTruthy()
+  })
+
+  it('没有运行结果时单击只选中节点，双击才打开节点配置', async () => {
+    const host = await mountEditorWithHosts({hosts: [], workflow})
+
+    const second = host.querySelector('.react-flow__node[data-id="second"]')
+    await act(async () => { second.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})) })
+    expect(host.querySelector('[role="dialog"][aria-label="节点配置"]')).toBeNull()
+    expect(host.querySelector('.react-flow__node[data-id="second"]').classList.contains('selected')).toBe(true)
+
+    await act(async () => { second.dispatchEvent(new MouseEvent('dblclick', {bubbles: true, cancelable: true})) })
+    expect(host.querySelector('[role="dialog"][aria-label="节点配置"]')).toBeTruthy()
   })
 })
 
@@ -979,6 +1091,23 @@ describe('WorkflowEditor 导航与设置入口', () => {
     expect(host.querySelector('.react-flow__node[data-id="other"]')).toBeTruthy()
   })
 
+  it('进入工作流管理时画布为空并提示选择工作流', async () => {
+    window.localStorage.setItem('ops.workflowEditor.selectedWorkflow:global', workflow.id)
+    const request = vi.fn(async () => ({ok: true, status: 200, json: async () => ({data: {}}), text: async () => ''}))
+    vi.stubGlobal('fetch', request)
+    const host = await mountEditorWithCatalog({...catalog, tools: [{id: 'demo.hello', name: '问候'}], workflows: [workflow]})
+
+    expect(host.querySelector('.react-flow__node')).toBeNull()
+    expect(host.querySelector('.workflowNameTrigger').textContent).toContain('未命名工作流')
+    const callout = host.querySelector('.canvasEmptyCallout')
+    expect(callout?.textContent).toContain('先选择一个工作流')
+    expect(Array.from(callout.querySelectorAll('button')).map(button => button.textContent)).toEqual(['选择工作流', '新建工作流'])
+    expect(request.mock.calls.some(([path]) => path === `/api/workflows/${workflow.id}`)).toBe(false)
+
+    await act(async () => { callout.querySelector('button').click() })
+    expect(host.querySelector('.workflowNamePopover')).toBeTruthy()
+  })
+
   it.each(['列表选择', '最近标记'])('拒绝从%s放弃未保存修改时保留弹层和当前草稿', async entry => {
     const {host, request} = await mountNavigationWorkflows()
     const saveDialog = await openSaveModal(host)
@@ -999,16 +1128,17 @@ describe('WorkflowEditor 导航与设置入口', () => {
 })
 
 describe('WorkflowEditor 节点选择可用性', () => {
-  it('节点选择面板把并行/合流标为旧流程兼容并说明原因', async () => {
+  it('节点选择面板不再提供并行/合流旧流程节点', async () => {
     const host = await mountEditor()
-    await clickButtonByText(host, '搜索全部')
+    await clickAddNodeButton(host)
     const panel = host.querySelector('.nodePickerPanel')
     expect(panel).toBeTruthy()
-    const legacy = Array.from(panel.querySelectorAll('.nodePickerItem.legacy'))
-    expect(legacy.map(item => item.querySelector('b').textContent)).toEqual(['并行分支', '合流'])
-    expect(legacy.every(item => item.disabled)).toBe(true)
-    expect(legacy[0].textContent).toContain('旧流程兼容')
-    expect(legacy[0].querySelector('.nodePickerUnavailableReason').textContent).toContain('阶段')
+    expect(panel.textContent).not.toContain('旧流程兼容')
+    expect(Array.from(panel.querySelectorAll('.nodePickerCategory.cat-flow .nodePickerItem b')).map(item => item.textContent)).toEqual([
+      '条件分支',
+      '循环',
+      '等待 / 轮询'
+    ])
   })
 
   it('缺少插件依赖的工具在选择面板给出原因和插件管理入口', async () => {
@@ -1020,7 +1150,7 @@ describe('WorkflowEditor 节点选择可用性', () => {
         {id: 'user.flow', name: '用户流程', missing_tools: ['vendor.missing'], dependencies: [{id: 'vendor.off', name: '离线插件', disabled: true}]}
       ]
     }, {openPluginManager})
-    await clickButtonByText(host, '搜索全部')
+    await clickAddNodeButton(host)
     const missing = host.querySelector('.nodePickerMissing')
     expect(missing.textContent).toContain('vendor.missing')
     expect(missing.textContent).toContain('插件未安装或未注册')
@@ -1031,6 +1161,23 @@ describe('WorkflowEditor 节点选择可用性', () => {
     await act(async () => { openPlugins.click() })
     expect(openPluginManager).toHaveBeenCalledTimes(1)
     expect(host.querySelector('.nodePickerPanel')).toBeNull()
+  })
+
+  it('节点上不再提供添加下游节点按钮', async () => {
+    const host = await mountEditorWithHosts({
+      hosts: [],
+      workflow: {
+        id: 'no-downstream',
+        name: '无快捷下游',
+        category: 'docker',
+        parameters: [],
+        nodes: [{id: 'first', name: '第一步', tool: 'demo.hello'}],
+        edges: []
+      }
+    })
+    expect(host.querySelector('.react-flow__node[data-id="first"]')).toBeTruthy()
+    expect(host.querySelector('button[aria-label="添加下游节点"]')).toBeNull()
+    expect(host.querySelector('.quickNodeActionsTrigger')).toBeNull()
   })
 })
 

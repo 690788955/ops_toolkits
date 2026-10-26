@@ -1817,6 +1817,49 @@ func TestPlatformFileUploadStoresFileUnderTargetDir(t *testing.T) {
 	}
 }
 
+func TestPlatformFileUploadWritesWhitelistedAbsoluteDirDirectly(t *testing.T) {
+	reg := testRegistry(t)
+	target := filepath.Join(t.TempDir(), "release")
+	reg.Root.Uploads.AllowedDirs = []string{target}
+	handler := NewHandler(reg)
+	req := fileUploadRequestWithTargetDir(t, "asset.zip", []byte("zip"), target)
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("upload status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Data config.WorkflowUploadResult `json:"data"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	// 绝对路径直接落盘，不再追加 upload-xxx 子目录。
+	if filepath.Dir(body.Data.Path) != target {
+		t.Fatalf("upload path = %q, want direct child of %q", body.Data.Path, target)
+	}
+	if _, err := os.Stat(filepath.Join(target, "asset.zip")); err != nil {
+		t.Fatalf("uploaded file missing under target dir: %v", err)
+	}
+}
+
+func TestPlatformFileUploadRejectsAbsoluteDirOutsideWhitelist(t *testing.T) {
+	reg := testRegistry(t)
+	allowed := filepath.Join(t.TempDir(), "allowed")
+	reg.Root.Uploads.AllowedDirs = []string{allowed}
+	handler := NewHandler(reg)
+	req := fileUploadRequestWithTargetDir(t, "asset.zip", []byte("zip"), filepath.Join(t.TempDir(), "outside"))
+	res := httptest.NewRecorder()
+
+	handler.ServeHTTP(res, req)
+
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("upload status = %d, want 400; body = %s", res.Code, res.Body.String())
+	}
+}
+
 func TestPlatformFileUploadStoresMultipleFiles(t *testing.T) {
 	reg := testRegistry(t)
 	handler := NewHandler(reg)

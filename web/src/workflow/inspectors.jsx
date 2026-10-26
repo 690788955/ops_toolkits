@@ -348,11 +348,11 @@ function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onN
       ) : isUpload ? (
         <>
           <label>
-            <span>目标子目录</span>
-            <input value={upload.target_dir || ''} placeholder="可留空，例如 assets/release" onChange={event => onUploadChange({...upload, target_dir: event.target.value})} />
+            <span>目标目录</span>
+            <input value={upload.target_dir || ''} placeholder="可留空；如 assets/release 或 /opt/app/release" onChange={event => onUploadChange({...upload, target_dir: event.target.value})} />
           </label>
-          <div className="empty small">目标子目录只能是平台 uploads 下的相对路径；运行前在执行面板选择本地文件、多个文件或目录。</div>
-          <div className="empty small">如需把上传包中的配置文件沉淀为工作流配置，请在该节点后连接“提取配置”节点，并使用上传节点输出的文件名、相对路径或目录。</div>
+          <div className="empty small">相对路径会写到平台 runs/uploads 下；绝对路径需要在「平台设置 → 上传目录白名单」里配置过，且文件会直接放入该目录。</div>
+          <div className="empty small">运行前在执行面板选择本地文件、多个文件或目录；如需把上传包中的配置文件沉淀为工作流配置，请在该节点后连接“提取配置”节点。</div>
         </>
       ) : isExtractConfig ? (
         <>

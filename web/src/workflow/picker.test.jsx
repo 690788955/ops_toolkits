@@ -12,7 +12,7 @@ const tools = [
 ]
 
 describe('NodePickerPanel plugin/tool selection', () => {
-  it('selects a plugin first and then adds the chosen tool', async () => {
+  it('按插件分组列出工具，点击工具直接添加', async () => {
     const host = document.createElement('div')
     document.body.appendChild(host)
     const onAddTool = vi.fn()
@@ -33,25 +33,111 @@ describe('NodePickerPanel plugin/tool selection', () => {
       )
     })
 
-    const selects = host.querySelectorAll('.toolPluginPicker select')
-    expect(selects).toHaveLength(2)
-    expect(Array.from(selects[0].options).map(option => option.textContent)).toEqual(['Docker（2）', '系统管理（1）'])
-    expect(selects[0].value).toBe('docker.exec')
-    expect(Array.from(selects[1].options).map(option => option.textContent)).toEqual(['容器内执行命令', '执行宿主机 Shell 脚本'])
+    const groups = host.querySelectorAll('.toolPickerGroup')
+    expect(groups).toHaveLength(2)
+    expect(Array.from(groups).map(group => group.querySelector('.toolPickerGroupHead > span').textContent)).toEqual(['Docker', '系统管理'])
 
     await act(async () => {
-      selects[0].value = 'plugin.system-check'
-      selects[0].dispatchEvent(new Event('change', {bubbles: true}))
+      groups.forEach(group => group.querySelector('.toolPickerGroupHead').dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})))
     })
-    const updated = host.querySelectorAll('.toolPluginPicker select')
-    expect(updated[1].value).toBe('plugin.system-check.info')
-    expect(Array.from(updated[1].options).map(option => option.textContent)).toEqual(['系统资源检查'])
+    expect(Array.from(host.querySelectorAll('.toolPickerGroup')).map(group => group.querySelectorAll('.nodePickerItem.tool').length)).toEqual([2, 1])
+    expect(host.querySelector('.toolPickerGroup .nodePickerItem.tool b').textContent).toBe('容器内执行命令')
 
-    const addButton = Array.from(host.querySelectorAll('button')).find(button => button.textContent === '添加工具节点')
+    const target = host.querySelectorAll('.toolPickerGroup')[1].querySelector('.nodePickerItem.tool')
     await act(async () => {
-      addButton.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+      target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
     })
     expect(onAddTool).toHaveBeenCalledWith(tools[2])
+
+    await act(async () => { root.unmount() })
+    host.remove()
+  })
+
+  it('插件工具分组默认收起，展开后可用，搜索时强制展开', async () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    const renderPanel = searchText => (
+      <NodePickerPanel
+        searchText={searchText}
+        setSearchText={() => {}}
+        tools={tools}
+        totalTools={tools.length}
+        position={null}
+        panelPosition={null}
+        onAddTool={() => {}}
+        onAddControl={() => {}}
+        onClose={() => {}}
+      />
+    )
+    await act(async () => { root.render(renderPanel('')) })
+
+    const head = host.querySelector('.toolPickerGroupHead')
+    expect(head.getAttribute('aria-expanded')).toBe('false')
+    expect(host.querySelectorAll('.toolPickerGroup')[0].querySelectorAll('.nodePickerItem.tool')).toHaveLength(0)
+
+    await act(async () => {
+      head.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+    })
+    expect(host.querySelector('.toolPickerGroupHead').getAttribute('aria-expanded')).toBe('true')
+    expect(host.querySelectorAll('.toolPickerGroup')[0].querySelectorAll('.nodePickerItem.tool')).toHaveLength(2)
+
+    await act(async () => { root.render(renderPanel('Docker')) })
+    expect(host.querySelector('.toolPickerGroupHead').getAttribute('aria-expanded')).toBe('true')
+    expect(host.querySelectorAll('.toolPickerGroup')[0].querySelectorAll('.nodePickerItem.tool')).toHaveLength(2)
+
+    await act(async () => { root.unmount() })
+    host.remove()
+  })
+
+  it('收起的分组悬停只展示工具备注，展开后才能添加', async () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    await act(async () => {
+      root.render(
+        <NodePickerPanel
+          searchText=""
+          setSearchText={() => {}}
+          tools={tools}
+          totalTools={tools.length}
+          position={null}
+          panelPosition={null}
+          onAddTool={() => {}}
+          onAddControl={() => {}}
+          onClose={() => {}}
+        />
+      )
+    })
+
+    const group = () => host.querySelectorAll('.toolPickerGroup')[0]
+    const card = () => document.querySelector('.toolPickerHoverCard')
+    expect(group().querySelectorAll('.nodePickerItem.tool')).toHaveLength(0)
+    expect(card()).toBeNull()
+
+    await act(async () => {
+      group().dispatchEvent(new MouseEvent('mouseover', {bubbles: true, cancelable: true}))
+    })
+    expect(group().classList.contains('previewing')).toBe(true)
+    // 悬停只出备注卡，不展开可点击的工具列表
+    expect(group().querySelectorAll('.nodePickerItem.tool')).toHaveLength(0)
+    expect(group().querySelector('.toolPickerGroupHead').getAttribute('aria-expanded')).toBe('false')
+    expect(card()?.textContent).toContain('容器内执行命令')
+    expect(card()?.textContent).toContain('执行宿主机 Shell 脚本')
+    expect(card()?.querySelectorAll('li')).toHaveLength(2)
+    // 只展示工具名，不带 ID / 描述等明细
+    expect(card()?.textContent).not.toContain('docker.exec.run')
+
+    await act(async () => {
+      group().dispatchEvent(new MouseEvent('mouseout', {bubbles: true, cancelable: true, relatedTarget: document.body}))
+    })
+    expect(group().classList.contains('previewing')).toBe(false)
+    expect(card()).toBeNull()
+
+    await act(async () => {
+      group().querySelector('.toolPickerGroupHead').dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+    })
+    expect(group().querySelectorAll('.nodePickerItem.tool')).toHaveLength(2)
 
     await act(async () => { root.unmount() })
     host.remove()
@@ -59,7 +145,7 @@ describe('NodePickerPanel plugin/tool selection', () => {
 })
 
 describe('NodePickerPanel 节点分类折叠', () => {
-  it('按分类分组，内置能力可添加，旧流程标记节点保持禁用', async () => {
+  it('按分类分组，内置能力可添加，且不再提供并行/合流旧节点', async () => {
     const host = document.createElement('div')
     document.body.appendChild(host)
     const onAddControl = vi.fn()
@@ -89,16 +175,13 @@ describe('NodePickerPanel 节点分类折叠', () => {
     expect(builtinHead.getAttribute('aria-expanded')).toBe('true')
 
     const flowItems = host.querySelectorAll('.nodePickerCategory.cat-flow .nodePickerItem')
-    expect(flowItems).toHaveLength(5)
+    expect(flowItems).toHaveLength(3)
     expect(Array.from(flowItems).map(item => [item.querySelector('b').textContent, item.disabled])).toEqual([
       ['条件分支', false],
-      ['并行分支', true],
-      ['合流', true],
       ['循环', false],
       ['等待 / 轮询', false]
     ])
-    expect(flowItems[1].textContent).toContain('旧流程兼容')
-    expect(flowItems[2].textContent).toContain('旧流程兼容')
+    expect(host.querySelector('.nodePickerCategory.cat-flow').textContent).not.toContain('旧流程兼容')
 
     const builtinItems = host.querySelectorAll('.nodePickerCategory.cat-builtin .nodePickerItem')
     expect(builtinItems).toHaveLength(3)
