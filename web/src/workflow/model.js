@@ -726,6 +726,10 @@ export function conditionCaseLabel(condition, caseID) {
   return item ? item.name || item.id : caseID;
 }
 
+// 所有节点共用同一尺寸，画布排版才能形成规整网格；CSS 里的 .toolNode/.controlNode/.conditionNode 必须与此一致。
+export const WORKFLOW_NODE_WIDTH = 260;
+export const WORKFLOW_NODE_HEIGHT = 132;
+
 export function defaultWorkflowStages() {
   return [
     { id: "prepare", name: "准备", execution_mode: "serial" },
@@ -977,11 +981,12 @@ export function moveWorkflowStageTo(stages, stageId, targetIndex) {
 export function stageLayout(nodes, stages) {
   const normalizedStages = normalizeWorkflowStages(stages);
   if (normalizedStages.length === 0) return { stages: [], positions: {} };
-  const stageGap = 56;
+  const stageGap = 48;
   const stagePadding = 24;
   const headerHeight = 72;
-  const nodeGap = 36;
-  const footerHeight = 52;
+  const nodeGap = 28;
+  const footerHeight = 48;
+  const stageTop = 72;
   // 阶段头固定要放下：序号、至少 7 个字的阶段名、执行模式（并行时多一个并发输入框）和操作按钮。
   const stageMinWidth = 324;
   const parallelStageMinWidth = 386;
@@ -989,31 +994,29 @@ export function stageLayout(nodes, stages) {
   let x = 60;
   const layouts = normalizedStages.map((stage, index) => {
     const stageNodes = orderedStageNodes(nodes, stage.id);
-    const sizes = stageNodes.map(autoLayoutNodeSize);
-    const contentWidth = Math.max(0, ...sizes.map((size) => size.width));
+    // 所有节点同宽同高，阶段宽度按统一尺寸计算即可保持各列等宽、内容居中。
     const minWidth = stage.execution_mode === "parallel" ? parallelStageMinWidth : stageMinWidth;
-    const width = Math.max(minWidth, contentWidth + stagePadding * 2);
+    const width = Math.max(minWidth, WORKFLOW_NODE_WIDTH + stagePadding * 2);
     const contentHeight =
-      sizes.reduce((total, size) => total + size.height, 0) +
+      stageNodes.length * WORKFLOW_NODE_HEIGHT +
       Math.max(0, stageNodes.length - 1) * nodeGap;
     const height = Math.max(
-      236,
+      headerHeight + stagePadding * 2 + footerHeight,
       headerHeight + stagePadding + contentHeight + footerHeight,
     );
-    let y = 72 + headerHeight + stagePadding;
-    stageNodes.forEach((node, nodeIndex) => {
-      const size = sizes[nodeIndex];
+    let y = stageTop + headerHeight + stagePadding;
+    stageNodes.forEach((node) => {
       positions[node.id] = {
-        x: x + (width - size.width) / 2,
+        x: x + (width - WORKFLOW_NODE_WIDTH) / 2,
         y,
       };
-      y += size.height + nodeGap;
+      y += WORKFLOW_NODE_HEIGHT + nodeGap;
     });
     const layout = {
       ...stage,
       index,
       x,
-      y: 72,
+      y: stageTop,
       width,
       height,
       nodeCount: stageNodes.length,
@@ -1307,14 +1310,12 @@ export function autoLayoutNodes(nodes, edges) {
 }
 
 export function autoLayoutNodeSize(node) {
-  if (node.type === "conditionNode") {
-    const branchCount = conditionBranchRows(
-      node.data.condition || defaultCondition(),
-    ).length;
-    return { width: 440, height: Math.max(156, 72 + branchCount * 42) };
+  // 优先用 React Flow 实测尺寸，避免估算值与真实卡片高度不一致导致重叠或空隙。
+  const measured = node?.measured || {}
+  if (measured.width > 0 && measured.height > 0) {
+    return { width: measured.width, height: measured.height }
   }
-  if (node.type === "controlNode") return { width: 250, height: 104 };
-  return { width: 228, height: 74 };
+  return { width: WORKFLOW_NODE_WIDTH, height: WORKFLOW_NODE_HEIGHT }
 }
 
 export function validateConditionDraft(nodes, edges) {

@@ -1374,6 +1374,36 @@ pre {
   gap: 12px;
 }
 .workflowExportFooter small { flex: 1 1 220px; color: var(--color-muted); font-size: 12px; line-height: 1.4; }
+.workflowImportDropzone {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  border: 1px dashed var(--color-border);
+  border-radius: 12px;
+  padding: 22px 16px;
+  text-align: center;
+  background: var(--color-panel);
+}
+.workflowImportDropzone small { max-width: 420px; color: var(--color-muted); font-size: 12px; line-height: 1.5; }
+.workflowImportResults {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--color-border);
+  padding-top: 12px;
+}
+.workflowImportResultGroup { display: grid; gap: 6px; }
+.workflowImportResultGroup > strong { color: var(--color-text); font-size: 12px; }
+.workflowImportResultTags { display: flex; flex-wrap: wrap; gap: 6px; }
+.workflowImportResultFailures {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--color-danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.workflowImportResultFailures code { font-family: "JetBrains Mono", ui-monospace, monospace; }
 .pluginInstalledListSection {
   display: grid;
   gap: 12px;
@@ -2754,6 +2784,7 @@ pre {
 .conditionNode,
 .controlNode {
   position: relative;
+  box-sizing: border-box;
   color: var(--color-black);
   background: var(--color-surface);
   border: 1px solid #cfd5df;
@@ -2777,7 +2808,9 @@ pre {
 
 .toolNode {
   display: grid;
-  width: 228px;
+  width: 260px;
+  height: 132px;
+  align-content: start;
   gap: 0;
   --node-accent: #2563eb;
 }
@@ -2809,10 +2842,17 @@ pre {
 .controlNodeText,
 .conditionInfoCard {
   display: grid;
-  gap: 6px;
+  align-content: start;
+  gap: 4px;
   min-width: 0;
-  padding: 10px 14px 12px;
+  overflow: hidden;
+  padding: 8px 14px 10px;
 }
+
+/* 条件节点要同时放下信息区和分支出口，内容区再压紧一点才能落在统一高度内。 */
+.conditionInfoCard { gap: 2px; padding: 6px 10px 6px 14px; }
+.conditionNode .nodeTopBar { min-height: 34px; padding: 6px 10px 6px 14px; }
+.conditionNode .nodeCategoryChip { padding: 1px 6px; font-size: 9px; }
 
 .nodeHeaderShape.process {
   display: block;
@@ -2823,14 +2863,14 @@ pre {
   background: rgba(37,99,235,.08);
 }
 
+/* 卡片内容始终占位、只切换可见性：画布按固定坐标排版，任何撑高都会造成重叠或空隙。 */
 .toolNode .nodeHoverMeta,
 .conditionNode .conditionInputSummary,
 .conditionNode small,
 .controlNode small {
   opacity: 0;
-  max-height: 0;
-  overflow: hidden;
-  transition: opacity .15s ease, max-height .15s ease, margin-top .15s ease;
+  visibility: hidden;
+  transition: opacity .15s ease;
 }
 
 .toolNode:hover .nodeHoverMeta,
@@ -2846,7 +2886,7 @@ pre {
 .controlNode.selected small,
 .react-flow__node.selected .controlNode small {
   opacity: 1;
-  max-height: 48px;
+  visibility: visible;
 }
 
 .flowchartShape {
@@ -2882,7 +2922,9 @@ pre {
 /* 节点卡片分类着色：左侧 4px 色条 + 分类徽标共同表达节点族 */
 .controlNode {
   display: grid;
-  width: 246px;
+  width: 260px;
+  height: 132px;
+  align-content: start;
   gap: 0;
   --node-accent: #4b5563;
 }
@@ -2910,10 +2952,7 @@ pre {
 .nodeCategoryChip.builtin { border-color: #f3d5ad; color: #92400e; background: #fdf1e2; }
 .controlNode strong,
 .controlNode small { display: block; }
-.controlNode small { color: var(--color-muted); font-size: 12px; font-weight: 700; line-height: 1.35; }
-.controlNode:hover small,
-.controlNode.selected small,
-.react-flow__node.selected .controlNode small { margin-top: 5px; }
+.controlNode small { color: var(--color-muted); font-size: 12px; font-weight: 700; line-height: 1.35; margin-top: 5px; }
 .controlNodeInspector { display: grid; gap: 10px; }
 .httpRequestLine {
   display: grid;
@@ -2967,16 +3006,20 @@ pre {
 
 .conditionNode {
   display: grid;
-  grid-template-columns: minmax(208px, 1fr) minmax(156px, auto);
-  align-items: start;
-  width: 438px;
+  grid-template-columns: minmax(0, 1fr) 104px;
+  align-items: stretch;
+  width: 260px;
+  height: 132px;
+  overflow: hidden;
   gap: 0;
   --node-accent: #7c3aed;
 }
 
 .conditionNodeMain {
   display: grid;
+  align-content: start;
   min-width: 0;
+  overflow: hidden;
 }
 
 .conditionTopBar {
@@ -3003,7 +3046,7 @@ pre {
 
 .conditionInputSummary {
   overflow: hidden;
-  max-width: 220px;
+  max-width: 100%;
   font-weight: 800;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3011,51 +3054,44 @@ pre {
 .conditionNode small {
   display: block;
   overflow: hidden;
-  max-width: 220px;
+  max-width: 100%;
   color: var(--color-muted);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .conditionState.ready { color: var(--color-muted); }
 .conditionState.warning { color: var(--color-warning-text); }
-.conditionNode:hover .conditionInputSummary,
-.conditionNode:hover small,
-.conditionNode.selected .conditionInputSummary,
-.conditionNode.selected small,
-.react-flow__node.selected .conditionNode .conditionInputSummary,
-.react-flow__node.selected .conditionNode small { margin-top: 5px; }
+.conditionNode .conditionInputSummary,
+.conditionNode small { margin-top: 2px; }
 .conditionBranchList {
   position: relative;
   z-index: 2;
   display: grid;
-  min-width: 148px;
-  gap: 6px;
+  align-content: start;
+  min-width: 0;
+  gap: 4px;
+  overflow-y: auto;
   border-left: 1px solid rgba(15,23,42,.08);
-  padding: 10px 16px 10px 10px;
+  padding: 8px 6px;
   background: #fbfcfe;
   border-radius: 0 8px 8px 0;
 }
 .conditionBranchRow {
   position: relative;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  min-height: 36px;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 28px;
   align-items: center;
-  gap: 7px;
+  gap: 2px;
   border: 1px solid var(--color-border);
-  border-radius: 7px;
-  padding: 6px 18px 6px 9px;
+  border-radius: 6px;
+  padding: 4px 16px 4px 7px;
   color: var(--color-text);
   background: var(--color-surface);
 }
-.conditionBranchLine {
-  display: block;
-  width: 14px;
-  height: 1px;
-  background: var(--color-dark-border);
-}
+.conditionBranchLine { display: none; }
 .conditionBranchRow.default { background: var(--color-panel); }
 .conditionBranchRow.default .conditionBranchLine,
 .conditionBranchRow.disabled .conditionBranchLine { background: var(--color-tertiary); }
@@ -3071,13 +3107,13 @@ pre {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.conditionBranchText strong { color: var(--color-black); font-size: 12px; font-weight: 900; }
+.conditionBranchText strong { color: var(--color-black); font-size: 11px; font-weight: 900; }
 .conditionBranchText span {
   max-height: none;
   opacity: 1;
   color: var(--color-muted);
   font-family: "JetBrains Mono", ui-monospace, monospace;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
 }
 .conditionBranchHandlePreview {
@@ -3127,10 +3163,7 @@ pre {
   max-height: 40px;
   margin-top: 2px;
 }
-.toolNode .nodeHoverMeta { margin-top: 0; }
-.toolNode:hover .nodeHoverMeta,
-.toolNode.selected .nodeHoverMeta,
-.react-flow__node.selected .toolNode .nodeHoverMeta { margin-top: 1px; }
+.toolNode .nodeHoverMeta { margin-top: 1px; }
 
 .runStatusBadge {
   position: absolute;

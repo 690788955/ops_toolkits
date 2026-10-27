@@ -1056,6 +1056,26 @@ describe('WorkflowEditor 导航与设置入口', () => {
     expect(entry.disabled).toBe(true)
   })
 
+  it('更多菜单只保留导入工作流入口', async () => {
+    const host = await mountEditor()
+    await clickButtonByText(host.querySelector('.workflowMoreMenu'), '更多')
+    const items = Array.from(host.querySelectorAll('[role="menuitem"]'))
+    expect(items.find(button => button.textContent === '导出当前工作流')).toBeFalsy()
+    expect(items.find(button => button.textContent === '批量导出 / 导入…')).toBeFalsy()
+    const importEntry = items.find(button => button.textContent === '导入工作流…')
+    expect(importEntry).toBeTruthy()
+    expect(importEntry.disabled).toBe(false)
+  })
+
+  it('从更多菜单打开导入工作流弹窗', async () => {
+    const host = await mountEditor()
+    await clickButtonByText(host.querySelector('.workflowMoreMenu'), '更多')
+    await clickButtonByText(host.querySelector('.workflowMorePopover'), '导入工作流…')
+    const dialog = host.querySelector('[role="dialog"][aria-labelledby="workflow-transfer-title"]')
+    expect(dialog).toBeTruthy()
+    expect(dialog.textContent).toContain('选择文件')
+  })
+
   it('已保存工作流可从更多菜单打开设置并区分保存按钮', async () => {
     const host = await mountEditorWithHosts({hosts: [], workflow})
     await clickButtonByText(host.querySelector('.workflowMoreMenu'), '更多')

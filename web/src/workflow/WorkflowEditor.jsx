@@ -8,6 +8,7 @@ import {nodeTypes, normalizeRunStatus, runStatusLabel} from './nodes.jsx'
 import {EdgeConfigModal, NodeConfigEditor, NodeConfigModal, ValidationSummary} from './inspectors.jsx'
 import {sshHostStatusLabel} from '../SshHostsModal.jsx'
 import {CanvasDock, NodePickerPanel} from './picker.jsx'
+import WorkflowTransferModal from './WorkflowTransferModal.jsx'
 import FileUploadInput from '../FileUploadInput.jsx'
 import {DRAFT_WINDOW_SAVED_KEY, clearDraftWindowSaved, clearDraftWindowTransfer, draftWindowSavedRefValue, draftWindowURL, formatDraftWindowTime, readDraftWindowSaved, readDraftWindowTransfer, writeDraftWindowSaved, writeDraftWindowTransfer} from './draftWindow.js'
 
@@ -58,6 +59,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   const [runTargetOverride, setRunTargetOverride] = useState(false)
   const [runSetupOpen, setRunSetupOpen] = useState(false)
   const [runHistoryOpen, setRunHistoryOpen] = useState(false)
+  const [workflowTransferOpen, setWorkflowTransferOpen] = useState(false)
   const [nodeParamsText, setNodeParamsText] = useState('{}')
   const [nodeConfigDraft, setNodeConfigDraft] = useState(null)
   const [editorValidation, setEditorValidation] = useState(null)
@@ -116,6 +118,8 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   const draftWindowSavedRef = useRef('')
   // 画布删除回调在 handleNodesChange 之后才定义，用 ref 传递避免依赖顺序问题。
   const afterCanvasNodesRemovedRef = useRef(() => {})
+  // 已按真实尺寸排过版的节点结构签名，避免每次渲染都重排。
+  const measuredLayoutSignatureRef = useRef('')
   const canvasRunVersionRef = useRef(0)
 
   useEffect(() => () => {
@@ -123,6 +127,36 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     recoveryActionRef.current = null
     notificationRequestRef.current = null
   }, [])
+
+  // 布局依赖真实卡片尺寸：节点首次渲染后读一次 DOM 高度并重排，避免估算值与渲染高度不一致造成重叠或大空隙。
+  useEffect(() => {
+    if (!stages.length || !nodes.length || !canvasCardRef.current) return undefined
+    const signature = `${stages.map(stage => stage.id).join(',')}|${nodes.map(node => `${node.id}:${node.data?.stageId || ''}`).join(',')}`
+    if (measuredLayoutSignatureRef.current === signature) return undefined
+    const timer = window.setTimeout(() => {
+      const card = canvasCardRef.current
+      if (!card) return
+      const sizes = new Map()
+      card.querySelectorAll('.react-flow__node').forEach(el => {
+        // offsetWidth/offsetHeight 不受画布缩放影响，等于卡片在 100% 下的真实尺寸。
+        if (el.offsetWidth > 0 && el.offsetHeight > 0) sizes.set(el.getAttribute('data-id'), {width: el.offsetWidth, height: el.offsetHeight})
+      })
+      if (sizes.size === 0) return
+      measuredLayoutSignatureRef.current = signature
+      setNodes(current => {
+        let changed = false
+        const withSizes = current.map(node => {
+          const size = sizes.get(node.id)
+          if (!size || node.measured?.width === size.width && node.measured?.height === size.height) return node
+          changed = true
+          return {...node, measured: size}
+        })
+        if (!changed) return current
+        return workflowModel.autoLayoutWorkflowNodes(withSizes, edges, stages)
+      })
+    }, 60)
+    return () => window.clearTimeout(timer)
+  }, [nodes, edges, stages, setNodes])
 
   const clearCanvasRunOverlay = useCallback(() => {
     canvasRunVersionRef.current += 1
@@ -1715,8 +1749,8 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     const node = nodes.find(item => item.id === draggedNode.id) || draggedNode
     const movingIDs = draggedStageNodeIDs(draggedNode)
     const moving = new Set(movingIDs)
-    const width = node.measured?.width || node.width || 228
-    const height = node.measured?.height || node.height || 80
+    const width = node.measured?.width || node.width || workflowModel.WORKFLOW_NODE_WIDTH
+    const height = node.measured?.height || node.height || workflowModel.WORKFLOW_NODE_HEIGHT
     const centerX = draggedNode.position.x + width / 2
     const centerY = draggedNode.position.y + height / 2
     let target = layouts.stages.find(stage => centerX >= stage.x && centerX <= stage.x + stage.width)
@@ -1732,7 +1766,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     const stageNodes = workflowModel.orderedStageNodes(nodes, target.id).filter(item => !moving.has(item.id))
     let insertAt = stageNodes.findIndex(item => {
       const position = layouts.positions[item.id] || item.position || {x: 0, y: 0}
-      const itemHeight = item.measured?.height || item.height || 80
+      const itemHeight = item.measured?.height || item.height || workflowModel.WORKFLOW_NODE_HEIGHT
       return centerY < position.y + itemHeight / 2
     })
     if (insertAt < 0) insertAt = stageNodes.length
@@ -2643,6 +2677,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
                 >
                   工作流设置
                 </button>
+                <button type="button" role="menuitem" onClick={() => { setWorkflowMoreOpen(false); setWorkflowTransferOpen(true) }} disabled={isActiveRunRunning}>导入工作流…</button>
                 <button type="button" role="menuitem" onClick={() => { setWorkflowMoreOpen(false); validateDraft() }} disabled={Boolean(workflowAction)}>{workflowAction === 'validating' ? '校验中...' : '手动校验'}</button>
                 <button type="button" role="menuitem" onClick={() => { setWorkflowMoreOpen(false); optimizeCanvasLayout() }} disabled={isActiveRunRunning}>重新整理画布</button>
                 {resultPanel && <button type="button" role="menuitem" onClick={() => { setWorkflowMoreOpen(false); setRunHistoryOpen(true) }}>运行记录</button>}
@@ -3650,6 +3685,15 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
           confirmRequired={rerunModal.confirmRequired}
           onClose={() => setRerunModal(null)}
           onSubmit={params => submitRerun(rerunModal.nodeID, params)}
+        />
+      )}
+
+      {workflowTransferOpen && (
+        <WorkflowTransferModal
+          onClose={() => setWorkflowTransferOpen(false)}
+          onImported={async () => {
+            await refreshCatalog({keepCategory: true})
+          }}
         />
       )}
     </div>
@@ -5262,25 +5306,20 @@ function autoLayoutNodes(nodes, edges) {
   const orderedLayers = Array.from(layers.entries())
     .sort(([left], [right]) => left - right)
     .map(([, layerNodes]) => layerNodes.sort((left, right) => (nodeOrder.get(left.id) || 0) - (nodeOrder.get(right.id) || 0)))
-  const layerMetrics = orderedLayers.map(layerNodes => {
-    const sizes = layerNodes.map(autoLayoutNodeSize)
-    const height = sizes.reduce((total, size) => total + size.height, 0) + Math.max(0, sizes.length - 1) * 42
-    const width = Math.max(...sizes.map(size => size.width))
-    return {sizes, height, width}
-  })
-  const maxLayerHeight = Math.max(...layerMetrics.map(metric => metric.height), 0)
+  const layerGapX = 120
+  const layerGapY = 28
+  const layerHeights = orderedLayers.map(layerNodes => layerNodes.length * workflowModel.WORKFLOW_NODE_HEIGHT + Math.max(0, layerNodes.length - 1) * layerGapY)
+  const maxLayerHeight = Math.max(...layerHeights, 0)
   const positions = new Map()
   let x = 80
 
   orderedLayers.forEach((layerNodes, layerIndex) => {
-    const metrics = layerMetrics[layerIndex]
-    let y = 80 + Math.max(0, (maxLayerHeight - metrics.height) / 2)
-    layerNodes.forEach((node, nodeIndex) => {
-      const size = metrics.sizes[nodeIndex]
+    let y = 80 + Math.max(0, (maxLayerHeight - layerHeights[layerIndex]) / 2)
+    layerNodes.forEach(node => {
       positions.set(node.id, {x, y})
-      y += size.height + 42
+      y += workflowModel.WORKFLOW_NODE_HEIGHT + layerGapY
     })
-    x += metrics.width + 140
+    x += workflowModel.WORKFLOW_NODE_WIDTH + layerGapX
   })
 
   return nodes.map(node => ({
@@ -5290,12 +5329,9 @@ function autoLayoutNodes(nodes, edges) {
 }
 
 function autoLayoutNodeSize(node) {
-  if (node.type === 'conditionNode') {
-    const branchCount = conditionBranchRows(node.data.condition || defaultCondition()).length
-    return {width: 440, height: Math.max(156, 72 + branchCount * 42)}
-  }
-  if (node.type === 'controlNode') return {width: 250, height: 104}
-  return {width: 210, height: 74}
+  const measured = node?.measured || {}
+  if (measured.width > 0 && measured.height > 0) return {width: measured.width, height: measured.height}
+  return {width: workflowModel.WORKFLOW_NODE_WIDTH, height: workflowModel.WORKFLOW_NODE_HEIGHT}
 }
 
 function conditionCaseLabel(condition, caseID) {

@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest'
-import {bindWorkflowConfigPath, bootstrapAuthTokenFromURL, createMarketSource, deleteMarketSource, deleteNexusPlugin, downloadUserWorkflowExport, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusPlugins, nexusDownloadURL, postJSON, postMarketInstall, postNexusPluginZip, postPluginZip, postRunUploadNode, postRunUploadNodeChunked, rebuildNexusIndex, testMarketSource, updateMarketSource, uploadWorkflowConfigFile} from './api.js'
+import {bindWorkflowConfigPath, bootstrapAuthTokenFromURL, createMarketSource, deleteMarketSource, deleteNexusPlugin, downloadUserWorkflowExport, downloadWorkflowExport, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusPlugins, importWorkflows, nexusDownloadURL, postJSON, postMarketInstall, postNexusPluginZip, postPluginZip, postRunUploadNode, postRunUploadNodeChunked, rebuildNexusIndex, testMarketSource, updateMarketSource, uploadWorkflowConfigFile} from './api.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -97,6 +97,36 @@ describe('api helpers', () => {
     expect(createObjectURL).toHaveBeenCalledWith(blob)
     expect(link.download).toBe('user-workflows-bundle.zip')
     expect(link.click).toHaveBeenCalled()
+  })
+
+  it('downloads a single workflow as yaml and multiple as a zip', async () => {
+    const blob = new Blob(['yaml'])
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      headers: {get: () => 'attachment; filename="demo.flow.yaml"'},
+      blob: async () => blob
+    })))
+    const createObjectURL = vi.fn(() => 'blob:test')
+    vi.stubGlobal('URL', {createObjectURL, revokeObjectURL: vi.fn()})
+    const link = {href: '', download: '', click: vi.fn(), remove: vi.fn()}
+    vi.stubGlobal('document', {createElement: () => link, body: {appendChild: vi.fn()}})
+    vi.stubGlobal('window', {setTimeout: vi.fn()})
+
+    await expect(downloadWorkflowExport(['demo.flow'])).resolves.toBe('demo.flow.yaml')
+    expect(fetch.mock.calls[0][0]).toBe('/api/workflows/export?workflow=demo.flow')
+    expect(link.download).toBe('demo.flow.yaml')
+    expect(link.click).toHaveBeenCalled()
+  })
+
+  it('imports workflow files through the multipart endpoint', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ok: true, json: async () => ({status: 'imported', data: {imported: [{id: 'demo.flow', new_id: 'demo.flow'}], failed: []}})})))
+
+    await expect(importWorkflows(new Blob(['id: demo.flow']))).resolves.toMatchObject({status: 'imported'})
+    const [url, options] = fetch.mock.calls[0]
+    expect(url).toBe('/api/workflows/import')
+    expect(options.method).toBe('POST')
+    expect(options.credentials).toBe('same-origin')
+    expect(options.body).toBeInstanceOf(FormData)
   })
 
   it('uploads files to a waiting workflow upload node', async () => {

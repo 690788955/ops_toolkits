@@ -217,6 +217,23 @@ export async function downloadUserWorkflowExport(workflowIDs, includeDependencie
   return downloadResponse(res, includeDependencies ? 'user-workflows-bundle.zip' : 'user.workflows.zip')
 }
 
+// 单个工作流导出为 .yaml，多个导出为 workflows-export.zip；文件名由服务端 Content-Disposition 决定。
+export async function downloadWorkflowExport(workflowIDs) {
+  const query = new URLSearchParams()
+  for (const id of workflowIDs || []) {
+    if (id) query.append('workflow', id)
+  }
+  const res = await fetch(`/api/workflows/export?${query.toString()}`, {credentials: 'same-origin'})
+  return downloadResponse(res, 'workflows-export.zip')
+}
+
+export async function importWorkflows(file) {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await uploadFetch('/api/workflows/import', form)
+  return readJSONResponse(res)
+}
+
 async function downloadResponse(res, fallbackName) {
   if (!res.ok) {
     let body = {}
