@@ -11,4 +11,7 @@ contributes:
   categories: []
   tools: []
   workflows:
-    - path: workflows/demo.test.yaml
+    - path: workflows/example.config-deploy.yaml
+    - path: workflows/example.fragment-merge.yaml
+    - path: workflows/example.host-inspect.yaml
+    - path: workflows/example.system-check.yaml

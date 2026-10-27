@@ -1,0 +1,23 @@
+id: example.system-check
+name: 示例·系统资源检查
+description: 最简单的单节点示例：调用系统资源检查工具，输出系统版本、CPU、内存与磁盘信息
+version: 1.0.0
+category: example
+tags: [示例, 系统, 只读]
+parameters:
+  - name: format
+    type: string
+    description: 输出格式
+    required: false
+    default: json
+    options:
+      - text
+      - json
+nodes:
+  - id: system_info
+    name: 检查系统资源
+    type: tool
+    tool: plugin.system-check.info
+    params:
+      format: "{{ .format }}"
+edges: []

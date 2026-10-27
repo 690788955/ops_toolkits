@@ -1,0 +1,27 @@
+id: example.host-inspect
+name: 示例·宿主机巡检
+description: 分阶段串行示例：先采集系统资源，再在宿主机执行只读命令查看磁盘占用与 Docker 容器
+version: 1.0.0
+category: example
+tags: [示例, 巡检, 宿主机]
+stages:
+  - id: inspect
+    name: 巡检
+    execution_mode: serial
+nodes:
+  - id: system_info
+    name: 系统资源检查
+    type: tool
+    stage_id: inspect
+    order: 1
+    tool: plugin.system-check.info
+    params:
+      format: text
+  - id: disk_and_docker
+    name: 查看磁盘与容器
+    type: tool
+    stage_id: inspect
+    order: 2
+    tool: docker.exec.host_command
+    params:
+      command: "df -h && docker ps"

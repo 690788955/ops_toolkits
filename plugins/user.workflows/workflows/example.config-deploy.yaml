@@ -1,0 +1,50 @@
+id: example.config-deploy
+name: 示例·配置差异检查与下发
+description: 分阶段串行示例：先比对目标配置差异，再下发配置文件并重启关联服务
+version: 1.0.0
+category: example
+tags: [示例, 配置, 部署]
+parameters:
+  - name: target_path
+    type: string
+    description: 目标配置文件绝对路径，例如 /etc/app/app.conf
+    required: true
+    default: /etc/app/app.conf
+  - name: service
+    type: string
+    description: 配置生效后需要重启的服务名
+    required: false
+    default: app
+stages:
+  - id: check
+    name: 差异检查
+    execution_mode: serial
+  - id: apply
+    name: 下发与生效
+    execution_mode: serial
+nodes:
+  - id: diff
+    name: 检查配置差异
+    type: tool
+    stage_id: check
+    order: 1
+    tool: config.deploy.check
+    params:
+      target_path: "{{ .target_path }}"
+  - id: push
+    name: 下发配置文件
+    type: tool
+    stage_id: apply
+    order: 1
+    tool: config.deploy.push
+    params:
+      target_path: "{{ .target_path }}"
+  - id: restart
+    name: 重启关联服务
+    type: tool
+    stage_id: apply
+    order: 2
+    tool: config.deploy.service
+    params:
+      service: "{{ .service }}"
+      action: restart

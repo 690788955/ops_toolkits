@@ -1,0 +1,27 @@
+id: example.fragment-merge
+name: 示例·分片包校验合并
+description: 上传示例：把分片包与 md5.txt 上传到工作目录后，按清单校验并合并为完整 tar.gz
+version: 1.0.0
+category: example
+tags: [示例, 上传, 合并]
+stages:
+  - id: merge
+    name: 上传与合并
+    execution_mode: serial
+nodes:
+  - id: upload_fragments
+    name: 上传分片包
+    type: upload
+    stage_id: merge
+    order: 1
+    upload:
+      target_dir: fragments
+  - id: verify_merge
+    name: 校验并合并
+    type: tool
+    stage_id: merge
+    order: 2
+    tool: docker.exec.verify_md5_merge
+    params:
+      path: "{{ .steps.upload_fragments.file.dir }}"
+      extract: "no"
