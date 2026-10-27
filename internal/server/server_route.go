@@ -63,6 +63,8 @@ func NewHandler(reg *registry.Registry) http.Handler {
 	mux.HandleFunc("/api/plugins/rescan", pluginRescanHandler(state))
 	mux.HandleFunc("/api/plugins/", pluginDownloadHandler(state))
 	mux.HandleFunc("/api/tools/", toolsHandler(state))
+	mux.HandleFunc("/api/workflows/export", workflowExportHandler(state))
+	mux.HandleFunc("/api/workflows/import", workflowImportHandler(state))
 	mux.HandleFunc("/api/workflows/", workflowsHandler(state))
 	mux.HandleFunc("/api/runs/", runsHandler(state))
 	return mux

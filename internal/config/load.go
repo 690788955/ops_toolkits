@@ -386,7 +386,88 @@ func NormalizeWorkflow(cfg *WorkflowConfig) {
 			cfg.Nodes[i].OnFailure = "stop"
 		}
 	}
+	normalizeLegacyWorkflowStage(cfg)
 	normalizeWorkflowRecovery(cfg)
+}
+
+// normalizeLegacyWorkflowStage 把旧格式（只写 nodes/edges、没有 stages）折成单个串行阶段，
+// 让编辑器、校验和运行统一走阶段模型；节点 order 按依赖拓扑排序生成，保留原有 edges 语义。
+func normalizeLegacyWorkflowStage(cfg *WorkflowConfig) {
+	if len(cfg.Stages) > 0 || len(cfg.Nodes) == 0 {
+		return
+	}
+	cfg.Stages = []WorkflowStage{{
+		ID:            LegacyWorkflowStageID,
+		Name:          LegacyWorkflowStageName,
+		ExecutionMode: WorkflowStageExecutionSerial,
+	}}
+	orders := legacyStageOrders(cfg)
+	for i := range cfg.Nodes {
+		cfg.Nodes[i].StageID = LegacyWorkflowStageID
+		cfg.Nodes[i].Order = orders[cfg.Nodes[i].ID]
+	}
+}
+
+// legacyStageOrders 用 Kahn 拓扑排序排出串行阶段内的 order；成环时把剩余节点按原始顺序补在末尾。
+func legacyStageOrders(cfg *WorkflowConfig) map[string]int {
+	position := make(map[string]int, len(cfg.Nodes))
+	ids := make([]string, 0, len(cfg.Nodes))
+	for index, node := range cfg.Nodes {
+		if _, exists := position[node.ID]; exists {
+			continue
+		}
+		position[node.ID] = index
+		ids = append(ids, node.ID)
+	}
+	indegree := make(map[string]int, len(ids))
+	next := make(map[string][]string, len(ids))
+	for _, id := range ids {
+		indegree[id] = 0
+	}
+	for _, edge := range cfg.Edges {
+		if _, ok := indegree[edge.From]; !ok {
+			continue
+		}
+		if _, ok := indegree[edge.To]; !ok {
+			continue
+		}
+		next[edge.From] = append(next[edge.From], edge.To)
+		indegree[edge.To]++
+	}
+	queue := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if indegree[id] == 0 {
+			queue = append(queue, id)
+		}
+	}
+	orders := make(map[string]int, len(ids))
+	step := 0
+	for len(queue) > 0 {
+		best := 0
+		for i := 1; i < len(queue); i++ {
+			if position[queue[i]] < position[queue[best]] {
+				best = i
+			}
+		}
+		id := queue[best]
+		queue = append(queue[:best], queue[best+1:]...)
+		step++
+		orders[id] = step
+		for _, follow := range next[id] {
+			indegree[follow]--
+			if indegree[follow] == 0 {
+				queue = append(queue, follow)
+			}
+		}
+	}
+	for _, id := range ids {
+		if _, done := orders[id]; done {
+			continue
+		}
+		step++
+		orders[id] = step
+	}
+	return orders
 }
 
 func normalizeWorkflowRecovery(cfg *WorkflowConfig) {

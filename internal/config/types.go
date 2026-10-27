@@ -390,6 +390,10 @@ const (
 
 	WorkflowStageExecutionSerial   = "serial"
 	WorkflowStageExecutionParallel = "parallel"
+
+	// 旧格式工作流（只写 nodes/edges、没有 stages）归一化后使用的唯一阶段。
+	LegacyWorkflowStageID   = "main"
+	LegacyWorkflowStageName = "原有流程"
 )
 
 // WorkflowScript 是内置 Shell 节点：在目标机器上执行内联脚本，不要求先封装插件。
