@@ -14,7 +14,6 @@ import {pendingRunApproval} from '../runApproval.js'
 import ResizeHandle, {useResizableWidth} from '../ResizeHandle.jsx'
 import RunHistoryRail from './run/RunHistoryRail.jsx'
 import RunLogWindow from './run/RunLogWindow.jsx'
-import RunLogView from './run/RunLogView.jsx'
 import {CANVAS_MODE_EDIT, CANVAS_MODE_RUN, findRunLogItem, nextCanvasMode, runningRunNodeID} from './run/runLog.js'
 export {findRunLogItem} from './run/runLog.js'
 import {DRAFT_WINDOW_SAVED_KEY, clearDraftWindowSaved, clearDraftWindowTransfer, draftWindowSavedRefValue, draftWindowURL, formatDraftWindowTime, readDraftWindowSaved, readDraftWindowTransfer, writeDraftWindowSaved, writeDraftWindowTransfer} from './draftWindow.js'
@@ -36,7 +35,7 @@ const WORKFLOW_RAIL_MAX_WIDTH = 460
 const WORKFLOW_RUN_PANEL_MIN_WIDTH = 320
 const WORKFLOW_RUN_PANEL_MAX_WIDTH = 820
 
-export default function WorkflowEditor({catalog, activeCategory = '', hosts = [], setResult: setAppResult, refreshCatalog, openPluginManager, resultPanel = null, draftWindow = false, onOpenRunsTab = null, openRunID = '', onOpenRun = null}) {
+export default function WorkflowEditor({catalog, activeCategory = '', hosts = [], setResult: setAppResult, refreshCatalog, openPluginManager, draftWindow = false, onOpenRunsTab = null, openRunID = '', onOpenRun = null}) {
   const [workflow, setWorkflow] = useState(emptyWorkflow())
   const [editorNotice, setEditorNotice] = useState('')
   const setResult = useCallback(payload => {
@@ -73,7 +72,6 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   const [runTarget, setRunTarget] = useState(RUN_TARGET_FOLLOW)
   const [runTargetOverride, setRunTargetOverride] = useState(false)
   const [runSetupOpen, setRunSetupOpen] = useState(false)
-  const [runHistoryOpen, setRunHistoryOpen] = useState(false)
   const [workflowTransferOpen, setWorkflowTransferOpen] = useState(false)
   const [nodeParamsText, setNodeParamsText] = useState('{}')
   const [nodeConfigDraft, setNodeConfigDraft] = useState(null)
@@ -871,7 +869,6 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     notificationRequestRef.current = null
     setWorkflowNameMenuOpen(false)
     setWorkflowMoreOpen(false)
-    setRunHistoryOpen(false)
     setRecoveryInline(inline)
     setRecoveryRunID(runID)
     setRecoveryDetail(null)
@@ -2999,9 +2996,6 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
                   工作流设置
                 </button>
                 <button type="button" role="menuitem" onClick={() => { setWorkflowMoreOpen(false); setWorkflowTransferOpen(true) }} disabled={isActiveRunRunning}>导入工作流…</button>
-                <button type="button" role="menuitem" onClick={() => { setWorkflowMoreOpen(false); validateDraft() }} disabled={Boolean(workflowAction)}>{workflowAction === 'validating' ? '校验中...' : '手动校验'}</button>
-                <button type="button" role="menuitem" onClick={() => { setWorkflowMoreOpen(false); optimizeCanvasLayout() }} disabled={isActiveRunRunning}>重新整理画布</button>
-                {resultPanel && <button type="button" role="menuitem" onClick={() => { setWorkflowMoreOpen(false); setRunHistoryOpen(true) }}>运行记录</button>}
                 <button className="danger" type="button" role="menuitem" onClick={() => { setWorkflowMoreOpen(false); deleteWorkflow() }} disabled={!canDeleteWorkflow || Boolean(workflowAction) || isActiveRunRunning} title={workflowOwnerLocked ? '内置工作流不支持在此删除' : undefined}>删除工作流</button>
               </div>
             </>
@@ -3558,6 +3552,13 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
         {canvasCategoryLegend}
         <CanvasDock
           onAddNode={isEditingCanvas ? () => openNodePicker() : undefined}
+          // 校验和整理都只对草稿有意义：运行模式下画布是只读快照，摆位也不会落到草稿上，
+          // 所以这两个按钮跟「添加节点」一样只在编辑模式出现，不再从「更多」菜单里进。
+          onValidate={isEditingCanvas ? validateDraft : undefined}
+          validateLabel={workflowAction === 'validating' ? '校验中…' : '校验'}
+          validateDisabled={Boolean(workflowAction)}
+          onTidyLayout={isEditingCanvas ? optimizeCanvasLayout : undefined}
+          tidyDisabled={nodes.length === 0}
           onZoomIn={() => zoomCanvas('in')}
           onZoomOut={() => zoomCanvas('out')}
           onFitView={fitCanvasView}
@@ -4007,34 +4008,6 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
               <button className="secondary" type="button" onClick={() => setRunSetupOpen(false)} disabled={isActiveRunRunning}>取消</button>
               <button className="secondary" type="button" onClick={validateDraft} disabled={Boolean(workflowAction)}>{workflowAction === 'validating' ? '校验中...' : '校验'}</button>
               <button className="primary" type="button" onClick={runDraft} disabled={isActiveRunRunning} aria-label="开始运行工作流">开始运行</button>
-            </div>
-          </aside>
-        </div>
-      )}
-
-      {runHistoryOpen && resultPanel && (
-        <div className="modalBackdrop drawerBackdrop" onClick={() => setRunHistoryOpen(false)}>
-          <aside className="nodeConfigDrawer workflowRunHistoryDrawer" role="dialog" aria-modal="true" aria-label="运行日志" onClick={event => event.stopPropagation()}>
-            <div className="modalHeader nodeConfigDrawerHeader">
-              <div>
-                <h3>运行日志</h3>
-                <p>{activeRunID ? `运行 ID：${activeRunID} · ${runStatusLabel(activeRunStatus)}` : '当前工作流最近一次执行结果'}</p>
-              </div>
-              <button type="button" className="modalClose" onClick={() => setRunHistoryOpen(false)}>×</button>
-            </div>
-            <div className="nodeConfigDrawerBody workflowRunHistoryBody">
-              <div className="workflowRunDraftNotice">运行结果为只读快照，不会修改当前画布草稿。</div>
-              <RunLogView
-                items={canvasRunDetail?.logs?.items || []}
-                nodeNames={runNodeNames}
-                runningOwnerID={runningNodeID}
-                runID={activeRunID || historyRunID || 'run'}
-                scopeToggle={false}
-              />
-              <details className="workflowRunHistoryResult">
-                <summary>执行结果详情</summary>
-                {resultPanel}
-              </details>
             </div>
           </aside>
         </div>

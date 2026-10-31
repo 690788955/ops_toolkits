@@ -444,62 +444,6 @@ describe('workflow node run status', () => {
     }
   })
 
-  it('keeps the canvas mounted and opens run history in a drawer', async () => {
-    const workflow = {
-      id: 'view-switch-flow',
-      name: '视图切换工作流',
-      category: 'global',
-      parameters: [],
-      nodes: [{id: 'inspect', type: 'tool', name: '巡检', tool: 'demo.inspect'}],
-      edges: []
-    }
-    const originalFetch = globalThis.fetch
-    globalThis.fetch = vi.fn(async path => {
-      if (path === '/api/workflows/view-switch-flow') {
-        return new Response(JSON.stringify({data: {config: workflow}}), {status: 200, headers: {'Content-Type': 'application/json'}})
-      }
-      return new Response(JSON.stringify({error: `unexpected path ${path}`}), {status: 404, headers: {'Content-Type': 'application/json'}})
-    })
-    const host = document.createElement('div')
-    document.body.appendChild(host)
-    const root = createRoot(host)
-    try {
-      await act(async () => {
-        root.render(React.createElement(WorkflowEditor, {
-          catalog: {tools: [{id: 'demo.inspect', name: '巡检工具'}], workflows: [workflow]},
-          setResult: vi.fn(),
-          refreshCatalog: vi.fn(),
-          resultPanel: React.createElement('section', {className: 'card resultCard workflowResultCard'}, '执行日志面板')
-        }))
-      })
-
-      await selectWorkflow(host, 'view-switch-flow')
-
-      expect(host.querySelector('.canvasCard')).toBeTruthy()
-      expect(host.textContent).not.toContain('执行日志面板')
-
-      const moreButton = Array.from(host.querySelectorAll('.workflowTopBar button')).find(button => button.textContent === '更多')
-      expect(moreButton).toBeTruthy()
-      await act(async () => {
-        moreButton.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
-      })
-      const historyItem = Array.from(host.querySelectorAll('[role="menuitem"]')).find(item => item.textContent === '运行记录')
-      await act(async () => {
-        historyItem.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
-      })
-
-      const drawer = host.querySelector('[role="dialog"][aria-label="运行日志"]')
-      expect(drawer).toBeTruthy()
-      expect(drawer.textContent).toContain('运行结果为只读快照')
-      expect(drawer.textContent).toContain('执行日志面板')
-      expect(host.querySelector('.canvasCard')).toBeTruthy()
-    } finally {
-      root.unmount()
-      host.remove()
-      globalThis.fetch = originalFetch
-    }
-  })
-
   it('remaps legacy loop target edges onto the loop node', () => {
     const nodes = [
       {id: 'loop_1', type: 'loop', loop: {target: 'step'}},

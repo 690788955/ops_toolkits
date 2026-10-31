@@ -254,7 +254,20 @@ function NodePickerPanel({searchText, setSearchText, tools, totalTools, missingT
   )
 }
 
-function CanvasDock({onAddNode, onZoomIn, onZoomOut, onFitView}) {
+// 画布右上角的操作坞。编排动作（添加节点 / 校验 / 整理）和视图动作（缩放 / 适配）
+// 用一条竖线分开：前一组改草稿，后一组只动视角，误点的代价完全不同。
+function CanvasDock({
+  onAddNode,
+  onValidate,
+  validateLabel = '校验',
+  validateDisabled = false,
+  onTidyLayout,
+  tidyDisabled = false,
+  onZoomIn,
+  onZoomOut,
+  onFitView
+}) {
+  const hasDraftActions = Boolean(onAddNode || onValidate || onTidyLayout)
   return (
     <div className="canvasDock nodrag nopan" onMouseDown={event => event.stopPropagation()} aria-label="画布操作">
       {onAddNode && (
@@ -263,6 +276,27 @@ function CanvasDock({onAddNode, onZoomIn, onZoomOut, onFitView}) {
           <span>添加节点</span>
         </button>
       )}
+      {onValidate && (
+        <button
+          type="button"
+          className="canvasDockAction"
+          onClick={onValidate}
+          disabled={validateDisabled}
+          title="校验当前画布：不保存、不运行，只检查必填参数与依赖"
+          aria-label="手动校验"
+        >{validateLabel}</button>
+      )}
+      {onTidyLayout && (
+        <button
+          type="button"
+          className="canvasDockAction"
+          onClick={onTidyLayout}
+          disabled={tidyDisabled}
+          title="按阶段顺序重新排列画布上的节点"
+          aria-label="重新整理画布"
+        >整理</button>
+      )}
+      {hasDraftActions && <span className="canvasDockDivider" aria-hidden="true" />}
       <button type="button" onClick={onZoomOut} title="缩小画布" aria-label="缩小画布">−</button>
       <button type="button" onClick={onZoomIn} title="放大画布" aria-label="放大画布">+</button>
       <button type="button" onClick={onFitView} title="将全部节点适配到当前视图" aria-label="适配视图">⤢</button>

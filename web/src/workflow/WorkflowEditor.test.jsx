@@ -1090,9 +1090,39 @@ describe('WorkflowEditor 导航与设置入口', () => {
     const items = Array.from(host.querySelectorAll('[role="menuitem"]'))
     expect(items.find(button => button.textContent === '导出当前工作流')).toBeFalsy()
     expect(items.find(button => button.textContent === '批量导出 / 导入…')).toBeFalsy()
+    // 校验和整理搬到了画布操作坞，运行记录入口整个去掉（右栏就是运行日志）。
+    expect(items.find(button => button.textContent === '手动校验')).toBeFalsy()
+    expect(items.find(button => button.textContent === '重新整理画布')).toBeFalsy()
+    expect(items.find(button => button.textContent === '运行记录')).toBeFalsy()
     const importEntry = items.find(button => button.textContent === '导入工作流…')
     expect(importEntry).toBeTruthy()
     expect(importEntry.disabled).toBe(false)
+  })
+
+  // 校验/整理原来埋在「更多」里，现在和「添加节点」一起放在画布操作坞上：
+  // 改草稿的动作（添加/校验/整理）与只动视角的缩放之间用一条竖线分开。
+  it('画布操作坞给出校验与整理，更多菜单里不再收着它们', async () => {
+    const {host} = await mountNavigationWorkflows()
+    await clickButtonByAriaLabel(host, '编辑模式')
+
+    const dock = host.querySelector('.canvasDock')
+    expect(Array.from(dock.querySelectorAll('button')).map(button => button.textContent)).toEqual(['＋添加节点', '校验', '整理', '−', '+', '⤢'])
+    expect(dock.querySelector('.canvasDockDivider')).toBeTruthy()
+
+    await clickButtonByText(host.querySelector('.workflowMoreMenu'), '更多')
+    expect(Array.from(host.querySelectorAll('[role="menuitem"]')).map(item => item.textContent))
+      .toEqual(['新建工作流', '工作流设置', '导入工作流…', '删除工作流'])
+  })
+
+  it('画布上的校验提交草稿校验请求，空画布时整理不可点', async () => {
+    const {host, request} = await mountNavigationWorkflows()
+    await clickButtonByAriaLabel(host, '编辑模式')
+    await clickButtonByAriaLabel(host, '手动校验')
+    expect(request.mock.calls.some(call => String(call[0]).includes('/validate'))).toBe(true)
+
+    // 没有节点可排，整理按钮不该假装能点。
+    const emptyHost = await mountEditor()
+    expect(emptyHost.querySelector('.canvasDock button[aria-label="重新整理画布"]').disabled).toBe(true)
   })
 
   it('从更多菜单打开导入工作流弹窗', async () => {

@@ -3814,6 +3814,30 @@ pre {
   white-space: nowrap;
 }
 .canvasDock button.canvasDockAdd:hover { color: var(--color-surface); background: var(--color-black); }
+/* 文字型动作按钮：和图标按钮同高，宽度随文字走。校验/整理属于「改草稿」，所以用白底而不是主按钮黑底。 */
+.canvasDock button.canvasDockAction {
+  display: inline-flex;
+  width: auto;
+  min-width: 0;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.canvasDock button:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+/* 编排动作与视图动作之间的分隔：误点「整理」和误点「缩小」的代价完全不一样。 */
+.canvasDockDivider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 20px;
+  margin: 0 2px;
+  background: var(--color-border);
+}
 .canvasDock button.canvasDockAdd span:first-child {
   display: grid;
   width: 16px;

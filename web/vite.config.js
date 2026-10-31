@@ -9,6 +9,12 @@ export default defineConfig({
     emptyOutDir: true
   },
   server: {
+    // 编辑器落地文件时会先在同目录建一个 .*.tmpdir 临时文件再原子替换。
+    // 这些临时文件必须在 watch 之外：它们在 readdir 和 watch 之间就被换走，
+    // Node 会抛 EBUSY，而 Vite 的 watcher 是 'error' 事件直接崩进程。
+    watch: {
+      ignored: ['**/*.tmpdir/**', '**/*.tmp', '**/.*.tmpdir/**']
+    },
     proxy: {
       '/api': {
         target: 'http://localhost:8080',
