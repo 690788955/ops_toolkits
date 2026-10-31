@@ -26,9 +26,6 @@ export default function RunLogView({
   // 命中的第几条：搜索之后可以上下跳，长日志不用自己找。
   const [hitCursor, setHitCursor] = useState(0)
   const [atBottom, setAtBottom] = useState(true)
-  // 折叠按节点记：节点多的时候把已经看完的收起来，比一路滚到底省事。
-  // 只记「被折叠的」，新出现的节点默认展开——折叠必须是用户显式动作，不能默默藏日志。
-  const [collapsedOwners, setCollapsedOwners] = useState(() => new Set())
   const logBoxRef = useRef(null)
   const ownerRefs = useRef({})
   const previousFocusRef = useRef('')
@@ -78,16 +75,6 @@ export default function RunLogView({
     })
   }
 
-  function toggleOwner(ownerID) {
-    if (!ownerID) return
-    setCollapsedOwners(current => {
-      const next = new Set(current)
-      if (next.has(ownerID)) next.delete(ownerID)
-      else next.add(ownerID)
-      return next
-    })
-  }
-
   // 只滚日志容器，不让 scrollIntoView 把整个工作台拉离用户当前的位置。
   useEffect(() => {
     const box = logBoxRef.current
@@ -107,12 +94,11 @@ export default function RunLogView({
   }, [focusedOwnerID, focusOwnerID, showOnlyNode, autoScroll, keyword, visibleLines, matchingLines.length])
 
   // 搜索时把视图带到当前命中的那一行（声明在上面的自动滚动之后，保证这一下不被覆盖）。
-  // 折叠状态也算依赖：命中行所在的节点如果是收起的，下面会先展开它，展开后这一拍要重跑才能滚过去。
   useEffect(() => {
     if (!keyword) return
     scrollToHit(activeHit)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyword, activeHit, collapsedOwners])
+  }, [keyword, activeHit])
 
   const groups = useMemo(() => {
     const out = []
@@ -124,25 +110,11 @@ export default function RunLogView({
     return out
   }, [visibleLines])
 
-  // 行是按 key 找的，不按序号：被折叠的节点不渲染，序号会和 visibleLines 错位。
-  function findLineElement(box, line) {
-    const key = `${line.key}:${line.index}`
-    for (const row of box.querySelectorAll('.runLogLine')) {
-      if (row.dataset.lineKey === key) return row
-    }
-    return null
-  }
-
   function scrollToHit(index) {
     const box = logBoxRef.current
-    const line = visibleLines[index]
-    if (!box || !line) return
-    // 命中的行可能在收起的节点里：先展开，收起状态一变这个 effect 会再跑一次，那时才滚得动。
-    if (line.ownerID && collapsedOwners.has(line.ownerID)) {
-      toggleOwner(line.ownerID)
-      return
-    }
-    const target = findLineElement(box, line)
+    if (!box) return
+    const rows = box.querySelectorAll('.runLogLine')
+    const target = rows[index]
     if (!target) return
     const offset = target.getBoundingClientRect().top - box.getBoundingClientRect().top
     box.scrollTop += offset - 8
@@ -244,47 +216,37 @@ export default function RunLogView({
           onScroll={handleLogScroll}
         >
           {truncated && <div className="runLogTruncated">显示最近 {lineLimit} 条匹配日志，共 {matchingLines.length} 条。搜索、级别筛选和导出覆盖全部日志。</div>}
-          {groups.map((group, index) => {
-            const collapsed = collapsedOwners.has(group.ownerID)
-            const ownerName = nodeNames[group.ownerID] || group.ownerID
-            return (
-              <React.Fragment key={`${group.ownerID}:${index}`}>
-                {!showOnlyNode && (
-                  <button
-                    type="button"
-                    className={`runLogOwner${group.ownerID === focusedOwnerID ? ' focus' : ''}${group.ownerID === runningOwnerID ? ' running' : ''}${collapsed ? ' collapsed' : ''}`}
-                    data-owner-id={group.ownerID}
-                    aria-expanded={!collapsed}
-                    title={collapsed ? `展开 ${ownerName} 的日志` : `折叠 ${ownerName} 的日志`}
-                    ref={element => {
-                      if (element) ownerRefs.current[group.ownerID] = element
-                      else delete ownerRefs.current[group.ownerID]
-                    }}
-                    onClick={() => toggleOwner(group.ownerID)}
+          {groups.map((group, index) => (
+            <React.Fragment key={`${group.ownerID}:${index}`}>
+              {!showOnlyNode && (
+                <div
+                  className={`runLogOwner${group.ownerID === focusedOwnerID ? ' focus' : ''}${group.ownerID === runningOwnerID ? ' running' : ''}`}
+                  data-owner-id={group.ownerID}
+                  ref={element => {
+                    if (element) ownerRefs.current[group.ownerID] = element
+                    else delete ownerRefs.current[group.ownerID]
+                  }}
+                >
+                  <span className="runLogOwnerName">{nodeNames[group.ownerID] || group.ownerID}</span>
+                  <span className="runLogOwnerMeta">{group.lines.length} 行</span>
+                </div>
+              )}
+              {group.lines.map(line => {
+                const lineIndex = hitOrder ? hitOrder.get(`${line.key}:${line.index}`) : -1
+                const currentHit = keyword && lineIndex === activeHit
+                return (
+                  <div
+                    key={`${line.key}:${line.index}`}
+                    className={`runLogLine ${line.stream} level-${line.level}${line.ownerID === focusedOwnerID ? ' focus' : ''}${line.ownerID === runningOwnerID ? ' running' : ''}${currentHit ? ' current' : ''}`}
+                    data-step-id={line.stepID}
+                    data-level={line.level}
                   >
-                    <span className="runLogOwnerCaret" aria-hidden="true">{collapsed ? '▸' : '▾'}</span>
-                    <span className="runLogOwnerName">{ownerName}</span>
-                    <span className="runLogOwnerMeta">{group.lines.length} 行{collapsed ? ' · 已折叠' : ''}</span>
-                  </button>
-                )}
-                {!collapsed && group.lines.map(line => {
-                  const lineIndex = hitOrder ? hitOrder.get(`${line.key}:${line.index}`) : -1
-                  const currentHit = keyword && lineIndex === activeHit
-                  return (
-                    <div
-                      key={`${line.key}:${line.index}`}
-                      className={`runLogLine ${line.stream} level-${line.level}${line.ownerID === focusedOwnerID ? ' focus' : ''}${line.ownerID === runningOwnerID ? ' running' : ''}${currentHit ? ' current' : ''}`}
-                      data-step-id={line.stepID}
-                      data-level={line.level}
-                      data-line-key={`${line.key}:${line.index}`}
-                    >
-                      {highlightLogText(line.text, keyword)}
-                    </div>
-                  )
-                })}
-              </React.Fragment>
-            )
-          })}
+                    {highlightLogText(line.text, keyword)}
+                  </div>
+                )
+              })}
+            </React.Fragment>
+          ))}
           {visibleLines.length === 0 && <div className="empty small">{emptyText}</div>}
         </div>
         {!atBottom && (

@@ -763,16 +763,6 @@ input:not([type="checkbox"]):not([type="radio"]):disabled { color: var(--color-m
   overflow-wrap: anywhere;
 }
 .runHistoryPagination { margin-top: 12px; padding-top: 12px; }
-/* 点了列表但详情还没回来：明确说「正在读取哪一条」，不要掉进「请选择一条」的空态。 */
-.runHistoryDetailLoading {
-  color: var(--color-muted);
-  font-weight: 800;
-  animation: runHistoryDetailPulse 1.2s ease-in-out infinite;
-}
-@keyframes runHistoryDetailPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.55; }
-}
 .runCleanupModal { max-width: 540px; }
 .runCleanupResult {
   display: grid;
@@ -3814,30 +3804,6 @@ pre {
   white-space: nowrap;
 }
 .canvasDock button.canvasDockAdd:hover { color: var(--color-surface); background: var(--color-black); }
-/* 文字型动作按钮：和图标按钮同高，宽度随文字走。校验/整理属于「改草稿」，所以用白底而不是主按钮黑底。 */
-.canvasDock button.canvasDockAction {
-  display: inline-flex;
-  width: auto;
-  min-width: 0;
-  align-items: center;
-  padding: 0 10px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-.canvasDock button:disabled {
-  opacity: .45;
-  cursor: not-allowed;
-  box-shadow: none;
-  transform: none;
-}
-/* 编排动作与视图动作之间的分隔：误点「整理」和误点「缩小」的代价完全不一样。 */
-.canvasDockDivider {
-  flex: 0 0 auto;
-  width: 1px;
-  height: 20px;
-  margin: 0 2px;
-  background: var(--color-border);
-}
 .canvasDock button.canvasDockAdd span:first-child {
   display: grid;
   width: 16px;
@@ -6039,35 +6005,23 @@ fieldset legend {
 .runLogLine.current { background: rgba(255,213,74,.16); box-shadow: inset 2px 0 0 #ffd54a; }
 /* 命中关键字就地高亮，滚动时一眼能看到命中的是哪个词。 */
 .runLogHit { border-radius: 3px; padding: 0 1px; background: #ffd54a; color: #16181d; }
-/* 分组标题同时是折叠开关：点一下收起该节点的日志，长流程里不用一路滚。
-   它是个 button，所以要显式收回浏览器默认的居中、边框和字体。 */
 .runLogOwner {
   position: sticky;
   top: 0;
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 100%;
   margin: 10px 0 4px;
-  border: 0;
   border-radius: 6px;
   padding: 2px 6px;
-  text-align: left;
   background: rgba(255,255,255,.1);
   color: #c7ccd8;
-  font: inherit;
   font-weight: 800;
 }
-.runLogOwner:hover { background: rgba(255,255,255,.3); }
-.runLogOwnerCaret { flex: 0 0 auto; color: #9aa3b2; font-size: 10px; line-height: 1; }
 .runLogOwnerName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .runLogOwnerMeta { flex: 0 0 auto; margin-left: auto; color: #9aa3b2; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
-/* 折叠态压暗一点：一眼看出这个节点是收起来的，不是没有日志。 */
-.runLogOwner.collapsed { background: rgba(255,255,255,.06); color: #9aa3b2; }
-.runLogOwner.collapsed .runLogOwnerName { color: #9aa3b2; }
 .runLogOwner.focus { background: #2d6cdf; color: #fff; }
 .runLogOwner.focus .runLogOwnerMeta { color: rgba(255,255,255,.82); }
-.runLogOwner.focus .runLogOwnerCaret { color: rgba(255,255,255,.82); }
 .runLogTruncated { margin-top: 8px; color: #ffd08a; font-size: 11px; font-weight: 700; }
 
 .nodeRunOverview { display: flex; flex-direction: column; gap: 12px; }
@@ -7268,101 +7222,29 @@ fieldset legend {
 .tab.active .tabCount.tabCountAwaiting { color: #7a4700; background: #ffdca8; }
 
 /* 列表头与筛选 chip */
-/* 待审批区：整块就是一个按钮，点一下只看待审批，再点一下回到全部。
-   它替代了原来挤在状态 chip 里的「待审批 N」，也替掉了标题旁的重复计数徽标——
-   同一件事只在最显眼的位置说一次。 */
-.runHistoryAwaitingBanner {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px 14px;
-  width: 100%;
-  margin: 0 0 14px;
+.cardHeader h3 .runHistoryAwaitingCount {
+  display: inline-grid;
+  margin-left: 8px;
   border: 1px solid var(--color-warning-border);
-  border-left: 4px solid #d99200;
-  border-radius: var(--radius-control);
-  padding: 10px 12px;
-  text-align: left;
+  border-radius: var(--radius-pill);
+  padding: 2px 9px;
+  color: var(--color-warning-text);
   background: var(--color-warning-bg);
-  cursor: pointer;
+  font-size: 11px;
+  font-weight: 900;
+  vertical-align: middle;
 }
-.runHistoryAwaitingBanner:hover {
-  border-color: #d99200;
-  box-shadow: var(--shadow-whisper);
-}
-.runHistoryAwaitingBanner.active {
-  border-color: #d99200;
-  box-shadow: inset 0 0 0 1px #ffd6a6;
-}
-.runHistoryAwaitingBannerHead {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  grid-column: 1;
-  gap: 8px;
-}
-.runHistoryAwaitingBannerHead strong {
-  color: #7a4700;
-  font-size: 14px;
+.tagChip.runAwaitingChip {
+  border-color: var(--color-warning-border);
+  color: var(--color-warning-text);
+  background: var(--color-warning-bg);
   font-weight: 900;
 }
-.runHistoryAwaitingBannerFlag {
-  border-radius: var(--radius-pill);
-  padding: 1px 8px;
+.tagChip.runAwaitingChip.active {
+  border-color: #d99200;
   color: #7a4700;
   background: #ffe6bd;
-  font-size: 11px;
-  font-weight: 900;
-}
-.runHistoryAwaitingBannerBody {
-  display: grid;
-  grid-column: 1;
-  gap: 2px;
-  min-width: 0;
-}
-.runHistoryAwaitingBannerTarget {
-  overflow: hidden;
-  color: var(--color-text);
-  font-size: 12px;
-  font-weight: 900;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.runHistoryAwaitingBannerNode {
-  color: var(--color-warning-text);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  font-size: 11px;
-  font-weight: 800;
-}
-.runHistoryAwaitingBannerMessage {
-  display: -webkit-box;
-  overflow: hidden;
-  color: var(--color-text);
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-.runHistoryAwaitingBannerSide {
-  display: grid;
-  grid-column: 2;
-  grid-row: 1 / span 2;
-  align-content: center;
-  justify-items: end;
-  gap: 4px;
-}
-.runHistoryAwaitingBannerWait {
-  color: var(--color-warning-text);
-  font-size: 11px;
-  font-weight: 900;
-  font-variant-numeric: tabular-nums;
-}
-.runHistoryAwaitingBannerToggle {
-  color: var(--color-muted);
-  font-size: 11px;
-  font-weight: 800;
-  text-decoration: underline;
+  box-shadow: inset 0 0 0 1px #ffd6a6;
 }
 
 /* 列表项改版：awaiting 的整行用警告色左框 + 底色，扫一眼就能定位。 */
@@ -7410,34 +7292,12 @@ fieldset legend {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 待审批的三行（节点 / 提示 / 已等待）成组显示：左边一条竖线把它们绑在一起，
-   比原先散在条目里的 11px 小字好扫——「谁在等、等什么、等了多久」一眼读完。
-   节点和已等待放在同一行两端对齐，等待时长不必在文字里找。 */
-.runHistoryItem .runHistoryAwaitingBlock {
-  display: grid;
-  gap: 3px;
-  border-left: 2px solid #d99200;
-  padding-left: 8px;
-}
-.runHistoryItem .runHistoryAwaitingHead {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 2px 10px;
-}
-.runHistoryItem .runHistoryAwaitingNode {
-  color: var(--color-warning-text);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  font-size: 11px;
-  font-weight: 800;
-}
 .runHistoryItem .runHistoryAwaitingMessage {
   display: -webkit-box;
   overflow: hidden;
   color: #7a4700;
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 800;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -7447,8 +7307,8 @@ fieldset legend {
 .runHistoryItem .runHistoryAwaitingMeta {
   color: var(--color-warning-text);
   font-family: inherit;
-  font-size: 12px;
-  font-weight: 900;
+  font-size: 11px;
+  font-weight: 800;
   font-variant-numeric: tabular-nums;
 }
 /* 状态徽标：等待审批时仍然是 running，所以文案是「运行中 · 待审批」，颜色按待审批走。 */
@@ -7467,12 +7327,13 @@ fieldset legend {
 }
 .runHistoryItemActions button { padding: 6px 12px; font-size: 12px; }
 
-/* 详情审批卡片：日志视图和画布视图上方都要出现，所以挂在视图分支外面。
-   两栏本来就窄，所以从「左边一段文字 + 右边一坨按钮」改成上下两段：
-   标题行（节点名 + 已等待徽标）→ 提示 → 动作区整行铺开，输入框吃掉剩余宽度。 */
+/* 详情审批卡片：日志视图和画布视图上方都要出现，所以挂在视图分支外面。 */
 .runApprovalCard {
-  display: grid;
-  gap: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 18px;
   margin: 0 0 14px;
   border: 1px solid var(--color-warning-border);
   border-left: 4px solid #d99200;
@@ -7480,36 +7341,15 @@ fieldset legend {
   padding: 12px 14px;
   background: var(--color-warning-bg);
 }
-.runApprovalCardText { display: grid; min-width: 0; gap: 5px; }
-.runApprovalCardHead {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 4px 10px;
-}
-.runApprovalCardHead > strong { color: var(--color-warning-text); font-size: 14px; font-weight: 900; }
-/* 「已等待」单独做成徽标：这是审批卡片上最该被先看到的数字。 */
-.runApprovalCardWait {
-  border-radius: var(--radius-pill);
-  padding: 2px 9px;
-  color: #7a4700;
-  background: #ffe6bd;
-  font-size: 11px;
-  font-weight: 900;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
+.runApprovalCardText { display: grid; min-width: 0; gap: 3px; }
+.runApprovalCardText > strong { color: var(--color-warning-text); font-size: 14px; font-weight: 900; }
 .runApprovalCardText > span { color: var(--color-text); font-size: 12px; font-weight: 700; line-height: 1.45; overflow-wrap: anywhere; }
-.runApprovalCardMessage { font-size: 13px !important; font-weight: 800 !important; }
 .runApprovalCardMeta { color: var(--color-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-.runApprovalCardActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.runApprovalCardActions input { flex: 1 1 220px; min-width: 0; }
-/* 提交中：按钮文案已经换成「确认中…」，这里再压一层视觉，避免深色下看不出在动。 */
-.runApprovalCardActions[aria-busy="true"] button { opacity: 0.7; }
+.runApprovalCardActions { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 8px; }
+.runApprovalCardActions input { min-width: 200px; }
 /* 由 CLI 等其它进程启动的运行：Web 端提交审批必然失败，卡片降级为说明态而不是报错态。 */
 .runApprovalCard.locked { border-left-color: var(--color-muted); background: var(--color-surface); }
-.runApprovalCard.locked .runApprovalCardHead > strong { color: var(--color-text); }
+.runApprovalCard.locked .runApprovalCardText > strong { color: var(--color-text); }
 .runApprovalCardLockedNote { color: var(--color-muted) !important; font-weight: 700 !important; }
 .runHistoryAwaitingLocked {
   align-self: center;
@@ -7523,8 +7363,8 @@ fieldset legend {
 @media (max-width: 1100px) {
   .runAwaitingBanner { align-items: flex-start; flex-direction: column; }
   .runAwaitingBannerButton { align-self: flex-start; }
-  .runHistoryAwaitingBanner { grid-template-columns: minmax(0, 1fr); }
-  .runHistoryAwaitingBannerSide { grid-column: 1; grid-row: auto; justify-items: start; }
+  .runApprovalCard { align-items: flex-start; flex-direction: column; }
+  .runApprovalCardActions { align-self: stretch; }
   .runApprovalCardActions input { flex: 1 1 160px; min-width: 0; }
   .runHistoryItemActions { justify-self: start; grid-column: 1 / -1; }
 }

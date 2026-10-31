@@ -191,8 +191,8 @@ describe('RunHistoryPanel canvas view', () => {
     document.body.innerHTML = ''
   })
 
-  // 详情只保留日志；画布视图和原始终端视图都已移除，这两个切换控件不该再出现。
-  it('详情不再提供画布与终端视图', async () => {
+  // 详情直接用工作流工作台那套按节点分组的日志，不再有画布和原始终端视图。
+  it('详情直接使用按节点分组的统一日志视图，不再有画布与终端切换', async () => {
     const {host, root} = await renderPanel()
     await vi.waitFor(() => expect(host.textContent).toContain('workflow-run-1'))
 
@@ -201,9 +201,15 @@ describe('RunHistoryPanel canvas view', () => {
     expect([...workflowItem.querySelectorAll('button')].some(button => button.textContent === '画布')).toBe(false)
     click(workflowItem.querySelector('.runHistorySelectButton'))
 
-    await vi.waitFor(() => expect(host.querySelector('.runDetail')).not.toBeNull())
+    await vi.waitFor(() => expect(host.querySelector('.runLogView')).not.toBeNull())
     expect(host.querySelector('.runRecordCanvas')).toBeNull()
     expect(host.querySelector('[aria-label="运行详情视图"]')).toBeNull()
+    expect(host.querySelector('[aria-label="日志视图"]')).toBeNull()
+    expect(host.querySelector('.liveTerminal')).toBeNull()
+
+    expect([...host.querySelectorAll('.runLogOwnerName')].map(node => node.textContent)).toEqual(['巡检', '通知'])
+    expect(host.textContent).toContain('inspect ok')
+    expect(host.querySelector('[aria-label="日志级别过滤"]')).not.toBeNull()
 
     await act(async () => root.unmount())
   })

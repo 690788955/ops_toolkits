@@ -4267,9 +4267,9 @@ function RunDetail({detail, run}) {
   const runID = record.id || run?.id
   const status = record.status || run?.status
   const items = logs.items || []
-  // 终端仍是这个页面的默认视图（原始流、支持 SSE 实时追加）；
-  // 「列表」用的是和工作流工作台同一套 RunLogView：按节点分组、级别过滤、搜索、导出。
-  const [logView, setLogView] = useState('terminal')
+  // 和工作流工作台的「运行日志」用同一个 RunLogView：按节点分组（组头带行数）、级别过滤、
+  // 搜索跳转、只看错误、导出、自动滚动与换行。原始终端视图已经去掉——排查时按节点分组的
+  // 列表比一整屏裸文本好定位，两个页面也就不用再维护两套日志界面。
   const runningStepID = (record.steps || []).find(step => step.status === 'running')?.id || ''
   const stepNames = useMemo(() => {
     const names = {}
@@ -4284,23 +4284,11 @@ function RunDetail({detail, run}) {
         {(record.host_name || record.host_id) && <span>操作机：{record.host_name || record.host_id}</span>}
         <span>运行 ID：{runID || '-'}</span>
         {runID && <a href={`/api/runs/${encodeURIComponent(runID)}/support.zip`}>导出支持包</a>}
-        {runID && status && (
-          <div className="segmentedControl" role="group" aria-label="日志视图">
-            <button type="button" className={logView === 'list' ? 'active' : ''} onClick={() => setLogView('list')}>列表</button>
-            <button type="button" className={logView === 'terminal' ? 'active' : ''} onClick={() => setLogView('terminal')}>终端</button>
-          </div>
-        )}
       </div>
-      {runID ? (
-        logView === 'list' && items.length > 0 ? (
-          <React.Suspense fallback={<div className="empty small">正在加载日志列表...</div>}>
-            <RunLogView items={items} nodeNames={stepNames} runningOwnerID={runningStepID} runID={runID} scopeToggle={false} />
-          </React.Suspense>
-        ) : (
-          <React.Suspense fallback={<div className="empty small">正在加载实时日志终端...</div>}>
-            <LiveRunTerminal runID={runID} running={status === 'running'} initialItems={items} />
-          </React.Suspense>
-        )
+      {runID && items.length > 0 ? (
+        <React.Suspense fallback={<div className="empty small">正在加载日志...</div>}>
+          <RunLogView key={runID} items={items} nodeNames={stepNames} runningOwnerID={runningStepID} runID={runID} scopeToggle={false} />
+        </React.Suspense>
       ) : (
         <>
           <LogBlock title="标准输出" value={logs.stdout} />
