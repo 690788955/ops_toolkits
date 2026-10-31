@@ -191,7 +191,6 @@ describe('RunHistoryPanel canvas view', () => {
     document.body.innerHTML = ''
   })
 
-  // 详情直接用工作流工作台那套按节点分组的日志，不再有画布和原始终端视图。
   it('详情直接使用按节点分组的统一日志视图，不再有画布与终端切换', async () => {
     const {host, root} = await renderPanel()
     await vi.waitFor(() => expect(host.textContent).toContain('workflow-run-1'))
@@ -201,8 +200,10 @@ describe('RunHistoryPanel canvas view', () => {
     expect([...workflowItem.querySelectorAll('button')].some(button => button.textContent === '画布')).toBe(false)
     click(workflowItem.querySelector('.runHistorySelectButton'))
 
+    // 和工作流工作台同一套 RunLogView：进入详情直接就是按节点分组的日志列表。
     await vi.waitFor(() => expect(host.querySelector('.runLogView')).not.toBeNull())
     expect(host.querySelector('.runRecordCanvas')).toBeNull()
+    // 画布视图和原始终端视图都去掉了，所以这两个切换控件也该消失。
     expect(host.querySelector('[aria-label="运行详情视图"]')).toBeNull()
     expect(host.querySelector('[aria-label="日志视图"]')).toBeNull()
     expect(host.querySelector('.liveTerminal')).toBeNull()
@@ -213,7 +214,6 @@ describe('RunHistoryPanel canvas view', () => {
 
     await act(async () => root.unmount())
   })
-
 })
 
 // ===== 待审批：列表可见性、详情审批卡片、确认/驳回、筛选、focusRun =====
@@ -444,6 +444,85 @@ describe('RunHistoryPanel 待审批', () => {
     expect(host.querySelector('.runHistoryAwaitingBanner').className).toContain('active')
     const awaitingListCalls = fetch.mock.calls.filter(call => String(call[0]).includes('awaiting=1') && String(call[0]).includes('limit=20'))
     expect(awaitingListCalls.length).toBeGreaterThan(0)
+
+    await act(async () => root.unmount())
+  })
+
+  // 横幅要能把「谁在等、等什么、等了多久」一次说清：它替代了原来挤在状态 chip 里的计数。
+  it('顶部横幅显示最早一条待审批的节点与已等待时长，点击可切换筛选', async () => {
+    const items = [
+      awaitingRunListItem(),
+      awaitingRunListItem({id: 'workflow-run-await-2', target: 'example.second-check'})
+    ]
+    vi.stubGlobal('fetch', vi.fn(url => {
+      const path = String(url)
+      if (path.startsWith('/api/runs/?awaiting=')) return jsonResponse({data: {runs: items, total: 2}})
+      if (path.startsWith('/api/runs/?')) return jsonResponse({data: {runs: items, total: 2}})
+      return jsonResponse({data: {}})
+    }))
+    const {host, root} = await renderPanel()
+    const banner = () => host.querySelector('.runHistoryAwaitingBanner')
+
+    await vi.waitFor(() => expect(banner()).not.toBeNull())
+    expect(banner().textContent).toContain('待审批 2')
+    expect(banner().textContent).toContain(`审批节点 ${AWAITING_NODE_ID}`)
+    expect(banner().textContent).toContain('已等待 2 分钟')
+    expect(banner().textContent).toContain('只看待审批')
+
+    click(banner())
+    await vi.waitFor(() => expect(banner().className).toContain('active'))
+    expect(banner().textContent).toContain('返回全部运行')
+
+    await act(async () => root.unmount())
+  })
+
+  // 点下去必须有回执：按钮换文案，右侧也不能先闪「选择一条运行记录」的空态。
+  it('点「去确认」立刻显示「打开中…」，右侧不会先闪空态', async () => {
+    let releaseDetail
+    const detailGate = new Promise(resolve => { releaseDetail = resolve })
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      const path = String(url)
+      const method = String(options.method || 'GET').toUpperCase()
+      if (path.startsWith('/api/runs/?awaiting=')) return jsonResponse({data: {runs: [awaitingRunListItem()], total: 1}})
+      if (method === 'GET' && path.startsWith('/api/runs/?')) return jsonResponse({data: {runs: [awaitingRunListItem()], total: 1}})
+      if (method === 'GET' && path === `/api/runs/${AWAITING_RUN_ID}`) {
+        return detailGate.then(() => jsonResponse({data: awaitingDetailBody(true)}))
+      }
+      return jsonResponse({data: {}})
+    }))
+    const {host, root} = await renderPanel()
+
+    await vi.waitFor(() => expect(host.querySelector('.runHistoryAwaitingButton')).not.toBeNull())
+    click(host.querySelector('.runHistoryAwaitingButton'))
+
+    await vi.waitFor(() => expect(host.querySelector('.runHistoryAwaitingButton').textContent).toBe('打开中…'))
+    expect(host.querySelector('.runHistoryAwaitingButton').disabled).toBe(true)
+    expect(host.querySelector('.runHistoryDetailLoading')).not.toBeNull()
+    expect(host.textContent).not.toContain('选择一条运行记录查看日志和支持包')
+
+    await act(async () => { releaseDetail() })
+    await vi.waitFor(() => expect(host.querySelector('.runApprovalCard')).not.toBeNull())
+    expect(host.querySelector('.runHistoryAwaitingButton').textContent).toBe('去确认')
+
+    await act(async () => root.unmount())
+  })
+
+  // 审批是「有人等着」的事：分页和时间倒序都不能把它压到看不见。
+  it('待审批条目置顶，其余运行按开始时间倒序', async () => {
+    const waiting = awaitingRunListItem({started_at: '2026-09-01T10:00:00Z'})
+    const newer = {id: 'run-newer', kind: 'tool', target: 'demo.new', status: 'failed', started_at: '2026-10-20T10:00:00Z'}
+    const older = {id: 'run-older', kind: 'tool', target: 'demo.old', status: 'succeeded', started_at: '2026-10-01T10:00:00Z'}
+    vi.stubGlobal('fetch', vi.fn(url => {
+      const path = String(url)
+      if (path.startsWith('/api/runs/?awaiting=')) return jsonResponse({data: {runs: [waiting], total: 1}})
+      if (path.startsWith('/api/runs/?')) return jsonResponse({data: {runs: [newer, older, waiting], total: 3}})
+      return jsonResponse({data: {}})
+    }))
+    const {host, root} = await renderPanel()
+
+    await vi.waitFor(() => expect(host.querySelectorAll('.runHistoryItem')).toHaveLength(3))
+    const ids = [...host.querySelectorAll('.runHistoryItem .runHistoryItemID')].map(node => node.textContent)
+    expect(ids).toEqual([AWAITING_RUN_ID, 'run-newer', 'run-older'])
 
     await act(async () => root.unmount())
   })
