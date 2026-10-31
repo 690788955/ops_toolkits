@@ -191,7 +191,8 @@ describe('RunHistoryPanel canvas view', () => {
     document.body.innerHTML = ''
   })
 
-  it('opens a workflow run directly in canvas view and can switch back to logs', async () => {
+  // 详情只保留日志；画布视图和原始终端视图都已移除，这两个切换控件不该再出现。
+  it('详情不再提供画布与终端视图', async () => {
     const {host, root} = await renderPanel()
     await vi.waitFor(() => expect(host.textContent).toContain('workflow-run-1'))
 
@@ -199,49 +200,14 @@ describe('RunHistoryPanel canvas view', () => {
       .find(item => item.textContent.includes('workflow-run-1'))
     expect([...workflowItem.querySelectorAll('button')].some(button => button.textContent === '画布')).toBe(false)
     click(workflowItem.querySelector('.runHistorySelectButton'))
-    await vi.waitFor(() => expect(host.querySelector('[aria-label="运行详情视图"]')).not.toBeNull())
-    click([...host.querySelectorAll('[aria-label="运行详情视图"] button')].find(button => button.textContent === '画布'))
 
-    await vi.waitFor(() => expect(host.querySelector('.runRecordCanvas')).not.toBeNull())
-    expect(host.textContent).toContain('演示流程')
-    expect(host.querySelectorAll('.react-flow__node')).toHaveLength(2)
-
-    click([...host.querySelectorAll('.react-flow__node')].find(node => node.textContent.includes('巡检')))
-    await vi.waitFor(() => expect(host.textContent).toContain('inspect ok'))
-
-    click([...host.querySelectorAll('.segmentedControl button')].find(button => button.textContent === '日志'))
-    await vi.waitFor(() => expect(host.querySelector('.liveTerminal')).not.toBeNull())
+    await vi.waitFor(() => expect(host.querySelector('.runDetail')).not.toBeNull())
     expect(host.querySelector('.runRecordCanvas')).toBeNull()
-
-    click([...host.querySelectorAll('.segmentedControl button')].find(button => button.textContent === '画布'))
-    await vi.waitFor(() => expect(host.querySelector('.runRecordCanvas')).not.toBeNull())
+    expect(host.querySelector('[aria-label="运行详情视图"]')).toBeNull()
 
     await act(async () => root.unmount())
   })
 
-  it('日志视图可以在终端和统一日志列表之间切换', async () => {
-    const {host, root} = await renderPanel()
-    await vi.waitFor(() => expect(host.textContent).toContain('workflow-run-1'))
-
-    const workflowItem = [...host.querySelectorAll('.runHistoryItem')]
-      .find(item => item.textContent.includes('workflow-run-1'))
-    click(workflowItem.querySelector('.runHistorySelectButton'))
-
-    // 默认仍是终端：原始流、支持实时追加。
-    await vi.waitFor(() => expect(host.querySelector('.liveTerminal')).not.toBeNull())
-
-    click([...host.querySelectorAll('[aria-label="日志视图"] button')].find(button => button.textContent === '列表'))
-    await vi.waitFor(() => expect(host.querySelector('.runLogView')).not.toBeNull())
-    expect(host.textContent).toContain('inspect ok')
-    expect([...host.querySelectorAll('.runLogOwnerName')].map(node => node.textContent)).toEqual(['巡检', '通知'])
-    expect(host.querySelector('[aria-label="日志级别过滤"]')).not.toBeNull()
-
-    click([...host.querySelectorAll('[aria-label="日志视图"] button')].find(button => button.textContent === '终端'))
-    await vi.waitFor(() => expect(host.querySelector('.liveTerminal')).not.toBeNull())
-    expect(host.querySelector('.runLogView')).toBeNull()
-
-    await act(async () => root.unmount())
-  })
 })
 
 // ===== 待审批：列表可见性、详情审批卡片、确认/驳回、筛选、focusRun =====
@@ -444,21 +410,21 @@ describe('RunHistoryPanel 待审批', () => {
     await act(async () => root.unmount())
   })
 
-  it('「待审批」chip 打开后列表请求带上 awaiting=1', async () => {
+  it('「待审批」横幅打开后列表请求带上 awaiting=1', async () => {
     stubAwaitingFetch()
     const {host, root} = await renderPanel()
 
-    await vi.waitFor(() => expect(host.querySelector('.runAwaitingChip')).not.toBeNull())
+    await vi.waitFor(() => expect(host.querySelector('.runHistoryAwaitingBanner')).not.toBeNull())
     const firstListCall = fetch.mock.calls.find(call => String(call[0]).includes('limit=20'))
     expect(firstListCall).toBeDefined()
     expect(String(firstListCall[0])).not.toContain('awaiting=1')
 
-    click(host.querySelector('.runAwaitingChip'))
+    click(host.querySelector('.runHistoryAwaitingBanner'))
     await vi.waitFor(() => {
       const withAwaiting = fetch.mock.calls.filter(call => String(call[0]).includes('awaiting=1') && String(call[0]).includes('limit=20'))
       expect(withAwaiting.length).toBeGreaterThan(0)
     })
-    expect(host.querySelector('.runAwaitingChip').className).toContain('active')
+    expect(host.querySelector('.runHistoryAwaitingBanner').className).toContain('active')
 
     await act(async () => root.unmount())
   })
@@ -469,7 +435,7 @@ describe('RunHistoryPanel 待审批', () => {
 
     await vi.waitFor(() => expect(host.querySelector('.runApprovalCard')).not.toBeNull())
     expect(host.querySelector('.runApprovalCard').textContent).toContain(AWAITING_MESSAGE)
-    expect(host.querySelector('.runAwaitingChip').className).toContain('active')
+    expect(host.querySelector('.runHistoryAwaitingBanner').className).toContain('active')
     const awaitingListCalls = fetch.mock.calls.filter(call => String(call[0]).includes('awaiting=1') && String(call[0]).includes('limit=20'))
     expect(awaitingListCalls.length).toBeGreaterThan(0)
 
