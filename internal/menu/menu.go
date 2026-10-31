@@ -360,6 +360,10 @@ func printWorkflowDetails(reg *registry.Registry, id string, out io.Writer) erro
 			fmt.Fprintf(out, "  %s [编排节点/上传文件] 目标目录=%s\n", node.ID, title(node.Upload.TargetDir, "默认"))
 			continue
 		}
+		if workflowNodeType(node) == config.WorkflowNodeTypeApproval {
+			fmt.Fprintf(out, "  %s [编排节点/人工审批] 提示=%s 等待上限=%s\n", node.ID, title(node.Approval.Message, "未填写"), title(node.Approval.Timeout, "不限"))
+			continue
+		}
 		fmt.Fprintf(out, "  %s [工具节点] 工具=%s\n", node.ID, node.Tool)
 	}
 	if len(wf.Config.Edges) > 0 {
@@ -430,6 +434,9 @@ func displayStepType(step runner.StepRecord) string {
 	}
 	if step.Type == config.WorkflowNodeTypeUpload {
 		return "编排节点/上传文件"
+	}
+	if step.Type == config.WorkflowNodeTypeApproval {
+		return "编排节点/人工审批"
 	}
 	return "工具节点"
 }

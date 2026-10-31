@@ -270,6 +270,7 @@ type WorkflowNode struct {
 	Archive     WorkflowArchive        `yaml:"archive,omitempty" json:"archive,omitempty"`
 	Wait        WorkflowWait           `yaml:"wait,omitempty" json:"wait,omitempty"`
 	Notify      WorkflowNotify         `yaml:"notify,omitempty" json:"notify,omitempty"`
+	Approval    WorkflowApproval       `yaml:"approval,omitempty" json:"approval,omitempty"`
 	DependsOn   []string               `yaml:"depends_on" json:"depends_on"`
 	Params      map[string]interface{} `yaml:"params" json:"params"`
 	Optional    bool                   `yaml:"optional" json:"optional"`
@@ -387,6 +388,7 @@ const (
 	WorkflowNodeTypeArchive       = "archive"
 	WorkflowNodeTypeWait          = "wait"
 	WorkflowNodeTypeNotify        = "notify"
+	WorkflowNodeTypeApproval      = "approval"
 
 	WorkflowStageExecutionSerial   = "serial"
 	WorkflowStageExecutionParallel = "parallel"
@@ -432,6 +434,32 @@ type WorkflowWait struct {
 	MaxWait      string            `yaml:"max_wait,omitempty" json:"max_wait,omitempty"`
 	Headers      map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 }
+
+// WorkflowApproval 是人工审批节点：运行到该节点时暂停流水线，
+// 等人工在平台确认后才继续，适合“先改配置、改完再放行”的停机点。
+type WorkflowApproval struct {
+	Message string `yaml:"message,omitempty" json:"message,omitempty"`
+	Timeout string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
+// ValidateApprovalConfig 校验人工审批节点：提示可留空，但超时必须是正时长。
+func ValidateApprovalConfig(nodeID string, item WorkflowApproval) (WorkflowApproval, error) {
+	out := item
+	out.Message = strings.TrimSpace(out.Message)
+	if len([]rune(out.Message)) > approvalMessageMaxRunes {
+		return out, fmt.Errorf("审批节点 %s 的 approval.message 不能超过 %d 个字符", nodeID, approvalMessageMaxRunes)
+	}
+	out.Timeout = strings.TrimSpace(out.Timeout)
+	if out.Timeout != "" {
+		if duration, err := time.ParseDuration(out.Timeout); err != nil || duration <= 0 {
+			return out, fmt.Errorf("审批节点 %s 的 approval.timeout 必须是正时长，例如 30m、2h；留空表示一直等待", nodeID)
+		}
+	}
+	return out, nil
+}
+
+// approvalMessageMaxRunes 限制提示长度，避免把整段乱码塞进运行记录与日志。
+const approvalMessageMaxRunes = 500
 
 // WorkflowNotify 把上游结果推送到外部通道，作为流程收尾或失败提示。
 // 标题与正文支持运行期模板；通道参数按 channel 分别校验。

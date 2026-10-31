@@ -343,7 +343,7 @@ market:
 
 | 分类 | 形状 | 现有节点 |
 | --- | --- | --- |
-| 流程控制 `flow` | 菱形 | 条件分支、循环、等待 / 轮询；并行分支与合流仅用于打开旧工作流，新建请改用阶段“并行模式” |
+| 流程控制 `flow` | 菱形 | 条件分支、循环、等待 / 轮询、人工审批；并行分支与合流仅用于打开旧工作流，新建请改用阶段“并行模式” |
 | 数据与文件 `data` | 文件块 | 上传文件、提取配置、文件校验（MD5 / SHA256）、解压文件（tar / tar.gz / zip） |
 | 内置能力 `builtin` | 圆形 | HTTP 调用（CURL）、Shell 脚本、消息通知（Webhook / 企业微信 / 邮件） |
 
@@ -402,6 +402,35 @@ nodes:
 
 选择面板中每个分类分组可点击标题折叠，默认全部展开，输入搜索词时强制展开。画布左上角的分类图例显示各类节点数量，点击某一类会在画布上仅高亮该类、其余节点淡化（再点取消）；该高亮只作用于显示层，不修改节点数据与连线。
 
+### 内置人工审批节点
+
+`approval` 节点是流水线的停机点：执行到这里时不结束运行，整条流水线停在 `running`，等人在 Web UI 的运行日志面板点「确认继续」才放开下游。典型用法是在“改配置”和“下发/重启”之间插一个审批节点——先让运行停住，改完配置文件再放行。
+
+```yaml
+stages:
+  - id: change
+    name: 变更
+nodes:
+  - id: gate
+    type: approval
+    name: 人工确认
+    stage_id: change
+    order: 20
+    approval:
+      message: "确认 {{ .env }} 的配置已改好后继续"   # 可空，支持运行期模板
+      timeout: 30m                                    # 可空 = 一直等待
+```
+
+- 等待期间运行记录 `status` 仍是 `running`，审批节点 step 为 `waiting`；运行记录新增 `approvals` 数组（`node_id`、`message`、`status`、`since`、`decided_at`、`note`、`reviewer`），`status` 取 `waiting`、`approved`、`rejected`、`timed_out`、`cancelled`。
+- 确认入口有三处，切到任何分类页都不会丢：① 工作流画布下方的运行日志审批条；② 「运行记录」页——顶栏有「N 个运行等待人工确认」的横幅，列表里有「待审批」筛选与标记，详情面板顶部就是审批卡片；③ 工作流编辑器外也能直接处理，不需要回到画布。
+- 运行列表接口支持 `GET /api/runs/?awaiting=1`：只返回停在审批节点的运行（状态仍是 `running`），列表项额外带 `awaiting_approval`、`approval{node_id,message,since}` 与 `approval_actionable`（是否由当前服务进程执行，`false` 时只能去启动它的终端处理）。
+- 平台接口：`POST /api/runs/<run_id>/approvals/<node_id>/approve`（放行）与 `POST /api/runs/<run_id>/approvals/<node_id>/reject`（驳回，运行失败并停止下游），body 为 `{"note": "备注", "reviewer": "确认人"}`，都可省略。
+- `timeout` 留空表示一直等；填写后超时按节点失败处理。运行被取消（`/api/runs/<run_id>/cancel`）时立即结束等待，状态记为 `cancelled`，不会误记成超时。
+- 驳回、超时都会让节点失败并保留中文原因；通过后下游可引用 `{{ .steps.<id>.approval.status }}`、`{{ .steps.<id>.approval.note }}`、`{{ .steps.<id>.approval.reviewer }}`、`{{ .steps.<id>.approval.waited_ms }}`。
+- 审批闸门只在当前进程内有效：服务重启后等待中的运行会按“异常退出”收敛为失败，`approvals` 里对应条目记为 `cancelled`，需要重新发起运行。
+- 只用 CLI（`opsctl run workflow`）跑带审批节点的流程时没有人能点确认，终端会打印等待提示。这类运行不在平台服务进程里：同时开着 `serve` 时，平台会按“不在当前进程执行”把它收敛为失败、把等待中的审批记为 `cancelled`（终端仍在等待，用 Ctrl+C 结束）；需要人工放行请从 Web UI 启动这条工作流。列表项上的 `approval_actionable` 就是给这种情况留的标记，前端会把它显示成不可提交的说明态而不是给一个必然报错的按钮。
+- 校验在 `config.ValidateApprovalConfig`（`internal/config/types.go`），闸门与执行器在 `internal/runner/approval.go`，接口在 `internal/server/handler_run.go`，列表摘要在 `internal/runbundle/runbundle.go` 的 `Summarize`。
+
 ```bash
 npm install --prefix web
 npm run dev --prefix web
@@ -409,6 +438,17 @@ npm run build --prefix web
 ```
 
 后端运行时会从内嵌静态资源提供 Web UI。
+
+## 运行环境要求（Windows）
+
+插件工具的 `command` 基本都是 `.sh`，平台在 Windows 上需要本机有一个 bash：
+
+- **推荐**：安装 [Git for Windows](https://git-scm.com/download/win)，自带 Git Bash。即使安装时没把 Git 加入 PATH 也可以——平台会依次检查 PATH、Git 注册表 `HKLM\SOFTWARE\GitForWindows` 的 `InstallPath`、`Program Files\Git`、`%LOCALAPPDATA%\Programs\Git`、`scoop`、msys2/cygwin 等常见目录，也会顺着 PATH 上的 `git.exe` 找同级 `bin\bash.exe`。
+- **备选**：启用 WSL 并安装一个发行版（`wsl --install`）；平台只有在确实登记了发行版时才会用 `wsl.exe bash`，避免把「请先运行 wsl --install」当成结果。
+- 执行时按 bash 类型转换路径：Git Bash 用 `E:/...`，WSL 用 `/mnt/e/...`；参数与环境变量里形如 `E:\...` 的绝对路径值同样会被换成对应写法，插件脚本里的 `[ -f "$OPS_PARAM_FILE" ]` 才能成立。
+- 两处都找不到 bash 时，运行会直接给出可操作的错误（提示安装 Git for Windows 或 WSL），而不是 `exec: "bash": executable file not found in %PATH%`。
+- `./bin/opsctl.exe doctor` 的 `bash` 检查项会打印实际使用的 bash 路径（WSL 会额外标注），插件工具跑不起来时先看这一行。
+- 检测结果在进程内缓存：装好 Git/WSL 后重启 `opsctl`（或 `serve`）即可生效。
 
 ## 打包交付
 

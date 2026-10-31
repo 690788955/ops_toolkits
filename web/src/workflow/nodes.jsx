@@ -1,6 +1,6 @@
 import React from 'react'
 import {Handle, Position} from '@xyflow/react'
-import {conditionBranchRows, conditionOperators, defaultCondition, normalizeArchiveConfig, normalizeChecksumConfig, normalizeExtractConfig, normalizeHttpRequestConfig, normalizeNotifyConfig, normalizeScriptConfig, normalizeWaitConfig} from './model.js'
+import {conditionBranchRows, conditionOperators, defaultCondition, normalizeArchiveConfig, normalizeApprovalConfig, normalizeChecksumConfig, normalizeExtractConfig, normalizeHttpRequestConfig, normalizeNotifyConfig, normalizeScriptConfig, normalizeWaitConfig} from './model.js'
 import {controlNodeCategory, controlNodeHelp, controlNodeMeta} from './catalog.js'
 
 function FlowchartShape({kind, marker}) {
@@ -230,6 +230,10 @@ function ControlNode({id, data, selected}) {
     ? `${notify.smtp_host || '未配置 SMTP'} → ${notify.to || '未配置收件人'}`
     : notify.webhook || '未配置 Webhook'
   const notifySummary = `${{webhook: 'Webhook', wecom: '企业微信', email: '邮件'}[notify.channel] || '通知'} · ${notifyTarget}`
+  const approval = normalizeApprovalConfig(data.approval || {})
+  const approvalSummary = `${approval.message || '未填写审批提示'}${approval.timeout ? ` · 超时 ${approval.timeout}` : ''}`
+  // 审批节点等待时显示的是「等待审批」而不是泛泛的「等待中」，让画布上能一眼看出是卡在人身上。
+  const approvalWaitingLabel = type === 'approval' && data.run?.type === 'approval' ? '等待审批' : ''
   const helpText = type === 'loop'
     ? [loopSummary, runLoopSummary].filter(Boolean).join('；')
     : type === 'upload'
@@ -248,13 +252,15 @@ function ControlNode({id, data, selected}) {
                   ? waitSummary
                   : type === 'notify'
                     ? notifySummary
-                    : controlNodeHelp(type)
+                    : type === 'approval'
+                      ? approvalSummary
+                      : controlNodeHelp(type)
   const runTitle = formatNodeRunTitle(data.run)
   const nodeTitle = [data.name || id, category.label, typeLabel, helpText, data.hostLabel, runTitle].filter(Boolean).join('\n')
   return (
     <div className={nodeRunClass(`controlNode cat-${category.id} ${type || ''}`, selected, data.run)} title={nodeTitle}>
       <Handle type="target" position={Position.Left} />
-      <RunStatusBadge run={data.run} />
+      <RunStatusBadge run={data.run} waitingLabel={approvalWaitingLabel} />
       <NodeDeleteButton id={id} onRemove={data.onRemove} />
       <NodeRerunButton id={id} onRerun={data.onRerun} disabled={data.rerunDisabled} />
       <div className="nodeTopBar controlTopBar">
@@ -312,9 +318,10 @@ function nodeRunClass(baseClass, selected, run) {
   return [baseClass, selected ? 'selected' : '', runStatus && runStatus !== 'idle' ? `run${capitalizeStatus(runStatus)}` : ''].filter(Boolean).join(' ')
 }
 
-function RunStatusBadge({run}) {
+function RunStatusBadge({run, waitingLabel = ''}) {
   if (!run?.status || run.status === 'idle') return null
-  return <span className={`runStatusBadge run${capitalizeStatus(run.status)}`} title={formatNodeRunTitle(run)}>{runStatusLabel(run.status)}</span>
+  const label = waitingLabel && normalizeRunStatus(run.status) === 'waiting' ? waitingLabel : runStatusLabel(run.status)
+  return <span className={`runStatusBadge run${capitalizeStatus(run.status)}`} title={formatNodeRunTitle(run)}>{label}</span>
 }
 
 function formatNodeRunTitle(run) {

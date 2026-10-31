@@ -150,6 +150,8 @@ type runLogEvent struct {
 type runDetail struct {
 	Record runner.RunRecord `json:"record"`
 	Logs   runLogs          `json:"logs"`
+	// Actionable 表示这条运行由当前服务进程执行；为 false 时审批与取消都无法在这里生效。
+	Actionable *bool `json:"actionable,omitempty"`
 }
 
 type response struct {

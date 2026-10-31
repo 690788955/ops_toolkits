@@ -1,0 +1,33 @@
+id: k3s.inspect
+name: k3s 日常巡检
+description: 串行执行 k3s 集群状态巡检和诊断报告收集，全部为只读操作，适合作为日常巡检或变更前基线
+version: 1.0.0
+category: k3s
+tags: [k3s, 巡检, 只读]
+stages:
+  - id: inspect
+    name: 巡检
+    execution_mode: serial
+nodes:
+  - id: status
+    name: 集群状态巡检
+    type: tool
+    stage_id: inspect
+    order: 1
+    tool: k3s.status
+    params:
+      kubeconfig: ""
+    on_failure: stop
+  - id: diagnose
+    name: 生成诊断报告
+    type: tool
+    stage_id: inspect
+    order: 2
+    tool: k3s.diagnose
+    params:
+      report_dir: ""
+      kubeconfig: ""
+    on_failure: stop
+edges: []
+confirm:
+  required: false

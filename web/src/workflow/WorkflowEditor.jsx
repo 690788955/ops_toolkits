@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {Background, MiniMap, ReactFlow, ViewportPortal, reconnectEdge, useEdgesState, useNodesState} from '@xyflow/react'
-import {deleteJSON, fetchJSON, fetchPendingRuns, fetchRunDetail, postJSON, postRunUploadNodeChunked, resolvePendingRun, retryPendingRunCheck, retryRunNotification, rollbackPendingRun} from '../api.js'
+import {approveRunNode, deleteJSON, fetchJSON, fetchPendingRuns, fetchRunDetail, postJSON, postRunUploadNodeChunked, rejectRunNode, resolvePendingRun, retryPendingRunCheck, retryRunNotification, rollbackPendingRun} from '../api.js'
 import {filterEntries, readableAPIError, summarizeAPIResponse} from '../utils.js'
 import {allNodeCategories, controlNodeCatalog, controlNodeTitle, countNodesByCategory, flowNodeCategoryID, isControlReady} from './catalog.js'
 import * as workflowModel from './model.js'
@@ -10,6 +10,13 @@ import {sshHostStatusLabel} from '../SshHostsModal.jsx'
 import {CanvasDock, NodePickerPanel} from './picker.jsx'
 import WorkflowTransferModal from './WorkflowTransferModal.jsx'
 import FileUploadInput from '../FileUploadInput.jsx'
+import {pendingRunApproval} from '../runApproval.js'
+import ResizeHandle, {useResizableWidth} from '../ResizeHandle.jsx'
+import RunHistoryRail from './run/RunHistoryRail.jsx'
+import RunLogWindow from './run/RunLogWindow.jsx'
+import RunLogView from './run/RunLogView.jsx'
+import {CANVAS_MODE_EDIT, CANVAS_MODE_RUN, findRunLogItem, nextCanvasMode, runningRunNodeID} from './run/runLog.js'
+export {findRunLogItem} from './run/runLog.js'
 import {DRAFT_WINDOW_SAVED_KEY, clearDraftWindowSaved, clearDraftWindowTransfer, draftWindowSavedRefValue, draftWindowURL, formatDraftWindowTime, readDraftWindowSaved, readDraftWindowTransfer, writeDraftWindowSaved, writeDraftWindowTransfer} from './draftWindow.js'
 
 const MAX_PLATFORM_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024
@@ -21,8 +28,15 @@ const DRAFT_WINDOW_TRANSFER_SIGNATURE = '__draftWindowTransfer__'
 // 工作流运行级执行目标：follow_nodes 表示沿用各节点自己的 host 配置。
 const RUN_TARGET_FOLLOW = 'follow_nodes'
 const RUN_TARGET_LOCAL = 'local'
+// 左「运行记录」栏 / 右「运行日志」栏的拖动宽度：用户拖过才写 localStorage，没拖过沿用样式里的默认值。
+const WORKFLOW_RAIL_WIDTH_KEY = 'ops.workflowEditor.railWidth'
+const WORKFLOW_RUN_PANEL_WIDTH_KEY = 'ops.workflowEditor.runPanelWidth'
+const WORKFLOW_RAIL_MIN_WIDTH = 180
+const WORKFLOW_RAIL_MAX_WIDTH = 460
+const WORKFLOW_RUN_PANEL_MIN_WIDTH = 320
+const WORKFLOW_RUN_PANEL_MAX_WIDTH = 820
 
-export default function WorkflowEditor({catalog, activeCategory = '', hosts = [], setResult: setAppResult, refreshCatalog, openPluginManager, resultPanel = null, draftWindow = false}) {
+export default function WorkflowEditor({catalog, activeCategory = '', hosts = [], setResult: setAppResult, refreshCatalog, openPluginManager, resultPanel = null, draftWindow = false, onOpenRunsTab = null, openRunID = '', onOpenRun = null}) {
   const [workflow, setWorkflow] = useState(emptyWorkflow())
   const [editorNotice, setEditorNotice] = useState('')
   const setResult = useCallback(payload => {
@@ -45,6 +59,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   const [workflowOwnerID, setWorkflowOwnerID] = useState('user.workflows')
   const [workflowOwnerLocked, setWorkflowOwnerLocked] = useState(false)
   const [workflowAction, setWorkflowAction] = useState('')
+  const [loadedWorkflowRunRequest, setLoadedWorkflowRunRequest] = useState(null)
   const [savedDraftSignature, setSavedDraftSignature] = useState(() => {
     const initial = emptyWorkflow()
     return workflowDraftSignature(initial, [], [], '', '[]', 'user.workflows', initial.stages)
@@ -96,12 +111,36 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   const [uploadNodeFiles, setUploadNodeFiles] = useState({})
   const [uploadProgress, setUploadProgress] = useState(null)
   const [canvasRunDetail, setCanvasRunDetail] = useState(null)
+  const [approvalNote, setApprovalNote] = useState('')
+  const [approvalAction, setApprovalAction] = useState('')
   const [runDockOpen, setRunDockOpen] = useState(false)
   const [runDockNodeID, setRunDockNodeID] = useState('')
   const [runSnapshotNodes, setRunSnapshotNodes] = useState([])
+  const [runSnapshotEdges, setRunSnapshotEdges] = useState([])
+  const [runSnapshotStages, setRunSnapshotStages] = useState([])
+  const [canvasMode, setCanvasMode] = useState(CANVAS_MODE_RUN)
+  const [historyRunID, setHistoryRunID] = useState('')
+  const [railOpen, setRailOpen] = useState(true)
+  const [logWindowOpen, setLogWindowOpen] = useState(false)
+  // 三栏宽度由用户拖出来：左「运行记录」栏和右「运行日志」栏各自记一份，画布吃掉剩下的宽度。
+  const workspaceBodyRef = useRef(null)
+  const runRailWidth = useResizableWidth({storageKey: WORKFLOW_RAIL_WIDTH_KEY, min: WORKFLOW_RAIL_MIN_WIDTH, max: WORKFLOW_RAIL_MAX_WIDTH})
+  const runPanelWidth = useResizableWidth({storageKey: WORKFLOW_RUN_PANEL_WIDTH_KEY, min: WORKFLOW_RUN_PANEL_MIN_WIDTH, max: WORKFLOW_RUN_PANEL_MAX_WIDTH})
+  const [runRailRefresh, setRunRailRefresh] = useState(0)
+  // 深链回写走 ref：clearCanvasRunOverlay 是零依赖 useCallback，不该因为上层换回调而重建。
+  const onOpenRunRef = useRef(null)
+  onOpenRunRef.current = onOpenRun
+  // appliedLinkRef 记的是「已经按深链打开过的运行 ID」：用户手动切模式、清空结果都不该让它重放，
+  // 否则点「编辑模式」后深链参数还在，effect 会立刻把画布拉回运行模式。
+  const appliedLinkRef = useRef('')
+  // 运行覆盖层要靠当前画布节点算：调用方可能在 setNodes 的同一个 tick 里触发，直接读 state 会拿到上一份。
+  const nodesRef = useRef(nodes)
+  nodesRef.current = nodes
   const [nodeCategoryFocus, setNodeCategoryFocus] = useState('')
   const [pendingRuns, setPendingRuns] = useState([])
   const [recoveryRunID, setRecoveryRunID] = useState('')
+  // 恢复内容有两个宿主：浮层抽屉（顶栏待处理入口）和右栏「恢复」页（跟着正在看的运行走）。
+  const [recoveryInline, setRecoveryInline] = useState(false)
   const [recoveryDetail, setRecoveryDetail] = useState(null)
   const [recoveryLoading, setRecoveryLoading] = useState(false)
   const [recoveryAction, setRecoveryAction] = useState('')
@@ -123,6 +162,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   const canvasRunVersionRef = useRef(0)
 
   useEffect(() => () => {
+    canvasRunVersionRef.current += 1
     recoveryRequestRef.current = null
     recoveryActionRef.current = null
     notificationRequestRef.current = null
@@ -130,6 +170,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
 
   // 布局依赖真实卡片尺寸：节点首次渲染后读一次 DOM 高度并重排，避免估算值与渲染高度不一致造成重叠或大空隙。
   useEffect(() => {
+    if (canvasMode !== CANVAS_MODE_EDIT && runSnapshotNodes.length > 0) return undefined
     if (!stages.length || !nodes.length || !canvasCardRef.current) return undefined
     const signature = `${stages.map(stage => stage.id).join(',')}|${nodes.map(node => `${node.id}:${node.data?.stageId || ''}`).join(',')}`
     if (measuredLayoutSignatureRef.current === signature) return undefined
@@ -156,7 +197,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       })
     }, 60)
     return () => window.clearTimeout(timer)
-  }, [nodes, edges, stages, setNodes])
+  }, [nodes, edges, stages, setNodes, canvasMode, runSnapshotNodes.length])
 
   const clearCanvasRunOverlay = useCallback(() => {
     canvasRunVersionRef.current += 1
@@ -169,7 +210,14 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     setRunDockOpen(false)
     setRunDockNodeID('')
     setRunSnapshotNodes([])
+    setRunSnapshotEdges([])
+    setRunSnapshotStages([])
+    setHistoryRunID('')
+    setLogWindowOpen(false)
+    setApprovalNote('')
+    setApprovalAction('')
     setCanvasRunState(current => current.status === 'idle' ? current : emptyCanvasRunState())
+    onOpenRunRef.current?.('')
   }, [])
 
   // 首次测得的尺寸要写回受控 nodes：React Flow 只认 nodes 属性里的 measured，光回传 dimensions 变更会让节点一直隐藏、连线不渲染。
@@ -180,7 +228,8 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     const measured = changes.filter(change => change.type === 'dimensions' && change.resizing !== true && change.dimensions?.width && change.dimensions?.height)
     if (measured.length > 0) {
       const sizes = new Map(measured.map(change => [change.id, change.dimensions]))
-      setNodes(current => {
+      const setVisibleNodes = canvasMode !== CANVAS_MODE_EDIT && runSnapshotNodes.length > 0 ? setRunSnapshotNodes : setNodes
+      setVisibleNodes(current => {
         let changed = false
         const next = current.map(node => {
           const size = sizes.get(node.id)
@@ -198,7 +247,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       const removed = rest.filter(change => change.type === 'remove').map(change => change.id)
       if (removed.length > 0) afterCanvasNodesRemovedRef.current(removed)
     }
-  }, [clearCanvasRunOverlay, onNodesChange, setNodes])
+  }, [clearCanvasRunOverlay, onNodesChange, setNodes, canvasMode, runSnapshotNodes.length])
 
   const handleEdgesChange = useCallback(changes => {
     if (changes.some(change => change.type === 'remove')) {
@@ -224,7 +273,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     const next = {nodeIDs: [], edgeIDs: []}
     canvasSelectionRef.current = next
     setCanvasSelection(next)
-    // 走 React Flow 自己的 onChange 才能同步内部节点状态，只改外部数组会导致下次点击无法重新选中。
+    // 靠 React Flow 自己的 onChange 才能同步内部节点状态，只改外部数组会导致下次点击无法重新选中。
     onNodesChange(nodes.filter(node => node.selected).map(node => ({type: 'select', id: node.id, selected: false})))
     onEdgesChange(edges.filter(edge => edge.selected).map(edge => ({type: 'select', id: edge.id, selected: false})))
   }, [nodes, edges, onNodesChange, onEdgesChange])
@@ -371,13 +420,59 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   const activeRunStatus = normalizeRunStatus(canvasRunState.status === 'running' ? 'running' : activeRun?.status || lastRun?.status || canvasRunState.status)
   const isActiveRunRunning = activeRunStatus === 'running'
   const activeRunHasRecovery = Boolean(canvasRunDetail?.record?.pending) || (canvasRunDetail?.record?.attempts?.length || 0) > 0 || activeRunStatus === 'pending' || activeRunStatus === 'rolled_back'
-  const isEditingCanvas = !isActiveRunRunning
+  // 运行期间锁定快照；结束后保留结果，由用户显式切回编辑模式。
+  const isEditingCanvas = canvasMode === CANVAS_MODE_EDIT
+  const runLocked = !isEditingCanvas
+  // 默认进运行模式（只读、看最近一次运行）；开始运行会强制锁到运行模式，之后由用户点「编辑模式」解锁。
+  const runWasRunningRef = useRef(false)
+  useEffect(() => {
+    const running = isActiveRunRunning
+    const wasRunning = runWasRunningRef.current
+    runWasRunningRef.current = running
+    setCanvasMode(current => nextCanvasMode({current, running}))
+    // 运行开始和结束各刷一次左栏：新记录与终态结论都不需要用户手动刷新。
+    if (running !== wasRunning) setRunRailRefresh(value => value + 1)
+  }, [isActiveRunRunning])
+  // 深链只负责“带进来一次”：同一条运行反复进出不再打断用户当前的选择。
+  useEffect(() => {
+    if (draftWindow) return
+    const target = String(openRunID || '')
+    if (target === appliedLinkRef.current) return
+    appliedLinkRef.current = target
+    if (!target || target === activeRunID || target === historyRunID) return
+    openRunFromRail(target)
+  }, [draftWindow, openRunID])
   useEffect(() => {
     if (isEditingCanvas) return
     canvasSelectionRef.current = {nodeIDs: [], edgeIDs: []}
     setCanvasSelection(canvasSelectionRef.current)
   }, [isEditingCanvas])
   const runVisible = canvasRunState.status !== 'idle' || Boolean(canvasRunDetail?.record) || Boolean(activeRunID)
+  // 没有任何运行结果可看时没有“运行模式”可言，直接回编辑模式，免得画布看起来无缘无故锁死。
+  useEffect(() => {
+    if (runVisible) return
+    setCanvasMode(current => current === CANVAS_MODE_EDIT ? current : CANVAS_MODE_EDIT)
+  }, [runVisible])
+  // Wait until the loaded draft has rendered before applying its run overlay.
+  useEffect(() => {
+    if (!loadedWorkflowRunRequest || draftWindow) return
+    const {id, linkedRunID, runVersion} = loadedWorkflowRunRequest
+    if (canvasRunVersionRef.current !== runVersion) return
+    if (linkedRunID) openRunFromRail(linkedRunID)
+    else openLatestRunForWorkflow(id)
+  }, [loadedWorkflowRunRequest, draftWindow])
+  // 画布节点比运行详情晚到是常态（深链冷启动、打开工作流）：这时覆盖层会是空的，
+  // 节点就绪后按同一个运行详情补算一次，点节点的运行状态才不会凭空消失。
+  const overlayHealRef = useRef('')
+  useEffect(() => {
+    const runID = canvasRunDetail?.record?.id || ''
+    if (!runID || nodes.length === 0 || runSnapshotNodes.length > 0) return
+    if (Object.keys(canvasRunState.nodes || {}).length > 0) return
+    const signature = `${runID}:${nodes.map(node => node.id).join(',')}`
+    if (overlayHealRef.current === signature) return
+    overlayHealRef.current = signature
+    setCanvasRunState(buildCanvasRunStateFromDetail(canvasRunDetail, nodes))
+  }, [canvasRunDetail, nodes, canvasRunState, runSnapshotNodes.length])
   const sortedPendingRuns = useMemo(() => {
     const currentID = selectedWorkflowID || workflow.id
     return [...pendingRuns].sort((left, right) => {
@@ -392,25 +487,48 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     if (!currentID) return []
     return sortedPendingRuns.filter(item => item.target === currentID)
   }, [sortedPendingRuns, selectedWorkflowID, workflow.id])
-  const runDockItem = useMemo(() => findRunLogItem(canvasRunDetail?.logs?.items || [], runDockNodeID), [canvasRunDetail, runDockNodeID])
   const runDockNodes = useMemo(() => {
     const source = runSnapshotNodes.length > 0 ? runSnapshotNodes : nodes
     const known = new Map(source.map(node => [node.id, node]))
     return Object.keys(canvasRunState.nodes || {}).map(nodeID => known.get(nodeID) || {id: nodeID, data: {name: nodeID}})
   }, [runSnapshotNodes, nodes, canvasRunState.nodes])
   const runMachineLabel = describeRunMachines(canvasRunDetail?.record, runSnapshotNodes, runHostOptions, runTargetLabel)
+  // 审批条只认当前运行记录里最后一条仍在等待的审批：轮询会持续刷新记录，运行结束后它自然消失。
+  const pendingApproval = useMemo(() => pendingRunApproval(canvasRunDetail?.record), [canvasRunDetail])
+  const pendingApprovalNodeName = useMemo(() => {
+    if (!pendingApproval) return ''
+    const nodeID = pendingApproval.node_id || ''
+    const source = runSnapshotNodes.length > 0 ? runSnapshotNodes : nodes
+    return source.find(node => node.id === nodeID)?.data?.name || nodeID
+  }, [pendingApproval, runSnapshotNodes, nodes])
+  useEffect(() => {
+    setApprovalNote('')
+  }, [canvasRunDetail?.record?.id, pendingApproval?.node_id])
+  // 运行模式渲染被执行的快照，编辑模式渲染草稿：两条路径不能混用，否则运行中新增的节点
+  // 会永远停在“等待中”，而运行快照里的节点在草稿里已经改名或删除。
+  const renderNodes = runLocked && runSnapshotNodes.length > 0 ? runSnapshotNodes : nodes
+  const renderEdges = runLocked && runSnapshotNodes.length > 0 ? runSnapshotEdges : edges
+  const renderStages = runLocked && runSnapshotNodes.length > 0 ? runSnapshotStages : stages
+  // 编辑模式的画布不显示任何执行状态：残留的运行结论会让人以为草稿本身已经跑过。
+  const editModeRunState = useMemo(() => emptyCanvasRunState(), [])
+  const canvasOverlayState = isEditingCanvas ? editModeRunState : canvasRunState
+  const canvasFocusNodeID = isEditingCanvas ? '' : runDockNodeID
   const displayNodes = useMemo(() => buildDisplayNodes(
-    nodes,
-    canvasRunState,
+    renderNodes,
+    canvasOverlayState,
     catalog.tools || [],
     isEditingCanvas,
     isActiveRunRunning || activeRunHasRecovery ? null : rerunWorkflowNode,
-    activeRunID,
+    isEditingCanvas ? '' : activeRunID,
     hosts,
-    runDockNodeID
-  ), [nodes, canvasRunState, catalog.tools, isEditingCanvas, isActiveRunRunning, activeRunHasRecovery, activeRunID, rerunWorkflowNode, hosts, runDockNodeID])
-  const displayEdges = useMemo(() => buildDisplayEdges(edges, displayNodes, canvasRunState), [edges, displayNodes, canvasRunState])
-  const workflowStageLayouts = useMemo(() => workflowModel.stageLayout(nodes, stages).stages, [nodes, stages])
+    canvasFocusNodeID
+  ), [renderNodes, canvasOverlayState, catalog.tools, isEditingCanvas, isActiveRunRunning, activeRunHasRecovery, activeRunID, rerunWorkflowNode, hosts, canvasFocusNodeID])
+  const displayEdges = useMemo(() => buildDisplayEdges(renderEdges, displayNodes, canvasOverlayState), [renderEdges, displayNodes, canvasOverlayState])
+  const workflowStageLayouts = useMemo(() => workflowModel.stageLayout(renderNodes, renderStages).stages, [renderNodes, renderStages])
+  useEffect(() => {
+    if (!stageLayerSize?.width || !stageLayerSize?.height) return
+    fitCanvasViewAfterLayout({nodes: renderNodes, stages: renderStages})
+  }, [flowInstance, canvasMode, runSnapshotNodes, runSnapshotStages, stageLayerSize?.width, stageLayerSize?.height])
   const workflowStageAddPosition = useMemo(() => {
     if (!workflowStageLayouts.length) return null
     const last = workflowStageLayouts[workflowStageLayouts.length - 1]
@@ -488,8 +606,8 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
 
   useEffect(() => {
     if (!flowInstance) return
-    if (nodes.length === 0 && stages.length > 0) {
-      fitCanvasViewAfterLayout({nodes: [], stages})
+    if (renderNodes.length === 0 && renderStages.length > 0) {
+      fitCanvasViewAfterLayout({nodes: [], stages: renderStages})
     }
   }, [flowInstance])
 
@@ -547,8 +665,9 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
 
   function handleCanvasNodeClick(nodeID) {
     closeNodePicker()
-    // 运行结果可见时，点击节点用于定位日志；其余情况单击只选中节点，避免配置抽屉挡住画布。
-    if (runVisible && canvasRunState.nodes?.[nodeID]) {
+    // 运行模式：点节点定位到它的日志（画布上也有运行状态，点谁看谁）。
+    // 编辑模式：单击只选中节点，画布不显示运行状态，也就不在这里夹带日志窗口。
+    if (!isEditingCanvas && runVisible && canvasRunState.nodes?.[nodeID]) {
       openRunDockNode(nodeID)
     }
   }
@@ -561,6 +680,71 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   function openRunDockNode(nodeID) {
     setRunDockOpen(true)
     setRunDockNodeID(nodeID)
+  }
+
+  function rerunDisabledReasonForNode() {
+    if (!runDockNodeID) return '先在画布上选择一个节点。'
+    if (isActiveRunRunning) return '运行进行中，结束后才能重试单个节点。'
+    if (activeRunHasRecovery) return '这次运行已有恢复记录，请用“恢复与通知”入口处理。'
+    if (historyRunID) return '历史快照是只读的，重试请从运行记录页发起新的运行。'
+    if (!activeRunID) return '当前没有可重跑的运行任务。'
+    return ''
+  }
+
+  // 先作废旧请求，再加载快照；仍在运行的记录继续轮询，刷新页面也能审批和取消。
+  async function openRunFromRail(runID) {
+    if (!runID) return
+    if (runID === activeRunID) {
+      setRunDockOpen(true)
+      setCanvasMode(CANVAS_MODE_RUN)
+      return
+    }
+    // Keep the live run's poll/cancel guard intact while it is executing.
+    if (isActiveRunRunning) {
+      setResult({message: `当前工作流正在运行：${activeRunID || '等待运行记录 ID'}，完成或取消后才能查看其他运行记录。`, run: activeRun || undefined})
+      onOpenRunRef.current?.(activeRunID)
+      return
+    }
+    const runVersion = ++canvasRunVersionRef.current
+    try {
+      const body = await fetchRunDetail(runID)
+      if (canvasRunVersionRef.current !== runVersion) return
+      const detail = body?.data || body
+      const record = detail?.record || {}
+      if (!record.id) throw new Error('运行记录缺少 ID，请刷新后重试。')
+      const snapshotFlow = snapshotFlowFromWorkflow(record.snapshot?.workflow)
+      // 没有快照时按当前画布节点算覆盖层：必须读 ref 里的最新节点，
+      // 因为调用方可能刚 setNodes，闭包里的 nodes 还是上一份草稿（会导致覆盖层整体为空）。
+      const flowNodes = snapshotFlow.nodes.length > 0 ? snapshotFlow.nodes : (nodesRef.current || [])
+      canvasSelectionRef.current = {nodeIDs: [], edgeIDs: []}
+      setCanvasSelection(canvasSelectionRef.current)
+      setRerunModal(null)
+      setUploadProgress(null)
+      setCanvasRunDetail(detail)
+      setRunSnapshotNodes(snapshotFlow.nodes)
+      setRunSnapshotEdges(snapshotFlow.edges)
+      setRunSnapshotStages(snapshotFlow.stages)
+      setCanvasRunState(buildCanvasRunStateFromDetail(detail, flowNodes))
+      const nextRun = {id: record.id, status: normalizeRunStatus(record.status), target: record.target}
+      setActiveRun(nextRun.status === 'running' ? nextRun : null)
+      setLastRun(null)
+      setHistoryRunID(record.id || runID)
+      setRunDockNodeID('')
+      setLogWindowOpen(false)
+      setApprovalAction('')
+      setRunDockOpen(true)
+      setCanvasMode(CANVAS_MODE_RUN)
+      onOpenRunRef.current?.(record.id || runID)
+      if (snapshotFlow.nodes.length === 0) {
+        setResult({message: '这条运行记录没有保存工作流快照，画布按当前工作流展示，结论仍以运行记录为准。'})
+      }
+      if (nextRun.status === 'running') {
+        await pollRunDetail(record.id, nextRun, runVersion, flowNodes, state => setCanvasRunState(state))
+      }
+    } catch (err) {
+      if (canvasRunVersionRef.current !== runVersion) return
+      setResult({message: readableAPIError(err, '读取运行记录失败。')})
+    }
   }
 
   function openEdgeConfigModal(edgeID) {
@@ -615,6 +799,8 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     const rerunTarget = rerunnableRun?.target || workflow.id
     setRerunModal(null)
     setRunSnapshotNodes(nodes)
+    setRunSnapshotEdges(edges)
+    setRunSnapshotStages(stages)
     setRunDockOpen(true)
     setRunDockNodeID(nodeID)
     setResult({message: `正在重跑节点 ${nodeID}...`, run: rerunnableRun || undefined})
@@ -677,7 +863,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     }
   }
 
-  async function openRecoveryDrawer(runID) {
+  async function openRecoveryDrawer(runID, {inline = false} = {}) {
     if (!runID) return
     const request = {runID}
     recoveryRequestRef.current = request
@@ -686,6 +872,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     setWorkflowNameMenuOpen(false)
     setWorkflowMoreOpen(false)
     setRunHistoryOpen(false)
+    setRecoveryInline(inline)
     setRecoveryRunID(runID)
     setRecoveryDetail(null)
     setRecoveryAction('')
@@ -716,12 +903,13 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     setRecoveryError('')
     setRecoveryNotice('')
     setRecoveryLoading(false)
+    setRecoveryInline(false)
     setNotificationBusy('')
   }
 
-  function syncRecoveredRunOverlay(detail) {
+  function syncRecoveredRunOverlay(detail, runVersion) {
     const record = detail?.record
-    if (!record?.id || record.id !== activeRunID) return
+    if (canvasRunVersionRef.current !== runVersion || !record?.id || record.id !== (activeRunID || historyRunID)) return
     const status = normalizeRunStatus(record.status)
     setCanvasRunDetail(detail)
     setCanvasRunState(buildCanvasRunStateFromDetail(detail, runSnapshotNodes.length > 0 ? runSnapshotNodes : nodes))
@@ -731,6 +919,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
 
   async function executeRecoveryAction(action, note = '') {
     const runID = recoveryRunID
+    const runVersion = canvasRunVersionRef.current
     const request = recoveryRequestRef.current
     if (!runID || request?.runID !== runID || recoveryActionRef.current || notificationRequestRef.current) return
     if (recoveryDetail?.record?.id !== runID) {
@@ -767,16 +956,16 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       } else if (status === 'failed') {
         setRecoveryNotice('已结束处理，运行标记为失败，请继续人工跟进未恢复的变更。')
       } else {
-        setRecoveryNotice('恢复动作已执行，运行仍为待处理，请查看最新 attempt 证据后继续处理。')
+        setRecoveryNotice('恢复动作已执行，运行仍为待处理，请查看最近 attempt 证据后继续处理。')
       }
-      if (detail) syncRecoveredRunOverlay(detail)
+      if (detail) syncRecoveredRunOverlay(detail, runVersion)
       await refreshPendingRuns()
     } catch (err) {
       if (recoveryRequestRef.current !== request || recoveryActionRef.current !== operation) return
       const detail = err.body?.data || err.body?.detail
       if (detail?.record?.id === runID) {
         setRecoveryDetail(detail)
-        syncRecoveredRunOverlay(detail)
+        syncRecoveredRunOverlay(detail, runVersion)
       }
       setRecoveryError(readableAPIError(err, '恢复动作执行失败。'))
       await refreshPendingRuns()
@@ -873,16 +1062,40 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     return {ownerID, ownerLocked, unassignedNodes}
   }
 
+  // 打开工作流默认进运行模式：后台补一次最近运行，找到就直接展示它的结果，要改再点「编辑模式」解锁。
+  // 没有运行记录时不打扰用户：画布留在编辑模式（左栏也会显示“还没有运行记录”）。
+  async function openLatestRunForWorkflow(id) {
+    if (!id || draftWindow) return
+    const runVersion = canvasRunVersionRef.current
+    try {
+      const body = await fetchJSON(`/api/runs/?kind=workflow&target=${encodeURIComponent(id)}&limit=1`)
+      if (canvasRunVersionRef.current !== runVersion) return
+      const latest = (body?.data?.runs || [])[0]
+      if (!latest?.id) {
+        setCanvasMode(CANVAS_MODE_EDIT)
+        return
+      }
+      await openRunFromRail(latest.id)
+    } catch {
+      if (canvasRunVersionRef.current !== runVersion) return
+      setCanvasMode(CANVAS_MODE_EDIT)
+    }
+  }
+
   async function loadWorkflow(id, options = {}) {
     if (!id) return
     if (!options.silent && id !== selectedWorkflowID && !options.force) {
       if (!confirmDiscardDraft()) return
     }
+    // Preserve an initial deep link only when loading that run's own draft.
+    const linkedRunID = !selectedWorkflowID && canvasRunDetail?.record?.target === id ? String(openRunID || '') : ''
     clearCanvasRunOverlay()
+    const runVersion = canvasRunVersionRef.current
     setWorkflowAction('loading')
     if (!options.silent) setResult({message: '加载工作流...'})
     try {
       const body = await fetchJSON(`/api/workflows/${encodeURIComponent(id)}`)
+      if (canvasRunVersionRef.current !== runVersion) return
       const config = body.data.Config || body.data.config
       const source = body.data.Source || body.data.source || {}
       applyWorkflowConfig(config, source, {id})
@@ -893,6 +1106,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
         setRecentWorkflowIDs(pushRecentWorkflowID(id))
       }
       if (!options.silent) setResult({message: `已加载工作流 ${id}`})
+      setLoadedWorkflowRunRequest({id, linkedRunID, runVersion})
     } catch (err) {
       setMixedStageNotice(null)
       if (!options.silent) setResult({message: readableAPIError(err, '加载工作流失败。'), response: err.body})
@@ -1444,7 +1658,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
 
   function fitCanvasView() {
     if (!flowInstance) return
-    const viewport = stageViewportFor(nodes, stages)
+    const viewport = stageViewportFor(renderNodes, renderStages)
     if (viewport) {
       flowInstance.setViewport(viewport)
       return
@@ -1528,7 +1742,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       : `阶段「${current.name || stageId}」已改为串行，节点按当前顺序依次执行。`})
   }
 
-  // 并发数是可随时编辑的输入框，不能用 updateWorkflowStageMode：那样空值会被当成“未变化”再回填旧值。
+  // 并发数是可随时编辑的输入框，不能走 updateWorkflowStageMode：那样空值会被当成“未变化”再回填旧值。
   function updateWorkflowStageConcurrency(stageId, value) {
     if (!isEditingCanvas || isActiveRunRunning) return
     const limit = workflowModel.normalizeStageConcurrency(value)
@@ -1786,9 +2000,9 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   }
 
   function stageRunSummary(stageId) {
-    const statuses = nodes
+    const statuses = renderNodes
       .filter(node => node.data?.stageId === stageId)
-      .map(node => normalizeRunStatus(canvasRunState.nodes?.[node.id]?.status))
+      .map(node => normalizeRunStatus(canvasOverlayState.nodes?.[node.id]?.status))
       .filter(status => status && status !== 'idle')
     if (statuses.length === 0) return null
     if (statuses.includes('running')) return {kind: 'running', label: '运行中'}
@@ -1873,6 +2087,10 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
 
   function updateSelectedNodeNotify(nextNotify) {
     updateDraftNodeData({notify: workflowModel.normalizeNotifyConfig(nextNotify)})
+  }
+
+  function updateSelectedNodeApproval(nextApproval) {
+    updateDraftNodeData({approval: workflowModel.normalizeApprovalConfig(nextApproval)})
   }
 
   function updateSelectedLoopParam(name, value) {
@@ -2059,6 +2277,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
           if (data.controlType === 'archive') nextData.archive = workflowModel.normalizeArchiveConfig(data.archive)
           if (data.controlType === 'wait') nextData.wait = workflowModel.normalizeWaitConfig(data.wait)
           if (data.controlType === 'notify') nextData.notify = workflowModel.normalizeNotifyConfig(data.notify)
+          if (data.controlType === 'approval') nextData.approval = workflowModel.normalizeApprovalConfig(data.approval)
         }
         return {...node, data: nextData}
       })
@@ -2299,15 +2518,18 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     }}))
     const initialRunState = buildRunningCanvasRunState(runNodesSnapshot, check.draft.edges, stages)
     setRunSnapshotNodes(runNodesSnapshot)
+    setRunSnapshotEdges(edges)
+    setRunSnapshotStages(stages)
+    setHistoryRunID('')
     setRunSetupOpen(false)
     setRunDockOpen(true)
-    setRunDockNodeID(firstRunDockNodeID(runNodesSnapshot, initialRunState))
+    setRunDockNodeID('')
     setCanvasRunState(initialRunState)
     const applyRunOverlay = nextState => {
       if (canvasRunVersionRef.current !== runVersion) return
       setCanvasRunState(nextState)
       setRunDockOpen(true)
-      setRunDockNodeID(current => current && nextState.nodes?.[current] ? current : firstRunDockNodeID(runNodesSnapshot, nextState))
+      setRunDockNodeID(current => current && nextState.nodes?.[current] ? current : '')
     }
     try {
       setEditorValidation(null)
@@ -2329,8 +2551,11 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
         target: runTarget === RUN_TARGET_FOLLOW ? undefined : runTarget,
         override_nodes: runTarget === RUN_TARGET_FOLLOW ? false : runTargetOverride
       })
+      if (canvasRunVersionRef.current !== runVersion) return
       if (body.id) {
         setActiveRun({id: body.id, status: body.status || 'running', target: body.target || check.draft.id})
+        // 新运行的地址直接指向这条运行记录，刷新或分享后还能回到同一处。
+        onOpenRunRef.current?.(body.id)
         await pollRunDetail(body.id, body, runVersion, runNodesSnapshot, applyRunOverlay, uploadNodeFilesSnapshot)
         return
       }
@@ -2338,6 +2563,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       applyRunOverlay(buildFailedCanvasRunState(runNodesSnapshot, summarizeAPIResponse(body, '工作流已提交执行，但没有返回运行记录。')))
       setResult({message: summarizeAPIResponse(body, '工作流已提交执行。'), response: body})
     } catch (err) {
+      if (canvasRunVersionRef.current !== runVersion) return
       const body = err.body || {}
       const runID = body.id || body.ID
       let detail = extractRunDetailFromResponse(body)
@@ -2372,7 +2598,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
   }
 
   async function cancelActiveRun() {
-    if (!activeRunID || cancellingRunID) return
+    if (!activeRunID || cancellingRunID || canvasRunDetail?.actionable === false) return
     setCancellingRunID(activeRunID)
     setResult({message: `正在取消运行任务 ${activeRunID}...`, run: activeRun})
     try {
@@ -2385,6 +2611,66 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     }
   }
 
+  // 审批响应与每秒轮询都会写 canvasRunDetail / overlay，两条链路用同一份归一化逻辑，避免画布状态回退。
+  function applyApprovalRunDetail(detail, runID, runVersion) {
+    if (canvasRunVersionRef.current !== runVersion || !detail?.record || detail.record.id !== runID) return
+    const status = normalizeRunStatus(detail.record.status)
+    setCanvasRunDetail(detail)
+    setCanvasRunState(buildCanvasRunStateFromDetail(detail, runSnapshotNodes.length > 0 ? runSnapshotNodes : nodes))
+    setActiveRun(current => current && current.id === runID ? {...current, status} : current)
+    setLastRun(current => current && current.id === runID ? {...current, status} : current)
+  }
+
+  async function submitRunApproval(action) {
+    const approval = pendingApproval
+    const runID = activeRunID
+    if (!runID || !approval || approvalAction || canvasRunDetail?.actionable === false) return
+    const runVersion = canvasRunVersionRef.current
+    const nodeID = approval.node_id || ''
+    const nodeLabel = pendingApprovalNodeName || nodeID
+    if (!nodeID) {
+      setResult({message: '审批记录缺少节点 ID，请刷新运行日志后重试。', run: activeRun})
+      return
+    }
+    if (action === 'reject' && !window.confirm(`确认驳回节点「${nodeLabel}」的审批？驳回后本次运行会直接失败。`)) return
+    const note = approvalNote.trim()
+    // 备注可空：空备注不写进请求体，后端按“没有备注”处理。
+    const payload = note ? {note} : {}
+    setApprovalAction(action)
+    setResult({
+      message: action === 'approve' ? `正在确认节点 ${nodeLabel}，确认后继续执行下游...` : `正在驳回节点 ${nodeLabel}...`,
+      run: activeRun
+    })
+    try {
+      const body = action === 'approve'
+        ? await approveRunNode(runID, nodeID, payload)
+        : await rejectRunNode(runID, nodeID, payload)
+      if (canvasRunVersionRef.current !== runVersion) return
+      applyApprovalRunDetail(body?.data || body, runID, runVersion)
+      // 审批接口返回的 data 是运行详情，但轮询链路才是画布 overlay 的常规来源；这里再拉一次让两边立即一致。
+      try {
+        const fetched = await fetchRunDetail(runID)
+        applyApprovalRunDetail(fetched?.data || fetched, runID, runVersion)
+      } catch {
+        // 刷新失败不影响审批已经生效这个事实，轮询会在下一秒补上。
+      }
+      if (canvasRunVersionRef.current !== runVersion) return
+      setApprovalNote('')
+      setResult({
+        message: action === 'approve'
+          ? `已确认继续：${nodeLabel}（${runID}），后续节点将继续执行。`
+          : `已驳回：${nodeLabel}（${runID}），本次运行按失败结束。`,
+        response: body,
+        run: activeRun
+      })
+    } catch (err) {
+      if (canvasRunVersionRef.current !== runVersion) return
+      setResult({message: readableAPIError(err, action === 'approve' ? '确认审批失败。' : '驳回审批失败。'), response: err.body, run: activeRun})
+    } finally {
+      if (canvasRunVersionRef.current === runVersion) setApprovalAction('')
+    }
+  }
+
   async function pollRunDetail(runID, initialRun, runVersion, runNodesSnapshot, applyRunOverlay, uploadNodeFilesSnapshot = {}) {
     const maxMissingAttempts = 8
     let missingAttempts = 0
@@ -2392,6 +2678,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     while (canvasRunVersionRef.current === runVersion) {
       try {
         const detail = await fetchRunDetail(runID)
+        if (canvasRunVersionRef.current !== runVersion) return null
         const detailData = detail?.data || detail
         if (detailData?.record) {
           const status = normalizeRunStatus(detailData.record.status || initialRun?.status || 'running')
@@ -2404,12 +2691,14 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
           if (status === 'running') {
             await submitWaitingUploadNodes(runID, detailData, runNodesSnapshot, uploadNodeFilesSnapshot, submittedUploadNodes, setResult, setUploadProgress)
           }
+          missingAttempts = 0
           if (status !== 'running') {
             if (status === 'pending') refreshPendingRuns()
             return detail
           }
         }
       } catch (err) {
+        if (canvasRunVersionRef.current !== runVersion) return null
         missingAttempts += 1
         if (missingAttempts >= maxMissingAttempts) throw err
       }
@@ -2424,6 +2713,12 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
     : hasUnsavedChanges
       ? {kind: 'changed', title: '有未保存修改', detail: '结构检查已通过，保存后可供其他用户加载。'}
       : {kind: 'ready', title: selectedWorkflowID ? '已保存' : '草稿就绪', detail: '结构检查已通过，可以保存或运行。'}
+  const displayedWorkflowName = runLocked && runVisible
+    ? canvasRunDetail?.record?.snapshot?.workflow?.name || canvasRunDetail?.record?.target || workflow.name || workflow.id
+    : workflow.name || workflow.id
+  const displayedDraftStatus = runLocked && runVisible
+    ? {kind: 'ready', title: '运行快照', detail: '查看本次运行保存的内容；切换到编辑模式后可修改草稿。'}
+    : draftStatus
   const recentWorkflowOptions = recentWorkflowIDs
     .map(id => ({id, item: workflowOptions.find(option => option.id === id)}))
     .filter(entry => entry.item && (!workflowCategoryFilter || workflowVisibleCategories.get(entry.id)?.has(workflowCategoryFilter)))
@@ -2579,7 +2874,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
               setWorkflowNameMenuOpen(open => !open)
             }}
           >
-            <strong>{workflow.name || workflow.id || '未命名工作流'}</strong>
+            <strong>{displayedWorkflowName || '未命名工作流'}</strong>
             <span aria-hidden="true">▾</span>
           </button>
           {workflowNameMenuOpen && (
@@ -2602,12 +2897,38 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
             </>
           )}
         </div>
-        <span className={`workflowSaveState ${draftStatus.kind}`} role="status" aria-live="polite" title={draftStatus.detail}>{draftStatus.title}</span>
+        <span className={`workflowSaveState ${displayedDraftStatus.kind}`} role="status" aria-live="polite" title={displayedDraftStatus.detail}>{displayedDraftStatus.title}</span>
       </div>
       <div className="workflowTopBarActions">
-        <button className="secondary workflowTopBarIcon" type="button" onClick={undoFlowEdit} disabled={!flowHistory.canUndo || isActiveRunRunning} title="撤销（Ctrl+Z）">撤销</button>
-        <button className="secondary workflowTopBarIcon" type="button" onClick={redoFlowEdit} disabled={!flowHistory.canRedo || isActiveRunRunning} title="重做（Ctrl+Y / Ctrl+Shift+Z）">重做</button>
-        <button className="secondary" type="button" onClick={openSaveModal} disabled={Boolean(workflowAction) || isActiveRunRunning} title="保存（Ctrl+S）">保存</button>
+        <div className="segmentedControl workflowCanvasModeControl" role="group" aria-label="画布模式">
+          <button
+            type="button"
+            className={isEditingCanvas ? 'active' : ''}
+            aria-label="编辑模式"
+            disabled={isActiveRunRunning}
+            title={isActiveRunRunning ? '运行进行中，画布锁定在运行快照上' : '编辑当前草稿'}
+            onClick={() => { canvasRunVersionRef.current += 1; setCanvasMode(CANVAS_MODE_EDIT); onOpenRunRef.current?.('') }}
+          >编辑模式</button>
+          <button
+            type="button"
+            className={runLocked ? 'active' : ''}
+            aria-label="运行模式"
+            disabled={!runVisible}
+            title={runVisible ? '只读查看这次运行使用的快照与结论' : '还没有运行记录，先运行工作流'}
+            onClick={() => { setRunDockOpen(true); setCanvasMode(CANVAS_MODE_RUN) }}
+          >运行模式</button>
+        </div>
+        <button
+          className="secondary workflowTopBarIcon"
+          type="button"
+          onClick={() => setRailOpen(open => !open)}
+          aria-label={railOpen ? '隐藏运行记录' : '显示运行记录'}
+          aria-pressed={railOpen}
+          title={railOpen ? '隐藏左侧运行记录栏，给画布让出宽度' : '显示左侧运行记录栏'}
+        >记录栏</button>
+        <button className="secondary workflowTopBarIcon" type="button" onClick={undoFlowEdit} disabled={!flowHistory.canUndo || runLocked} title={runLocked ? '运行模式下画布只读，切回编辑模式后再修改' : '撤销（Ctrl+Z）'}>撤销</button>
+        <button className="secondary workflowTopBarIcon" type="button" onClick={redoFlowEdit} disabled={!flowHistory.canRedo || runLocked} title="重做（Ctrl+Y / Ctrl+Shift+Z）">重做</button>
+        <button className="secondary" type="button" onClick={openSaveModal} disabled={Boolean(workflowAction) || runLocked} title={runLocked ? '运行模式下画布只读，切回编辑模式后再保存' : '保存（Ctrl+S）'}>保存</button>
         {!draftWindow && (
           <button
             className="secondary workflowTopBarIcon"
@@ -2623,7 +2944,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
         {draftWindow ? (
           <span className="workflowTopBarHint">独立草稿窗口仅编辑和保存，运行请在主窗口进行</span>
         ) : isActiveRunRunning ? (
-          <button className="primary danger" type="button" onClick={cancelActiveRun} disabled={!activeRunID || cancellingRunID === activeRunID} aria-label="取消当前工作流运行">
+          <button className="primary danger" type="button" onClick={cancelActiveRun} disabled={!activeRunID || cancellingRunID === activeRunID || canvasRunDetail?.actionable === false} aria-label="取消当前工作流运行">
             {!activeRunID ? '启动中...' : cancellingRunID === activeRunID ? '取消中...' : '取消运行'}
           </button>
         ) : (
@@ -2790,7 +3111,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
             ) : (
               <input
                 value={formatRunParamInputValue(runParams[param.name])}
-                placeholder={param.name || '参数名'}
+                placeholder={param.name || '参数值'}
                 onChange={event => updateRunParam(param.name, event.target.value)}
                 disabled={!param.name || isActiveRunRunning}
               />
@@ -2798,7 +3119,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
           </label>
         ))}
         {parsedRunParams.invalid && (
-          <div className="empty small" title="高级 JSON 当前无效，逐项输入会以空对象重新生成参数。">高级 JSON 当前无效。</div>
+          <div className="empty small" title="高级 JSON 当前无效，逐项输入会以空对象重新生成参数">高级 JSON 当前无效。</div>
         )}
         <div className="buttonRow">
           <button className="secondary" type="button" onClick={resetRunParamsToDefaults}>填入默认参数</button>
@@ -2928,7 +3249,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
           {uploadFlowNodes(nodes).length > 0 && (
             <>
               <span>上传文件</span>
-              <strong>{uploadFlowNodes(nodes).map(node => `${node.data?.name || node.id}：${uploadFileSummary(uploadNodeFiles, node.id)}`).join('；')}</strong>
+              <strong>{uploadFlowNodes(nodes).map(node => `${node.data?.name || node.id}：${uploadFileSummary(uploadNodeFiles, node.id)}`).join('、')}</strong>
             </>
           )}
           <span>失败恢复</span>
@@ -3063,7 +3384,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       >
         <MiniMap />
         <Background />
-        {workflowStageLayouts.length > 0 && (selectedWorkflowID || draftStarted || nodes.length > 0) && (
+        {workflowStageLayouts.length > 0 && (selectedWorkflowID || draftStarted || renderNodes.length > 0) && (
           <ViewportPortal>
             <div className="workflowStageLayer" style={stageLayerSize ? {width: stageLayerSize.width, height: stageLayerSize.height} : undefined}>
               {workflowStageLayouts.map(stage => {
@@ -3149,7 +3470,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
                             aria-label={`把选中的 ${canvasSelectedNodeIDs.length} 个步骤移入阶段 ${stage.name}`}
                             disabled={canvasSelectedNodeIDs.length === 0 || isActiveRunRunning}
                             onClick={() => applyBatchStageMove(stage.id)}
-                          >⇥</button>
+                          >＋</button>
                           <button
                             type="button"
                             className="workflowStageIconButton accent"
@@ -3174,7 +3495,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
                         {isEditingCanvas ? '把步骤拖到这里，或点击阶段右上角 ＋ 添加' : '该阶段没有步骤'}
                       </div>
                     )}
-                    {stageMutationWarnings(stage.id).map(warning => (
+                    {(isEditingCanvas ? stageMutationWarnings(stage.id) : []).map(warning => (
                       <div key={warning} className="workflowStageWarning nodrag nopan" role="status">{warning}</div>
                     ))}
                   </section>
@@ -3244,60 +3565,161 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       </ReactFlow>
     </section>
   )
-  const runDock = runVisible ? (
-    <section className={`workflowRunDock${runDockOpen ? ' open' : ''}`} aria-label="运行日志">
-      <header className="workflowRunDockHeader">
-        <div className="workflowRunDockSummary">
-          <strong>运行日志</strong>
-          <span className={`workflowRunStatusChip ${activeRunStatus}`}>{runStatusLabel(activeRunStatus)}</span>
-          {activeRunID && <code title="运行 ID">{activeRunID}</code>}
-          <span title="本次运行实际使用的执行目标">执行机器：{runMachineLabel}</span>
-          {uploadProgress && <span>上传 {uploadProgress.percent}%</span>}
-        </div>
-        <div className="workflowRunDockActions">
-          {activeRunID && !isActiveRunRunning && <button type="button" className="secondary" onClick={() => openRecoveryDrawer(activeRunID)}>恢复与通知</button>}
-          {resultPanel && <button type="button" className="secondary" onClick={() => setRunHistoryOpen(true)}>完整日志</button>}
-          <button type="button" className="secondary" onClick={() => setRunDockOpen(open => !open)}>{runDockOpen ? '收起' : '展开'}</button>
-          {!isActiveRunRunning && (
-            <button type="button" className="secondary" onClick={() => clearCanvasRunOverlay()}>关闭运行结果</button>
-          )}
-        </div>
-      </header>
-      {runDockOpen && (
-        <div className="workflowRunDockBody">
-          <nav className="workflowRunDockNodes" aria-label="运行节点列表" ref={runDockNavRef}>
-            {runDockNodes.map(node => {
-              const run = canvasRunState.nodes?.[node.id]
-              return (
-                <button
-                  key={node.id}
-                  type="button"
-                  className={runDockNodeID === node.id ? 'active' : ''}
-                  onClick={() => setRunDockNodeID(node.id)}
-                >
-                  <span className={`workflowRunStatusDot ${run?.status || 'waiting'}`} aria-hidden="true" />
-                  <span className="workflowRunNodeName">{node.data?.name || node.id}</span>
-                  <small>{run?.label || runStatusLabel(run?.status || 'waiting')}</small>
-                </button>
-              )
-            })}
-            {runDockNodes.length === 0 && <div className="empty small">本次运行没有可展示的节点。</div>}
-          </nav>
-          <div className="workflowRunDockDetail">
-            {runDockNodeID ? (
-              <CanvasNodeLogPanel
-                embedded
-                nodeID={runDockNodeID}
-                item={runDockItem}
-                run={canvasRunState.nodes?.[runDockNodeID]}
-              />
-            ) : (
-              <div className="empty small">点击画布节点或左侧列表，查看对应的逐节点日志。</div>
-            )}
-          </div>
-        </div>
-      )}
+  const runRail = draftWindow || !railOpen ? null : (
+    <RunHistoryRail
+      workflowID={selectedWorkflowID || canvasRunDetail?.record?.target || workflow.id || ''}
+      activeRunID={activeRunID || historyRunID}
+      activeRunStatus={activeRunStatus}
+      selectionLocked={isActiveRunRunning}
+      refreshToken={runRailRefresh}
+      onSelectRun={openRunFromRail}
+      onOpenAllRuns={onOpenRunsTab || undefined}
+    />
+  )
+  const runNodeNames = {}
+  runDockNodes.forEach(node => { runNodeNames[node.id] = node.data?.name || node.id })
+  const runningNodeID = useMemo(() => runningRunNodeID(canvasRunState), [canvasRunState])
+  const historyView = Boolean(historyRunID)
+  const displayedRunID = activeRunID || historyRunID
+  // 恢复内容只渲染一份：抽屉和内联「恢复」页共用同一个元素，状态机不复制。
+  const recoveryPanelBody = (
+    <>
+      {recoveryLoading && <div className="empty small">正在读取待处理运行...</div>}
+      {recoveryError && <div className="workflowRecoveryMessage error" role="alert">{recoveryError}</div>}
+      {recoveryNotice && <div className="workflowRecoveryMessage ok" role="status">{recoveryNotice}</div>}
+      <RecoveryPanel
+        detail={recoveryDetail}
+        busyAction={recoveryAction}
+        notificationBusy={notificationBusy}
+        onCheck={() => executeRecoveryAction('check')}
+        onRollback={() => executeRecoveryAction('rollback')}
+        onResolve={note => executeRecoveryAction('resolve', note)}
+        onRetryNotification={retryRecoveryNotification}
+      />
+    </>
+  )
+  const displayedRunRecovery = canvasRunDetail?.record || null
+  const displayedRunHasRecovery = Boolean(displayedRunRecovery?.pending) ||
+    (displayedRunRecovery?.attempts?.length || 0) > 0 ||
+    (displayedRunRecovery?.notifications?.length || 0) > 0
+  const inlineRecoveryReady = recoveryInline && recoveryRunID && recoveryDetail?.record?.id === recoveryRunID
+  const logPanelProps = {
+    focusNodeID: runDockNodeID,
+    focusNodeName: runNodeNames[runDockNodeID] || runDockNodeID,
+    node: runDockNodes.find(node => node.id === runDockNodeID) || null,
+    run: canvasRunState.nodes?.[runDockNodeID] || null,
+    runState: canvasRunState,
+    record: canvasRunDetail?.record || null,
+    logItems: canvasRunDetail?.logs?.items || [],
+    machineLabel: runMachineLabel,
+    nodeOrder: runDockNodes.map(node => node.id),
+    runNodeNames,
+    activeRunID: displayedRunID,
+    isRunning: isActiveRunRunning,
+    runningNodeID,
+    rerunDisabledReason: rerunDisabledReasonForNode(),
+    recoveryAvailable: displayedRunHasRecovery,
+    recoveryPanel: inlineRecoveryReady ? recoveryPanelBody : null,
+    onRequestRecovery: () => openRecoveryDrawer(displayedRunID, {inline: true}),
+    onRerun: () => rerunWorkflowNode(runDockNodeID),
+    onClearFocus: () => setRunDockNodeID(''),
+    onClearRunOverlay: isActiveRunRunning ? null : () => clearCanvasRunOverlay(),
+    supportHref: displayedRunID ? `/api/runs/${encodeURIComponent(displayedRunID)}/support.zip` : null
+  }
+  const runPanel = runVisible && runDockOpen ? (
+    <RunLogWindow
+      embedded
+      open={logWindowOpen}
+      onExpand={() => setLogWindowOpen(true)}
+      onCollapse={() => setRunDockOpen(false)}
+      onClose={() => setLogWindowOpen(false)}
+      title={runDockNodeID ? `运行日志 · ${runNodeNames[runDockNodeID] || runDockNodeID}` : '运行日志'}
+      {...logPanelProps}
+    />
+  ) : null
+  const runBar = runVisible ? (
+    <section className="workflowRunBar" aria-label="运行状态">
+      <div className="workflowRunBarMain">
+        <span className={`workflowRunStatusChip ${activeRunStatus}`}>{runStatusLabel(activeRunStatus)}</span>
+        {(activeRunID || historyRunID) && <code title="运行 ID">{activeRunID || historyRunID}</code>}
+        <span title="本次运行实际使用的执行目标">执行机器：{runMachineLabel}</span>
+        {uploadProgress && <span>上传 {uploadProgress.percent}%</span>}
+        <span className="workflowRunBarHint">{isActiveRunRunning
+          ? '运行中，画布展示本次执行的快照；单击节点在右侧查看日志。'
+          : historyView
+          ? '历史快照 · 只读：画布按这条运行记录保存的内容展示，不会跟随当前工作流改动。'
+          : isEditingCanvas
+            ? '编辑模式不显示运行状态；切到「运行模式」可以看这次运行在画布上的执行情况。'
+            : '单击节点在右侧定位日志；需要更多空间时点击「放大」。'}</span>
+      </div>
+      <div className="workflowRunBarActions">
+        <button type="button" className="secondary" onClick={() => { setRunDockOpen(true); setLogWindowOpen(true) }} aria-label="放大查看运行日志">运行日志</button>
+        {!runDockOpen && <button type="button" className="secondary" onClick={() => setRunDockOpen(true)}>展开详情</button>}
+      </div>
     </section>
+  ) : null
+  const runApprovalBar = runVisible && pendingApproval ? (
+    <div className="workflowRunApprovalBar" role="alert" aria-label="待审批">
+      <div className="workflowRunApprovalText">
+        <strong>等待人工审批：{pendingApprovalNodeName || pendingApproval.node_id}</strong>
+        <span>{pendingApproval.message || '该节点没有填写审批提示，请确认配置文件或前置服务已经改好后再继续。'}</span>
+        <span className="workflowRunApprovalMeta">
+          节点 {pendingApproval.node_id}
+          {formatRunTimestamp(pendingApproval.since) ? ` · 开始等待 ${formatRunTimestamp(pendingApproval.since)}` : ''}
+          {' · 运行会一直停在 running'}
+        </span>
+      </div>
+      <div className="workflowRunApprovalActions">
+        <input
+          aria-label="审批备注"
+          value={approvalNote}
+          disabled={Boolean(approvalAction) || canvasRunDetail?.actionable === false}
+          placeholder="可选备注，会写入运行记录"
+          onChange={event => setApprovalNote(event.target.value)}
+        />
+        <button type="button" className="primary" disabled={Boolean(approvalAction) || canvasRunDetail?.actionable === false} onClick={() => submitRunApproval('approve')}>
+          {approvalAction === 'approve' ? '确认中…' : '确认继续'}
+        </button>
+        <button type="button" className="secondary danger" disabled={Boolean(approvalAction) || canvasRunDetail?.actionable === false} onClick={() => submitRunApproval('reject')}>
+          {approvalAction === 'reject' ? '驳回中…' : '驳回'}
+        </button>
+      </div>
+    </div>
+  ) : null
+  // 拖动改宽度：先量当前渲染宽度作为起点，用户拖出来的值存进状态（未拖过则保持样式默认值）。
+  const workspaceBodyStyle = {}
+  if (runRailWidth.width) workspaceBodyStyle['--workflow-rail-width'] = `${runRailWidth.width}px`
+  if (runPanelWidth.width) workspaceBodyStyle['--workflow-run-panel-width'] = `${runPanelWidth.width}px`
+  const measureWorkspacePane = selector => () => {
+    const body = workspaceBodyRef.current
+    if (!body) return 0
+    const pane = body.querySelector(selector)
+    return pane ? pane.getBoundingClientRect().width : 0
+  }
+  const railResizeHandle = runRail ? (
+    <ResizeHandle
+      label="调整运行记录栏宽度"
+      min={WORKFLOW_RAIL_MIN_WIDTH}
+      max={WORKFLOW_RAIL_MAX_WIDTH}
+      value={runRailWidth.width}
+      fallback={248}
+      measure={measureWorkspacePane('.workflowRunRail')}
+      onChange={runRailWidth.setWidth}
+      onReset={runRailWidth.reset}
+    />
+  ) : null
+  const runPanelResizeHandle = runPanel ? (
+    <ResizeHandle
+      label="调整运行日志栏宽度"
+      invert
+      min={WORKFLOW_RUN_PANEL_MIN_WIDTH}
+      max={WORKFLOW_RUN_PANEL_MAX_WIDTH}
+      value={runPanelWidth.width}
+      fallback={400}
+      measure={measureWorkspacePane('.workflowRunPanelHost:not(.workflowLogWindowBackdrop)')}
+      onChange={runPanelWidth.setWidth}
+      onReset={runPanelWidth.reset}
+    />
   ) : null
   return (
     <div className="workflowWorkspace">
@@ -3305,8 +3727,15 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
       {draftWindowTransferBanner}
       {workflowPendingBanner}
       {workflowStatusNotices}
-      <div className="workflowCanvasArea">{workflowCanvas}</div>
-      {runDock}
+      {runBar}
+      {runApprovalBar}
+      <div className="workflowWorkspaceBody" ref={workspaceBodyRef} style={workspaceBodyStyle}>
+        {runRail}
+        {railResizeHandle}
+        <div className="workflowCanvasArea">{workflowCanvas}</div>
+        {runPanelResizeHandle}
+        {runPanel}
+      </div>
       {batchStageMoveModal}
 
       {saveModalOpen && (
@@ -3595,13 +4024,23 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
             </div>
             <div className="nodeConfigDrawerBody workflowRunHistoryBody">
               <div className="workflowRunDraftNotice">运行结果为只读快照，不会修改当前画布草稿。</div>
-              {resultPanel}
+              <RunLogView
+                items={canvasRunDetail?.logs?.items || []}
+                nodeNames={runNodeNames}
+                runningOwnerID={runningNodeID}
+                runID={activeRunID || historyRunID || 'run'}
+                scopeToggle={false}
+              />
+              <details className="workflowRunHistoryResult">
+                <summary>执行结果详情</summary>
+                {resultPanel}
+              </details>
             </div>
           </aside>
         </div>
       )}
 
-      {recoveryRunID && (
+      {recoveryRunID && !recoveryInline && (
         <div className="modalBackdrop drawerBackdrop" onClick={closeRecoveryDrawer}>
           <aside className="nodeConfigDrawer workflowRecoveryDrawer" role="dialog" aria-modal="true" aria-label="待处理恢复" onClick={event => event.stopPropagation()}>
             <div className="modalHeader nodeConfigDrawerHeader">
@@ -3612,18 +4051,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
               <button type="button" className="modalClose" onClick={closeRecoveryDrawer} disabled={Boolean(recoveryAction)}>×</button>
             </div>
             <div className="nodeConfigDrawerBody workflowRecoveryBody">
-              {recoveryLoading && <div className="empty small">正在读取待处理运行...</div>}
-              {recoveryError && <div className="workflowRecoveryMessage error" role="alert">{recoveryError}</div>}
-              {recoveryNotice && <div className="workflowRecoveryMessage ok" role="status">{recoveryNotice}</div>}
-              <RecoveryPanel
-                detail={recoveryDetail}
-                busyAction={recoveryAction}
-                notificationBusy={notificationBusy}
-                onCheck={() => executeRecoveryAction('check')}
-                onRollback={() => executeRecoveryAction('rollback')}
-                onResolve={note => executeRecoveryAction('resolve', note)}
-                onRetryNotification={retryRecoveryNotification}
-              />
+              {recoveryPanelBody}
             </div>
           </aside>
         </div>
@@ -3654,6 +4082,7 @@ export default function WorkflowEditor({catalog, activeCategory = '', hosts = []
             onArchiveChange={updateSelectedNodeArchive}
             onWaitChange={updateSelectedNodeWait}
             onNotifyChange={updateSelectedNodeNotify}
+            onApprovalChange={updateSelectedNodeApproval}
             onHostChange={updateSelectedNodeHost}
             loopTool={selectedLoopTool}
             nodes={nodes}
@@ -3892,7 +4321,7 @@ async function submitWaitingUploadNodes(runID, detailData, nodes, uploadNodeFile
         const nextProgress = uploadProgressState(step.id, files, progress.uploaded, 'uploading', progress.fileName || '')
         setUploadProgress(nextProgress)
         setResult({
-          message: `上传节点 ${step.id} 正在上传：${formatBytes(progress.uploaded)} / ${formatBytes(progress.total)} (${percent}%)`,
+          message: `上传节点 ${step.id} 正在上传 ${formatBytes(progress.uploaded)} / ${formatBytes(progress.total)} (${percent}%)`,
           uploadProgress: nextProgress,
           detail: {data: detailData},
           run: {id: runID, status: 'running'}
@@ -3901,7 +4330,7 @@ async function submitWaitingUploadNodes(runID, detailData, nodes, uploadNodeFile
       const doneProgress = uploadProgressState(step.id, files, uploadFilesTotalSize(files), 'succeeded', '上传完成')
       setUploadProgress(doneProgress)
       setResult({
-        message: `上传节点 ${step.id} 上传完成：${formatBytes(doneProgress.uploaded)} / ${formatBytes(doneProgress.total)}`,
+        message: `上传节点 ${step.id} 上传完成 ${formatBytes(doneProgress.uploaded)} / ${formatBytes(doneProgress.total)}`,
         uploadProgress: doneProgress,
         detail: {data: detailData},
         run: {id: runID, status: 'running'}
@@ -3992,65 +4421,18 @@ function uploadSelectionTitle(files) {
   return files.slice(0, 12).map(file => file.webkitRelativePath || file.name).join('\n')
 }
 
-export function CanvasNodeLogPanel({nodeID, item, run, minimized, onMinimize, onRestore, onClose, embedded = false}) {
+// 浮层版节点日志已经并入右栏运行日志页（RunLogPanel）；这里只保留恢复抽屉里用的内联证据块。
+export function CanvasNodeLogPanel({nodeID, item, run}) {
   const stdout = item?.stdout || ''
   const stderr = item?.stderr || run?.error || run?.skippedReason || ''
   const title = item?.title || nodeID
   const status = item?.status || run?.status || 'waiting'
-  if (embedded) {
-    return (
-      <section className="canvasNodeLogPanel embedded">
-        <div className="canvasNodeLogHeader">
-          <div>
-            <strong>{title}</strong>
-            <span>{runStatusLabel(status)}</span>
-          </div>
-        </div>
-        {!item && !stdout && !stderr && (
-          <div className="empty small">当前节点暂无日志，运行开始或节点完成后会显示。</div>
-        )}
-        {stdout && <InlineLogBlock title="标准输出" value={stdout} />}
-        {stderr && <InlineLogBlock title="错误输出" value={stderr} />}
-        {item?.children?.length > 0 && (
-          <div className="canvasNodeLogChildren">
-            {item.children.map(child => (
-              <details key={child.id}>
-                <summary>{child.title || child.id}</summary>
-                {child.stdout && <InlineLogBlock title="标准输出" value={child.stdout} />}
-                {child.stderr && <InlineLogBlock title="错误输出" value={child.stderr} />}
-              </details>
-            ))}
-          </div>
-        )}
-      </section>
-    )
-  }
-  if (minimized) {
-    return (
-      <section className="canvasNodeLogPanel minimized nodrag nopan" onMouseDown={event => event.stopPropagation()}>
-        <div className="canvasNodeLogHeader">
-          <div>
-            <strong>{title}</strong>
-            <span>{runStatusLabel(status)}</span>
-          </div>
-          <div className="canvasNodeLogActions">
-            <button type="button" className="secondary" onClick={onRestore}>展开</button>
-            <button type="button" className="secondary" onClick={onClose}>关闭</button>
-          </div>
-        </div>
-      </section>
-    )
-  }
   return (
-    <section className="canvasNodeLogPanel nodrag nopan" onMouseDown={event => event.stopPropagation()}>
+    <section className="canvasNodeLogPanel embedded">
       <div className="canvasNodeLogHeader">
         <div>
           <strong>{title}</strong>
           <span>{runStatusLabel(status)}</span>
-        </div>
-        <div className="canvasNodeLogActions">
-          <button type="button" className="secondary" onClick={onMinimize}>最小化</button>
-          <button type="button" className="secondary" onClick={onClose}>关闭</button>
         </div>
       </div>
       {!item && !stdout && !stderr && (
@@ -4198,13 +4580,13 @@ export function RecoveryPanel({detail, busyAction = '', notificationBusy = '', o
                     <small>{backup.host_name || backup.host_id || '本机'}</small>
                   </td>
                   <td className="wrap"><code>{backup.target_path || '未知'}</code></td>
-                  <td className="wrap"><code>{backup.backup_path || '无'}</code></td>
+                  <td className="wrap"><code>{backup.backup_path || '-'}</code></td>
                   <td>
                     {backupStatusLabel(backup.status)}
                     {backup.recorded_at && <small>记录于 {formatRunTimestamp(backup.recorded_at)}</small>}
                     {backup.restored_sha256 && <small>{pendingActive ? '文件已还原，待完成服务与健康检查' : '文件已还原'}</small>}
                   </td>
-                  <td className="wrap"><code>{backup.restored_sha256 || backup.sha256 || '无'}</code></td>
+                  <td className="wrap"><code>{backup.restored_sha256 || backup.sha256 || '-'}</code></td>
                 </tr>
               ))}
             </tbody>
@@ -4308,15 +4690,6 @@ function InlineLogBlock({title, value}) {
   )
 }
 
-export function findRunLogItem(items, nodeID) {
-  for (const item of items || []) {
-    if (item?.id === nodeID) return item
-    const child = findRunLogItem(item?.children || [], nodeID)
-    if (child) return child
-  }
-  return null
-}
-
 function capitalizeProgressStatus(status) {
   const value = String(status || 'uploading')
   return value.charAt(0).toUpperCase() + value.slice(1)
@@ -4356,6 +4729,26 @@ export function describeRunMachines(record, snapshotNodes, hosts, fallback) {  c
     return name || (hosts || []).find(host => host.id === id)?.name || id
   }).join('、') || fallback
 }
+
+// 历史运行的画布必须来自运行记录里的快照：用当前配置渲染会在工作流改过之后显示错误的拓扑。
+export function snapshotFlowFromWorkflow(snapshotWorkflow) {
+  const workflowNodes = snapshotWorkflow?.nodes || []
+  const stages = workflowModel.normalizeWorkflowStages(snapshotWorkflow?.stages || [])
+  if (workflowNodes.length === 0) return {nodes: [], edges: [], stages}
+  const legacyTargetMap = legacyLoopTargetMap(workflowNodes)
+  const legacyTargets = new Set(legacyTargetMap.keys())
+  const flowNodes = workflowNodes
+    .filter(node => !legacyTargets.has(node.id))
+    .map((node, index) => workflowNodeToFlowNode(node, index, null, workflowNodes))
+  const flowEdges = remapLegacyLoopEdges(snapshotWorkflow?.edges || [], legacyTargetMap)
+    .map((edge, index) => flowEdgeFromWorkflowEdge(edge, index, flowNodes))
+  return {nodes: workflowModel.autoLayoutWorkflowNodes(flowNodes, flowEdges, stages), edges: flowEdges, stages}
+}
+
+// pendingRunApproval 的实现已搬到 ../runApproval.js：运行记录页也要用同一套判定，
+// 而 main.jsx 对编辑器是懒加载的，不能让共享逻辑反过来依赖这块画布。
+// 这里重新导出，保证既有引用（nodes.test.jsx、画布运行日志面板）行为不变。
+export {pendingRunApproval}
 
 function firstRunDockNodeID(nodes, runState) {
   const entries = Object.entries(runState?.nodes || {})
@@ -4604,8 +4997,10 @@ function dedupeRunSteps(steps) {
   return out
 }
 
+// 等待中的步骤（含人工审批）排在最底层：既不能把已有结论降级成 idle。
+// 也要保证「succeeded + waiting」这种乱序轮询结果保留成功结论。
 function strongerRunStatus(left, right) {
-  const rank = {failed: 5, pending: 6, rolled_back: 6, running: 4, skipped: 3, succeeded: 2, idle: 1}
+  const rank = {failed: 5, pending: 6, rolled_back: 6, running: 4, skipped: 3, succeeded: 2, waiting: 1, idle: 0}
   return (rank[normalizeRunStatus(right)] || 0) > (rank[normalizeRunStatus(left)] || 0) ? normalizeRunStatus(right) : normalizeRunStatus(left)
 }
 
@@ -4918,7 +5313,7 @@ export function workflowRecoverySummary(recovery) {
   if ((recovery?.change_node_ids || []).length > 0) parts.push(`变更节点：${recovery.change_node_ids.join('、')}`)
   if ((recovery?.service_node_ids || []).length > 0) parts.push(`服务节点：${recovery.service_node_ids.join('、')}`)
   if ((recovery?.health_node_ids || []).length > 0) parts.push(`检查节点：${recovery.health_node_ids.join('、')}`)
-  return parts.length > 0 ? parts.join('；') : '按节点 on_failure 与变更备份自动判断'
+  return parts.length > 0 ? parts.join('；') : '按节点 on_failure 与变更备份自动判定'
 }
 
 export function workflowNotificationSummary(notification) {
@@ -5037,6 +5432,7 @@ function newControlFlowNode(control, id, position, onRemove) {
   if (control.type === 'archive') data.archive = workflowModel.defaultArchiveConfig()
   if (control.type === 'wait') data.wait = workflowModel.defaultWaitConfig()
   if (control.type === 'notify') data.notify = workflowModel.defaultNotifyConfig()
+  if (control.type === 'approval') data.approval = workflowModel.defaultApprovalConfig()
   return {
     id,
     type: 'controlNode',
@@ -5179,7 +5575,7 @@ export function workflowNodeToFlowNode(node, index, onRemove, workflowNodes = []
       position: {x: 80 + index * 220, y: 120 + (index % 3) * 90}
     }
   }
-  if (nodeType === 'parallel' || nodeType === 'join' || nodeType === 'loop' || nodeType === 'upload' || nodeType === 'extract_config' || nodeType === 'http_request' || nodeType === 'shell_script' || nodeType === 'file_checksum' || nodeType === 'archive' || nodeType === 'wait' || nodeType === 'notify') {
+  if (nodeType === 'parallel' || nodeType === 'join' || nodeType === 'loop' || nodeType === 'upload' || nodeType === 'extract_config' || nodeType === 'http_request' || nodeType === 'shell_script' || nodeType === 'file_checksum' || nodeType === 'archive' || nodeType === 'wait' || nodeType === 'notify' || nodeType === 'approval') {
     const control = controlNodeCatalog.find(item => item.type === nodeType) || {type: nodeType, title: controlNodeTitle(nodeType)}
     const flowNode = newControlFlowNode(control, node.id, {x: 80 + index * 220, y: 120 + (index % 3) * 90}, onRemove)
     flowNode.data.name = node.name || node.id
@@ -5206,6 +5602,7 @@ export function workflowNodeToFlowNode(node, index, onRemove, workflowNodes = []
     if (nodeType === 'archive') flowNode.data.archive = workflowModel.normalizeArchiveConfig(node.archive || workflowModel.defaultArchiveConfig())
     if (nodeType === 'wait') flowNode.data.wait = node.wait ? workflowModel.normalizeWaitConfig(node.wait) : workflowModel.defaultWaitConfig()
     if (nodeType === 'notify') flowNode.data.notify = node.notify ? workflowModel.normalizeNotifyConfig(node.notify) : workflowModel.defaultNotifyConfig()
+    if (nodeType === 'approval') flowNode.data.approval = node.approval ? workflowModel.normalizeApprovalConfig(node.approval) : workflowModel.defaultApprovalConfig()
     return flowNode
   }
   return {
@@ -5445,7 +5842,7 @@ function useFlowHistory(nodes, edges, setNodes, setEdges, stages = [], setStages
   const commitPending = useCallback(() => {
     const state = stateRef.current
     if (!state.pending) return
-    // React Flow 回传的尺寸/位置补丁会让画布反复变化但不改任何内容；
+    // React Flow 回传的尺寸与位置补丁会让画布反复变化但不改任何内容；
     // 只有内容真的变了才落成一步，撤销按钮才不会在刚加载完就说“还能撤销”。
     const current = {nodes: nodesRef.current, edges: edgesRef.current, stages: stagesRef.current}
     if (!isEmptyHistoryStep(state.pending, current)) {

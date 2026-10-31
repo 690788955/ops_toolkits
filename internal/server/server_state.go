@@ -109,7 +109,7 @@ func (s *serverState) reconcileRunRecord(reg *registry.Registry, id string) (run
 	}
 	record.EndedAt = time.Now()
 	record.Status = "failed"
-	record.Error = "运行任务已异常退出或服务已重启，当前进程没有该任务的运行句柄。"
+	record.Error = "运行任务不在当前进程执行：可能已异常退出、服务已重启，或该运行由 CLI 等其它进程启动；当前进程没有它的运行句柄。"
 	for index := range record.Steps {
 		if record.Steps[index].Status != "running" && record.Steps[index].Status != "waiting" {
 			continue
@@ -117,6 +117,15 @@ func (s *serverState) reconcileRunRecord(reg *registry.Registry, id string) (run
 		record.Steps[index].Status = "failed"
 		record.Steps[index].EndedAt = record.EndedAt
 		record.Steps[index].Error = "运行任务已异常退出或服务已重启。"
+	}
+	// 审批闸门只存在于进程内，重启后没有可确认的对象，按作废记录，避免前端继续显示“等待审批”。
+	for index := range record.Approvals {
+		if record.Approvals[index].Status != runner.ApprovalStatusWaiting {
+			continue
+		}
+		record.Approvals[index].Status = runner.ApprovalStatusCancelled
+		record.Approvals[index].DecidedAt = record.EndedAt
+		record.Approvals[index].Note = "该运行不在当前进程（已异常退出、服务已重启，或由 CLI 等其它进程启动），等待中的审批已作废"
 	}
 	if err := saveRunRecord(reg, &record); err != nil {
 		return runner.RunRecord{}, err

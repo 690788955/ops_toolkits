@@ -39,25 +39,24 @@ func listRuns(state *serverState, reg *registry.Registry) ([]runbundle.Summary, 
 			out = append(out, item)
 			continue
 		}
-		out = append(out, runbundle.Summary{
-			ID:        record.ID,
-			Kind:      record.Kind,
-			Target:    record.Target,
-			BatchID:   record.BatchID,
-			HostID:    record.HostID,
-			HostName:  record.HostName,
-			Status:    record.Status,
-			StartedAt: record.StartedAt,
-			EndedAt:   record.EndedAt,
-			Params:    record.Params,
-			Error:     record.Error,
-		})
+		out = append(out, runbundle.Summarize(record))
+	}
+	for index := range out {
+		if !out[index].AwaitingApproval {
+			continue
+		}
+		actionable := state != nil && state.hasActiveRun(out[index].ID)
+		out[index].ApprovalActionable = &actionable
 	}
 	return out, nil
 }
 
 func runSummaryMatches(item runbundle.Summary, keyword string) bool {
 	fields := []string{item.ID, item.Kind, item.Target, item.BatchID, item.HostID, item.HostName, item.Status}
+	if item.Approval != nil {
+		// 审批提示里常写着要改哪个配置，搜索这张列表时应该也能命中。
+		fields = append(fields, item.Approval.NodeID, item.Approval.Message)
+	}
 	for _, field := range fields {
 		if strings.Contains(strings.ToLower(field), keyword) {
 			return true
@@ -67,6 +66,15 @@ func runSummaryMatches(item runbundle.Summary, keyword string) bool {
 		if strings.Contains(strings.ToLower(key), keyword) || strings.Contains(strings.ToLower(value), keyword) {
 			return true
 		}
+	}
+	return false
+}
+
+// queryFlag 统一解析 1/true/yes 这类布尔查询参数。
+func queryFlag(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes":
+		return true
 	}
 	return false
 }
@@ -100,7 +108,12 @@ func loadRunDetail(state *serverState, reg *registry.Registry, id string) (runDe
 	if err != nil {
 		return runDetail{}, err
 	}
-	return runDetail{Record: record, Logs: loadRunLogs(runDir, record)}, nil
+	detail := runDetail{Record: record, Logs: loadRunLogs(runDir, record)}
+	if record.Status == "running" || record.Status == runner.RunStatusPending {
+		actionable := state != nil && state.hasActiveRun(id)
+		detail.Actionable = &actionable
+	}
+	return detail, nil
 }
 
 func loadRunLogs(runDir string, record runner.RunRecord) runLogs {

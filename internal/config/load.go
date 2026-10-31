@@ -372,6 +372,8 @@ func NormalizeWorkflow(cfg *WorkflowConfig) {
 				cfg.Nodes[i].Type = WorkflowNodeTypeArchive
 			} else if cfg.Nodes[i].Wait.Seconds > 0 || strings.TrimSpace(cfg.Nodes[i].Wait.PollURL) != "" || strings.TrimSpace(cfg.Nodes[i].Wait.PollFile) != "" {
 				cfg.Nodes[i].Type = WorkflowNodeTypeWait
+			} else if strings.TrimSpace(cfg.Nodes[i].Approval.Message) != "" || strings.TrimSpace(cfg.Nodes[i].Approval.Timeout) != "" {
+				cfg.Nodes[i].Type = WorkflowNodeTypeApproval
 			}
 		}
 		if cfg.Nodes[i].Type == WorkflowNodeTypeHTTP {

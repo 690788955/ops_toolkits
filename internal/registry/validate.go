@@ -312,6 +312,16 @@ func (r *Registry) validateWorkflowNode(node config.WorkflowNode, nodeType strin
 		if _, err := config.ValidateNotifyConfig(node.ID, node.Notify); err != nil {
 			return err
 		}
+	case config.WorkflowNodeTypeApproval:
+		if node.Tool != "" || hasLoopConfig(node.Loop) || hasUploadConfig(node.Upload) || hasExtractConfig(node.Extract) {
+			return fmt.Errorf("审批节点 %s 不能同时配置 tool、loop、upload 或 extract_config", node.ID)
+		}
+		if node.Condition.Input != "" || len(node.Condition.Cases) > 0 || node.Condition.DefaultCase != "" {
+			return fmt.Errorf("审批节点 %s 不能配置 condition", node.ID)
+		}
+		if _, err := config.ValidateApprovalConfig(node.ID, node.Approval); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("节点 %s 使用未知类型: %s", node.ID, nodeType)
 	}
@@ -602,7 +612,14 @@ func effectiveNodeType(node config.WorkflowNode) string {
 	if hasNotifyConfig(node.Notify) {
 		return config.WorkflowNodeTypeNotify
 	}
+	if hasApprovalConfig(node.Approval) {
+		return config.WorkflowNodeTypeApproval
+	}
 	return ""
+}
+
+func hasApprovalConfig(item config.WorkflowApproval) bool {
+	return strings.TrimSpace(item.Message) != "" || strings.TrimSpace(item.Timeout) != ""
 }
 
 func hasScriptConfig(item config.WorkflowScript) bool {

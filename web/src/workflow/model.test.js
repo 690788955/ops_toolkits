@@ -6,6 +6,7 @@ import {
   autoLayoutWorkflowNodes,
   buildWorkflowDraft,
   controlNodeTypeFromWorkflow,
+  defaultApprovalConfig,
   defaultCondition,
   defaultExtractConfig,
   defaultNotifyConfig,
@@ -17,6 +18,7 @@ import {
   newStageDraftErrors,
   orderedStageNodes,
   moveWorkflowStageTo,
+  normalizeApprovalConfig,
   normalizeExtractConfig,
   normalizeHttpRequestConfig,
   normalizeLoopConfig,
@@ -28,6 +30,7 @@ import {
   relocateNodeStage,
   renumberStageForSerial,
   serializeArchiveConfig,
+  serializeApprovalConfig,
   serializeNotifyConfig,
   serializeScriptConfig,
   serializeWaitConfig,
@@ -1222,5 +1225,41 @@ describe('通知节点配置', () => {
     const node = {id: 'alert', type: 'controlNode', data: {controlType: 'notify', notify: defaultNotifyConfig()}}
     const errors = validateControlDraft([node], [], [])
     expect(errors.some(error => error.includes('Webhook 地址'))).toBe(true)
+  })
+})
+
+describe('人工审批节点配置', () => {
+  it('默认配置两个字段都为空，空配置不写出任何字段', () => {
+    expect(defaultApprovalConfig()).toEqual({message: '', timeout: ''})
+    expect(serializeApprovalConfig(defaultApprovalConfig())).toEqual({})
+    expect(serializeApprovalConfig(null)).toEqual({})
+  })
+
+  it('归一化去掉首尾空白，序列化只写有值的字段', () => {
+    expect(normalizeApprovalConfig({message: '  确认配置已改好后继续  ', timeout: ' 30m '})).toEqual({message: '确认配置已改好后继续', timeout: '30m'})
+    expect(serializeApprovalConfig({message: '确认配置已改好后继续', timeout: ''})).toEqual({message: '确认配置已改好后继续'})
+    expect(serializeApprovalConfig({timeout: '2h'})).toEqual({timeout: '2h'})
+  })
+
+  it('审批节点序列化为 approval 类型，且不会被控制节点校验拦下', () => {
+    const nodes = [
+      {id: 'gate', type: 'controlNode', data: {controlType: 'approval', name: '人工确认', approval: {message: '确认配置已改好后继续', timeout: '30m'}}},
+    ]
+    const draft = buildWorkflowDraft({id: 'demo.approval'}, nodes, [], 'global', [])
+    expect(draft.nodes[0].type).toBe('approval')
+    expect(draft.nodes[0].approval).toEqual({message: '确认配置已改好后继续', timeout: '30m'})
+    expect(validateControlDraft(nodes, [])).toEqual([])
+    // 类型字符串原名直通，不需要额外的映射。
+    expect(workflowControlNodeType('approval')).toBe('approval')
+    expect(controlNodeTypeFromWorkflow('approval')).toBe('approval')
+  })
+
+  it('超时不是合法时长时给出明确中文错误，留空表示一直等待', () => {
+    const bad = {id: 'gate', type: 'controlNode', data: {controlType: 'approval', approval: {timeout: '半小时'}}}
+    expect(validateControlDraft([bad], []).join('\n')).toContain('人工审批节点 gate 的等待超时格式无效')
+    const blank = {id: 'gate', type: 'controlNode', data: {controlType: 'approval', approval: {timeout: '  '}}}
+    expect(validateControlDraft([blank], [])).toEqual([])
+    const ok = {id: 'gate', type: 'controlNode', data: {controlType: 'approval', approval: {timeout: '1h30m'}}}
+    expect(validateControlDraft([ok], [])).toEqual([])
   })
 })

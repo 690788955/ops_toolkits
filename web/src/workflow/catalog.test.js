@@ -22,7 +22,7 @@ describe('节点分类目录', () => {
   it('按分类分组时保持声明顺序且不产生空分组', () => {
     const groups = groupControlsByCategory(controlNodeCatalog)
     expect(groups.map(group => group.category.id)).toEqual(['flow', 'data', 'builtin'])
-    expect(groups[0].controls.map(control => control.type)).toEqual(['condition', 'loop', 'wait'])
+    expect(groups[0].controls.map(control => control.type)).toEqual(['condition', 'loop', 'wait', 'approval'])
     expect(groups[1].controls.map(control => control.type)).toEqual(['upload', 'extract_config', 'file_checksum', 'archive'])
     expect(groups.every(group => group.controls.length > 0)).toBe(true)
   })
@@ -56,6 +56,20 @@ describe('节点分类目录', () => {
       expect(control.shape).toBeTruthy()
       expect(control.symbol).toBeTruthy()
     }
+  })
+
+  it('人工审批节点在流程控制分类里可直接添加，并能被中英文别名搜到', () => {
+    const approval = controlNodeCatalog.find(control => control.type === 'approval')
+    expect(approval).toBeTruthy()
+    expect(approval.category).toBe('flow')
+    expect(isControlReady(approval)).toBe(true)
+    expect(approval.shape).toBe('gateway')
+    expect(approval.symbol).toBe('✓')
+    expect(controlNodeMatchesKeyword(approval, '审批')).toBe(true)
+    expect(controlNodeMatchesKeyword(approval, 'confirm')).toBe(true)
+    expect(controlNodeMatchesKeyword(approval, 'gate')).toBe(true)
+    expect(controlNodeCatalog.filter(control => controlNodeMatchesKeyword(control, '人工')).map(control => control.type))
+      .toEqual(expect.arrayContaining(['approval']))
   })
 
   it('未知类型回落到未分类而不是抛错', () => {

@@ -36,8 +36,9 @@ func builtinShellTool(nodeID, label, script, workdir, timeout, runDir, hostID st
 			return nil, err
 		}
 	}
-	if hostID == "" && isWSLBash() {
-		workdir = windowsPathToWSLOrSlash(workdir)
+	if hostID == "" {
+		// 本机执行时按实际 bash 换路径写法：Git Bash 认 E:/x，WSL 认 /mnt/e/x，写死一种都会踩空。
+		workdir = bashPathFor(workdir)
 	}
 	if workdir != "" {
 		script = "cd -- " + shellQuote(workdir) + " || exit $?\n" + script
@@ -100,8 +101,8 @@ func (r *Runner) executeChecksumNode(ctx context.Context, node config.WorkflowNo
 	}
 	path, algorithm := item.Path, item.Algorithm
 	executionPath := path
-	if hostID == "" && isWSLBash() {
-		executionPath = windowsPathToWSLOrSlash(path)
+	if hostID == "" {
+		executionPath = bashPathFor(path)
 	}
 	command := "sha256sum"
 	helperName := "shasum"

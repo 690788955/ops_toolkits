@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"shell_ops/internal/registry"
+	"shell_ops/internal/runner"
 )
 
 type Check struct {
@@ -44,7 +45,7 @@ func Run(reg *registry.Registry) Report {
 		checkDirWritable("运行目录", filepath.Join(reg.BaseDir, filepath.FromSlash(reg.Root.Paths.Runs))),
 		checkDirWritable("日志目录", filepath.Join(reg.BaseDir, filepath.FromSlash(reg.Root.Paths.Logs))),
 		checkPlugins(reg),
-		checkExecutable("bash"),
+		checkBash(),
 		checkExecutable("powershell"),
 		checkListenAddress(reg.Root.ListenAddr()),
 	)
@@ -118,6 +119,20 @@ func checkExecutable(name string) Check {
 		return Check{Name: name, Status: "warning", Message: "未找到，可忽略不需要该运行时的插件"}
 	}
 	return Check{Name: name, Status: "ok", Message: path}
+}
+
+// checkBash 直接用运行器的探测结果：Git for Windows 默认只把 cmd 目录放进 PATH，
+// 用 exec.LookPath 会误报“没有 bash”，而插件工具的 .sh 实际是可以跑的。
+func checkBash() Check {
+	path, wsl, err := runner.DetectBash()
+	if err != nil {
+		return Check{Name: "bash", Status: "warning", Message: err.Error()}
+	}
+	message := path
+	if wsl {
+		message += "（WSL）"
+	}
+	return Check{Name: "bash", Status: "ok", Message: message}
 }
 
 func checkListenAddress(addr string) Check {

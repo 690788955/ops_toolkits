@@ -10,10 +10,12 @@ import {defaultCondition} from './model.js'
 import WorkflowEditor, {
   RecoveryPanel,
   RerunParamsModal,
+  buildCanvasRunStateFromDetail,
   buildRunningCanvasRunState,
   buildRerunCanvasRunState,
   describeRunMachines,
   legacyLoopTargetMap,
+  pendingRunApproval,
   pruneWorkflowRecovery,
   remapLegacyLoopEdges,
   shouldClearCanvasRunOverlayForNodeChanges,
@@ -140,6 +142,67 @@ describe('workflow node run status', () => {
     expect(markup).toContain('按结果分支')
     expect(markup).toContain('正常')
     expect(markup).toContain('default')
+  })
+
+  it('人工审批节点显示审批摘要，真正在等待时标签是「等待审批」', () => {
+    const markup = renderToStaticMarkup(React.createElement(ReactFlow, {
+      nodes: [
+        {
+          id: 'gate',
+          type: 'controlNode',
+          position: {x: 0, y: 0},
+          data: {
+            name: '人工确认',
+            controlType: 'approval',
+            approval: {message: '确认配置已改好后继续', timeout: '30m'},
+            run: {status: 'waiting', type: 'approval'}
+          }
+        },
+        {
+          id: 'empty-gate',
+          type: 'controlNode',
+          position: {x: 0, y: 180},
+          data: {name: '未填提示', controlType: 'approval', run: {status: 'waiting'}}
+        }
+      ],
+      edges: [],
+      nodeTypes,
+      fitView: true
+    }))
+
+    expect(markup).toContain('确认配置已改好后继续')
+    expect(markup).toContain('超时 30m')
+    expect(markup).toContain('未填写审批提示')
+    expect(markup).toContain('等待审批')
+    // 只有审批步骤真的进入 waiting 才换成审批文案，其它节点仍是普通的「等待中」。
+    expect(markup).toContain('等待中')
+  })
+
+  it('等待审批的 step 不会被降级成未运行', () => {
+    const nodes = [{id: 'gate', type: 'controlNode', data: {controlType: 'approval'}}]
+    const detail = {
+      record: {id: 'run-1', status: 'running', steps: [{id: 'gate', type: 'approval', status: 'waiting'}]},
+      logs: {items: []}
+    }
+    const state = buildCanvasRunStateFromDetail(detail, nodes)
+    expect(state.status).toBe('running')
+    // waiting 必须原样保留：降级成 idle 会让审批节点在画布上没有任何状态提示。
+    expect(state.nodes.gate).toMatchObject({status: 'waiting', type: 'approval', label: '等待中'})
+  })
+
+  it('只把最后一条仍在等待的审批当作待处理项', () => {
+    expect(pendingRunApproval(null)).toBeNull()
+    expect(pendingRunApproval({approvals: []})).toBeNull()
+    expect(pendingRunApproval({approvals: [{node_id: 'a', status: 'approved'}, {node_id: 'b', status: 'rejected'}]})).toBeNull()
+    const record = {
+      approvals: [
+        {node_id: 'a', status: 'approved'},
+        {node_id: 'b', status: 'waiting', message: '旧审批'},
+        {node_id: 'c', status: 'waiting', message: '新审批'},
+        {node_id: '', status: 'waiting'}
+      ]
+    }
+    expect(pendingRunApproval(record)).toMatchObject({node_id: 'c', message: '新审批'})
   })
 
   it('keeps run overlay for canvas view and selection updates', () => {

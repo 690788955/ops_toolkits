@@ -278,6 +278,30 @@ export function serializeWaitConfig(wait) {
   return out;
 }
 
+// 人工审批节点只需要「停机原因」和「最长等多久」两件事：确认/驳回的入口在运行日志面板，
+// 不在节点配置里，所以这里不放任何动作开关。
+export function defaultApprovalConfig() {
+  return { message: "", timeout: "" };
+}
+
+export function normalizeApprovalConfig(approval) {
+  const source = approval && typeof approval === "object" ? approval : {};
+  return {
+    message: String(source.message || "").trim(),
+    timeout: String(source.timeout || "").trim(),
+  };
+}
+
+// 两个字段都可空：空 timeout 交给后端按「一直等待」处理，序列化时直接省略，
+// 避免把空字符串当成 0 时长写进 YAML。
+export function serializeApprovalConfig(approval) {
+  const normalized = normalizeApprovalConfig(approval);
+  const out = {};
+  if (normalized.message) out.message = normalized.message;
+  if (normalized.timeout) out.timeout = normalized.timeout;
+  return out;
+}
+
 export const notifyChannels = [
   { value: "webhook", label: "通用 Webhook" },
   { value: "wecom", label: "企业微信群机器人" },
@@ -1121,6 +1145,10 @@ export function buildWorkflowDraft(
         draftNode.notify = serializeNotifyConfig(
           node.data.notify || defaultNotifyConfig(),
         );
+      if (node.data.controlType === "approval")
+        draftNode.approval = serializeApprovalConfig(
+          node.data.approval || defaultApprovalConfig(),
+        );
       return draftNode;
     }
     const draftNode = {
@@ -1584,6 +1612,14 @@ export function validateControlDraft(nodes, edges, tools = []) {
           else if (!target.includes("{{") && !/^https?:\/\//i.test(target))
             errors.push(`通知节点 ${node.id} 的 Webhook 地址只支持 http:// 或 https://。`);
         }
+      }
+      if (node.data.controlType === "approval") {
+        const approval = normalizeApprovalConfig(node.data.approval || {});
+        // 空超时是有意义的（一直等待），只有填了却不是合法时长才拦下来。
+        if (approval.timeout && !isDurationText(approval.timeout))
+          errors.push(
+            `人工审批节点 ${node.id} 的等待超时格式无效，例如 30m、2h；留空表示一直等待。`,
+          );
       }
       if (node.data.controlType === "upload") {
         const targetDir = normalizeUploadTargetDir(

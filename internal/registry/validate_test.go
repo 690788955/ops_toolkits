@@ -232,6 +232,45 @@ func TestValidateWorkflowAcceptsDirectoryExtractConfigNode(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowAcceptsApprovalNode(t *testing.T) {
+	reg := &Registry{Tools: map[string]*Tool{}}
+	wf := &config.WorkflowConfig{
+		ID: "demo.approval",
+		Nodes: []config.WorkflowNode{
+			{ID: "gate", Type: config.WorkflowNodeTypeApproval, Approval: config.WorkflowApproval{Message: "改好配置后继续", Timeout: "30m"}},
+		},
+	}
+	if err := reg.ValidateWorkflow(wf); err != nil {
+		t.Fatalf("ValidateWorkflow error = %v", err)
+	}
+	// 省略 type 时按 approval 段自动识别，旧手写 YAML 不必补类型。
+	wf.Nodes[0].Type = ""
+	if effectiveNodeType(wf.Nodes[0]) != config.WorkflowNodeTypeApproval {
+		t.Fatalf("effectiveNodeType = %q, want approval", effectiveNodeType(wf.Nodes[0]))
+	}
+}
+
+func TestValidateWorkflowRejectsInvalidApprovalNode(t *testing.T) {
+	reg := &Registry{Tools: map[string]*Tool{"demo.tool": {}}}
+	cases := []struct {
+		name string
+		node config.WorkflowNode
+		want string
+	}{
+		{name: "tool forbidden", node: config.WorkflowNode{ID: "gate", Type: config.WorkflowNodeTypeApproval, Tool: "demo.tool"}, want: "不能同时配置 tool"},
+		{name: "condition forbidden", node: config.WorkflowNode{ID: "gate", Type: config.WorkflowNodeTypeApproval, Condition: config.WorkflowCondition{Input: "x"}}, want: "不能配置 condition"},
+		{name: "bad timeout", node: config.WorkflowNode{ID: "gate", Type: config.WorkflowNodeTypeApproval, Approval: config.WorkflowApproval{Timeout: "soon"}}, want: "approval.timeout"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := reg.ValidateWorkflow(&config.WorkflowConfig{ID: "demo.approval", Nodes: []config.WorkflowNode{tc.node}})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidateWorkflow error = %v, want %s", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateWorkflowRejectsInvalidUploadNode(t *testing.T) {
 	reg := &Registry{Tools: map[string]*Tool{"demo.tool": {}}}
 	cases := []struct {

@@ -4,28 +4,91 @@ import { createRoot } from 'react-dom/client'
 import '@xyflow/react/dist/style.css'
 import './styles.css'
 import * as yaml from 'js-yaml'
-import {bindWorkflowConfigPath, bootstrapAuthTokenFromURL, deleteConfigVersion, deleteJSON, downloadUserWorkflowExport, fetchConfigVersion, fetchConfigVersions, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusShareTargets, fetchRunDetail, fetchRunSummary, postJSON, postMarketInstall, postPluginZip, putJSON, rescanPlugins, saveConfigVersion, setDefaultConfigVersion, uploadWorkflowConfigFile} from './api.js'
+import {approveRunNode, bindWorkflowConfigPath, bootstrapAuthTokenFromURL, deleteConfigVersion, deleteJSON, downloadUserWorkflowExport, fetchConfigVersion, fetchConfigVersions, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusShareTargets, fetchRunDetail, fetchRunSummary, postJSON, postMarketInstall, postPluginZip, putJSON, rejectRunNode, rescanPlugins, saveConfigVersion, setDefaultConfigVersion, uploadWorkflowConfigFile} from './api.js'
 import {buildTextDiff, countTextMatches, replaceTextDraft} from './configDiff.js'
 import {buildConfigItemCollections} from './configItems.js'
 import {filterEntries, readableAPIError, summarizeAPIResponse, tagsForEntries} from './utils.js'
 import FileUploadInput from './FileUploadInput.jsx'
+import ResizeHandle, {useResizableWidth} from './ResizeHandle.jsx'
 import {normalizeLogFontSize} from './logUtils.js'
 import SshHostsModal, {sshHostStatusLabel, summarizeSshHosts} from './SshHostsModal.jsx'
 import PluginShareModal from './PluginShareModal.jsx'
 import {MarketSourcesModal} from './MarketSourcesPanel.jsx'
 import {useModalEscape} from './useModalEscape.js'
 import {isDraftWindowLocation} from './workflow/draftWindow.js'
+// 审批等待判定放在独立模块里：这里不能直接 import 编辑器，否则懒加载的画布会被打进首屏。
+import {formatApprovalWait, isRunAwaiting, runAwaitingApproval} from './runApproval.js'
 
 const WorkflowEditor = React.lazy(() => import('./workflow/WorkflowEditor.jsx'))
 const LiveRunTerminal = React.lazy(() => import('./LiveRunTerminal.jsx'))
 const RunRecordCanvas = React.lazy(() => import('./workflow/RunRecordCanvas.jsx'))
+const RunLogView = React.lazy(() => import('./workflow/run/RunLogView.jsx'))
 const DraftWindowShell = React.lazy(() => import('./workflow/DraftWindowShell.jsx'))
 
 const APP_TABS = new Set(['tools', 'workflows', 'config', 'runs'])
 
 function activeTabFromHash() {
-  const tab = String(window.location.hash || '').replace(/^#/, '')
+  const tab = String(window.location.hash || '').replace(/^#/, '').split('?')[0]
   return APP_TABS.has(tab) ? tab : 'tools'
+}
+
+// 工作流深链的查询参数只认 run：其余 hash 片段（例如 #runs）不带语义，直接忽略。
+export function runIDFromHash(hash) {
+  const value = String(hash || '').replace(/^#/, '')
+  const queryIndex = value.indexOf('?')
+  if (queryIndex < 0) return ''
+  const params = new URLSearchParams(value.slice(queryIndex + 1))
+  return params.get('run') || ''
+}
+
+// 待审批横幅只在「当前页面处理不了这条审批」时提示：
+// 运行记录页自己就有审批卡片；工作流页正在看的就是那条待审批运行时，画布上方也有审批条。
+export function shouldShowAwaitingBanner({activeTab = '', total = 0, items = [], linkedRunID = ''}) {
+  if (Number(total) <= 0) return false
+  if (activeTab === 'runs') return false
+  if (activeTab === 'workflows' && linkedRunID) {
+    return !(items || []).some(item => item?.id === linkedRunID)
+  }
+  return true
+}
+
+// 「待审批」横幅：任何 tab 下都要能一眼看到，所以抽成纯组件放在 App 外面，方便单测。
+// 文案只展示第一条的摘要：用户此刻真正要的是一个入口，不是把审批列表铺满屏幕。
+export function AwaitingApprovalBanner({items = [], total = 0, onGo}) {
+  const count = Number(total) || 0
+  if (count <= 0) return null
+  const first = Array.isArray(items) ? items[0] : null
+  const approval = runAwaitingApproval(first)
+  const message = truncateBannerText(approval?.message || '', 60)
+  const title = first ? `${first.target || first.id}${approval?.message ? ` · ${approval.message}` : ''}` : ''
+  return (
+    <section className="runAwaitingBanner" role="status" aria-live="polite" aria-label="待审批运行">
+      <div className="runAwaitingBannerText">
+        <strong>{count} 个运行等待人工确认</strong>
+        {first && (
+          <span className="runAwaitingBannerItem" title={title}>
+            {runKindText(first.kind)} · {first.target || first.id}
+            {message ? ` · ${message}` : ''}
+          </span>
+        )}
+        {count > 1 && <span className="runAwaitingBannerMore">还有 {count - 1} 个等待确认的运行，点「去确认」逐条处理。</span>}
+      </div>
+      <button type="button" className="primary runAwaitingBannerButton" onClick={() => onGo?.(first)}>去确认</button>
+    </section>
+  )
+}
+
+// 消息可能很长，直接铺开会撑破横幅；完整内容留在 title 上。
+function truncateBannerText(value, limit) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  return text.length <= limit ? text : `${text.slice(0, limit)}…`
+}
+
+// 运行类型统一叫法，横幅和运行记录列表共用。
+function runKindText(kind) {
+  if (kind === 'workflow') return '工作流'
+  if (kind === 'tool') return '工具'
+  return '运行'
 }
 
 function App() {
@@ -51,6 +114,14 @@ function App() {
   const [runLocal, setRunLocal] = useState(true)
   const [resultExpanded, setResultExpanded] = useState(false)
   const [cancellingToolRun, setCancellingToolRun] = useState(false)
+  // 待审批运行提到 App 级：用户可能停在工作流管理/全局工具/配置页，只有 App 能覆盖全部 tab。
+  const [awaitingRuns, setAwaitingRuns] = useState({total: 0, items: []})
+  const [focusRun, setFocusRun] = useState(null)
+  // 深链 #workflows?run=<runID>：工作流工作台可以直接打开某条运行记录，便于分享和刷新后回到同一条。
+  const [linkedRunID, setLinkedRunID] = useState(() => runIDFromHash(window.location.hash))
+  const awaitingTotal = Number(awaitingRuns.total) || 0
+  const awaitingRequestRef = useRef(0)
+  const focusRunTokenRef = useRef(0)
   const runVersionRef = useRef(0)
 
   async function refreshCatalog(options = {}) {
@@ -112,19 +183,89 @@ function App() {
     }
   }, [])
 
+  // 待审批计数：limit=5 只是为了横幅能展示第一条摘要，总数以接口的 total 为准。
+  // 失败时保留上一次结果——横幅偶发空白比“计数闪成 0 又跳回来”更糟。
+  async function refreshAwaitingRuns() {
+    if (typeof document !== 'undefined' && document.hidden) return
+    const requestID = ++awaitingRequestRef.current
+    try {
+      const body = await fetchJSON('/api/runs/?awaiting=1&limit=5')
+      if (requestID !== awaitingRequestRef.current) return
+      const items = Array.isArray(body.data?.runs) ? body.data.runs : []
+      const total = Number(body.data?.total ?? items.length)
+      setAwaitingRuns({total: Number.isFinite(total) ? total : items.length, items})
+    } catch {
+      // 静默失败：横幅只是提示，下一个轮询周期会重试。
+    }
+  }
+
+  // 10 秒一轮：比运行记录页的 2 秒轮询慢得多，两套轮询不会叠加成请求风暴；
+  // 切页、窗口重新聚焦、标签页重新可见时立即补一次，保证“切回来就能看到”。
+  useEffect(() => {
+    refreshAwaitingRuns()
+    function refreshWhenVisible() {
+      if (document.hidden) return
+      refreshAwaitingRuns()
+    }
+    window.addEventListener('focus', refreshWhenVisible)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    const timer = window.setInterval(() => {
+      // 运行记录页自己每 2 秒刷列表并把计数回调上来，这里跳过这一轮避免重复请求。
+      if (activeTab === 'runs') return
+      refreshAwaitingRuns()
+    }, 10000)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refreshWhenVisible)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [activeTab])
+
+  // 标题前缀是给「页面不在前台」时用的：标签页栏上就能看到还有几条没确认。
+  useEffect(() => {
+    if (awaitingTotal <= 0) return undefined
+    const baseTitle = document.title
+    document.title = `(${awaitingTotal}) 待审批 · ${baseTitle}`
+    return () => {
+      document.title = baseTitle
+    }
+  }, [awaitingTotal])
+
+  // token 递增是为了让“同一条运行再次点去确认”也能触发运行记录页重新定位。
+  function goToAwaitingRun(run) {
+    const runID = typeof run === 'string' ? run : run?.id || ''
+    focusRunTokenRef.current += 1
+    setFocusRun({runID, token: focusRunTokenRef.current})
+    setActiveTab('runs')
+  }
+
+  // 用户手动切页 = “重新开始”：清掉横幅带过来的一次性定位。
+  // 否则运行记录页卸载再挂载时，会照着旧 token 把待审批筛选和选中项又抢回去。
+  function changeTab(tab) {
+    setFocusRun(null)
+    if (tab !== 'workflows') setLinkedRunID('')
+    setActiveTab(tab)
+    setSelected(null)
+    setActiveTag('')
+    resetResult()
+  }
+
   useEffect(() => {
     if (activeTab === 'workflows') setWorkflowEditorMounted(true)
   }, [activeTab])
 
   useEffect(() => {
-    const target = `#${activeTab}`
+    const target = activeTab === 'workflows' && linkedRunID
+      ? `#workflows?run=${encodeURIComponent(linkedRunID)}`
+      : `#${activeTab}`
     if (window.location.hash === target) return
     window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${target}`)
-  }, [activeTab])
+  }, [activeTab, linkedRunID])
 
   useEffect(() => {
     function syncTabFromHash() {
       setActiveTab(activeTabFromHash())
+      setLinkedRunID(runIDFromHash(window.location.hash))
     }
     window.addEventListener('hashchange', syncTabFromHash)
     return () => window.removeEventListener('hashchange', syncTabFromHash)
@@ -390,11 +531,15 @@ function App() {
           </div>
         </header>
 
+        {shouldShowAwaitingBanner({activeTab, total: awaitingTotal, items: awaitingRuns.items, linkedRunID}) && (
+          <AwaitingApprovalBanner items={awaitingRuns.items} total={awaitingTotal} onGo={goToAwaitingRun} />
+        )}
+
         <div className="tabs">
-          <button className={activeTab === 'tools' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('tools'); setSelected(null); setActiveTag(''); resetResult() }}>工具 <span className="tabCount">{toolEntries.length}</span></button>
-          <button className={activeTab === 'workflows' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('workflows'); setSelected(null); setActiveTag(''); resetResult() }}>工作流管理 <span className="tabCount">{visibleWorkflowCount}</span></button>
-          {hasConfigTab && <button className={activeTab === 'config' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('config'); setSelected(null); setActiveTag(''); setConfigSelectedPlugin(null); setConfigSelectedWorkflow(null); resetResult() }}>配置 <span className="tabCount">{configCount}</span></button>}
-          <button className={activeTab === 'runs' ? 'tab active' : 'tab'} onClick={() => { setActiveTab('runs'); setSelected(null); setActiveTag(''); resetResult() }}>运行记录</button>
+          <button className={activeTab === 'tools' ? 'tab active' : 'tab'} onClick={() => changeTab('tools')}>工具 <span className="tabCount">{toolEntries.length}</span></button>
+          <button className={activeTab === 'workflows' ? 'tab active' : 'tab'} onClick={() => changeTab('workflows')}>工作流管理 <span className="tabCount">{visibleWorkflowCount}</span></button>
+          {hasConfigTab && <button className={activeTab === 'config' ? 'tab active' : 'tab'} onClick={() => { setConfigSelectedPlugin(null); setConfigSelectedWorkflow(null); changeTab('config') }}>配置 <span className="tabCount">{configCount}</span></button>}
+          <button className={activeTab === 'runs' ? 'tab active' : 'tab'} onClick={() => changeTab('runs')}>运行记录{awaitingTotal > 0 && <span className="tabCount tabCountAwaiting">{awaitingTotal}</span>}</button>
         </div>
 
         {activeTab === 'tools' && !selected && (
@@ -411,6 +556,9 @@ function App() {
                 setResult={setResult}
                 refreshCatalog={refreshCatalog}
                 openPluginManager={() => setPluginModalOpen(true)}
+                onOpenRunsTab={() => changeTab('runs')}
+                openRunID={linkedRunID}
+                onOpenRun={runID => setLinkedRunID(runID || '')}
                 resultPanel={(
                   <section className="card resultCard workflowResultCard">
                     {resultPanelHeader}
@@ -423,7 +571,7 @@ function App() {
         )}
 
         {activeTab === 'runs' ? (
-          <RunHistoryPanel catalog={catalog} />
+          <RunHistoryPanel catalog={catalog} focusRun={focusRun} onAwaitingChanged={refreshAwaitingRuns} />
         ) : (activeTab === 'config' && hasConfigTab) ? (
           <ConfigPanel
             catalog={catalog}
@@ -526,7 +674,7 @@ function GettingStartedCard({toolCount}) {
   )
 }
 
-export function RunHistoryPanel({catalog}) {
+export function RunHistoryPanel({catalog, focusRun = null, onAwaitingChanged}) {
   const [runs, setRuns] = useState([])
   const [totalRuns, setTotalRuns] = useState(0)
   const [page, setPage] = useState(1)
@@ -547,9 +695,31 @@ export function RunHistoryPanel({catalog}) {
   const [cleanupDryRun, setCleanupDryRun] = useState(true)
   const [cleanupBusy, setCleanupBusy] = useState(false)
   const [cleanupResult, setCleanupResult] = useState(null)
+  // 待审批要单独一档筛选：这类运行的状态仍是 running，用状态筛子根本筛不出来。
+  const [awaitingOnly, setAwaitingOnly] = useState(false)
+  const [awaitingCount, setAwaitingCount] = useState(0)
+  const [approvalNote, setApprovalNote] = useState('')
+  const [approvalAction, setApprovalAction] = useState('')
+  const [approvalClock, setApprovalClock] = useState(() => Date.now())
   const listRequestRef = useRef(0)
   const detailRequestRef = useRef(0)
+  const focusTokenRef = useRef(0)
+  // 运行记录列表和右侧日志详情谁宽谁窄，交给用户拖：排查时经常一边要列表、一边要长日志。
+  const layoutRef = useRef(null)
+  const listWidth = useResizableWidth({storageKey: 'ops.runRecords.listWidth', min: 300, max: 680})
   const totalPages = Math.max(1, Math.ceil(totalRuns / pageSize))
+
+  // 徽标上的数字必须反映全量而不是当前页，所以单独要一次 limit=0 的 total。
+  // 计数只是辅助信息，读取失败时保留上一次的值，不影响列表本身。
+  async function loadAwaitingCount() {
+    try {
+      const body = await fetchJSON('/api/runs/?awaiting=1&limit=0')
+      const total = Number(body.data?.total ?? (body.data?.runs || []).length)
+      setAwaitingCount(Number.isFinite(total) ? total : 0)
+    } catch {
+      // 静默失败：下一次轮询或手动刷新会重试。
+    }
+  }
 
   async function loadRuns({silent = false} = {}) {
     const requestID = ++listRequestRef.current
@@ -562,6 +732,7 @@ export function RunHistoryPanel({catalog}) {
       query.set('limit', String(pageSize))
       query.set('offset', String((page - 1) * pageSize))
       if (statusFilter) query.set('status', statusFilter)
+      if (awaitingOnly) query.set('awaiting', '1')
       if (searchText) query.set('q', searchText)
       const body = await fetchJSON(`/api/runs/?${query.toString()}`)
       if (requestID !== listRequestRef.current) return
@@ -572,6 +743,7 @@ export function RunHistoryPanel({catalog}) {
       if (!silent) {
         setMessage(total > 0 ? `已加载 ${items.length} 条，共 ${total} 条运行记录。` : '暂无匹配的运行记录。')
       }
+      await loadAwaitingCount()
     } catch (err) {
       if (requestID !== listRequestRef.current) return
       if (!silent) {
@@ -594,7 +766,7 @@ export function RunHistoryPanel({catalog}) {
 
   useEffect(() => {
     loadRuns()
-  }, [page, pageSize, statusFilter, searchText])
+  }, [page, pageSize, statusFilter, searchText, awaitingOnly])
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages)
@@ -631,6 +803,47 @@ export function RunHistoryPanel({catalog}) {
     await refreshSelectedRun(runID)
   }
 
+  // 待审批判定统一走 runApproval.js：列表项只有 awaiting_approval/approval 摘要，
+  // 详情才有完整 approvals 数组，两种形状在这里归一，JSX 里不散落 .some()。
+  const pendingApproval = useMemo(() => runAwaitingApproval(selectedDetail?.record), [selectedDetail])
+
+  // 详情接口只在运行中/待处理时返回 actionable；缺省按“可以处理”看待，
+  // 由后端在真正确认时兜底报 409，避免老版本后端把按钮全部禁用。
+  const approvalActionable = Boolean(pendingApproval) && selectedDetail?.actionable !== false
+
+  // 节点名优先用工作流配置里的 name，读不到工作流（或节点已删）就退回节点 ID。
+  const approvalNodeName = useMemo(() => {
+    if (!pendingApproval) return ''
+    const nodes = selectedWorkflow?.nodes || []
+    const match = nodes.find(node => node.id === pendingApproval.node_id)
+    return match?.name || pendingApproval.node_id
+  }, [pendingApproval, selectedWorkflow])
+
+  // 已等待时长要随轮询一起走：详情每 2 秒刷新一次，这里补一拍保证数字在涨。
+  useEffect(() => {
+    if (!pendingApproval) return undefined
+    setApprovalClock(Date.now())
+    const timer = window.setInterval(() => setApprovalClock(Date.now()), 10000)
+    return () => window.clearInterval(timer)
+  }, [pendingApproval])
+
+  // 运行记录页自己每 2 秒轮询列表，App 的 10 秒 tick 在这一页会跳过；
+// 计数一变就在这里回传，顶栏横幅无需等到切页才发现新的待审批。
+  useEffect(() => {
+    onAwaitingChanged?.()
+  }, [awaitingCount])
+
+  // 从横幅或别的页面点「去确认」过来：开关待审批筛选、回到第一页并选中那条运行，
+  // 详情里就会直接出现审批卡片。token 变化才重新定位，避免普通重渲染把筛选抢回去。
+  useEffect(() => {
+    if (!focusRun || !focusRun.token) return
+    if (focusTokenRef.current === focusRun.token) return
+    focusTokenRef.current = focusRun.token
+    setAwaitingOnly(true)
+    setPage(1)
+    if (focusRun.runID) selectRun(focusRun.runID)
+  }, [focusRun])
+
   useEffect(() => {
     let ignore = false
     async function loadWorkflowForDetail() {
@@ -639,23 +852,34 @@ export function RunHistoryPanel({catalog}) {
       setSelectedWorkflow(null)
       setWorkflowMessage('')
       if (!target) return
+      // 画布优先用运行记录里的快照：工作流改过之后，用当前配置渲染会显示成新拓扑 + 旧结论。
+      const snapshot = record?.snapshot?.workflow
+      if (snapshot?.nodes?.length > 0) {
+        setSelectedWorkflow({...snapshot, id: snapshot.id || target, name: snapshot.name || target})
+        setWorkflowMessage('')
+        return
+      }
       try {
         setWorkflowMessage('正在加载运行画布...')
         const body = await fetchJSON(`/api/workflows/${encodeURIComponent(target)}`)
         if (ignore) return
         const config = body.data?.Config || body.data?.config
         setSelectedWorkflow(config || null)
-        setWorkflowMessage(config ? '' : '未读取到工作流配置，无法展示画布。')
+        setWorkflowMessage(config ? '这条运行记录没有保存工作流快照，画布按当前工作流展示。' : '未读取到工作流配置，无法展示画布。')
       } catch (err) {
         if (!ignore) setWorkflowMessage(readableAPIError(err, '加载运行画布失败。'))
       }
     }
     loadWorkflowForDetail()
     return () => { ignore = true }
-  }, [selectedDetail?.record?.kind, selectedDetail?.record?.target])
+  }, [selectedDetail?.record?.kind, selectedDetail?.record?.target, selectedDetail?.record?.snapshot])
 
   useEffect(() => {
-    const hasRunningRun = runs.some(item => item.status === 'running') || selectedDetail?.record?.status === 'running'
+    // 待审批也算“还在跑”：批准之后必须让列表和详情自己更新，否则用户会以为没生效。
+    const hasRunningRun = runs.some(item => item.status === 'running' || isRunAwaiting(item)) ||
+      selectedDetail?.record?.status === 'running' ||
+      Boolean(pendingApproval) ||
+      awaitingCount > 0
     if (!hasRunningRun) return undefined
     const timer = window.setInterval(() => {
       loadRuns({silent: true})
@@ -664,10 +888,16 @@ export function RunHistoryPanel({catalog}) {
       }
     }, 2000)
     return () => window.clearInterval(timer)
-  }, [runs, selectedDetail?.record?.status, selectedRunID, page, pageSize, statusFilter, searchText])
+  }, [runs, selectedDetail?.record?.status, selectedRunID, page, pageSize, statusFilter, searchText, awaitingOnly, awaitingCount, pendingApproval])
 
   function changeStatusFilter(value) {
     setStatusFilter(value)
+    setPage(1)
+  }
+
+  // 切筛选一律回到第一页：否则从第 3 页切到只剩 1 条结果的筛选会看到空白。
+  function changeAwaitingOnly(value) {
+    setAwaitingOnly(Boolean(value))
     setPage(1)
   }
 
@@ -738,6 +968,37 @@ export function RunHistoryPanel({catalog}) {
     }
   }
 
+  // 审批提交：备注可空（空备注不写进请求体，后端按“没有备注”处理）。
+  // 驳回会让本次运行直接失败，所以坚持要一次二次确认。
+  async function submitRunApproval(nodeID, action) {
+    const runID = selectedRunID
+    if (!runID || !nodeID || approvalAction) return
+    const nodeLabel = approvalNodeName || nodeID
+    if (action === 'reject' && !window.confirm(`确认驳回节点「${nodeLabel}」的审批？驳回后本次运行会直接失败。`)) return
+    const note = approvalNote.trim()
+    const payload = note ? {note} : {}
+    setApprovalAction(action)
+    setMessage(action === 'approve' ? `正在确认节点 ${nodeLabel}...` : `正在驳回节点 ${nodeLabel}...`)
+    try {
+      const body = action === 'approve'
+        ? await approveRunNode(runID, nodeID, payload)
+        : await rejectRunNode(runID, nodeID, payload)
+      setApprovalNote('')
+      setMessage(action === 'approve'
+        ? `已确认继续：${nodeLabel}（${runID}），后续节点将继续执行。`
+        : `已驳回：${nodeLabel}（${runID}），本次运行按失败结束。`)
+      // 审批接口返回的就是运行详情，先落地一次让卡片立刻消失，再走一遍刷新与轮询对齐。
+      if (body?.data?.record) setSelectedDetail(body.data)
+      await refreshSelectedRun(runID, {silent: true})
+      await loadRuns({silent: true})
+      onAwaitingChanged?.()
+    } catch (err) {
+      setMessage(readableAPIError(err, action === 'approve' ? '确认审批失败。' : '驳回审批失败。'))
+    } finally {
+      setApprovalAction('')
+    }
+  }
+
   const statusOptions = [
     ['', '全部'],
     ['pending', '待处理'],
@@ -748,11 +1009,19 @@ export function RunHistoryPanel({catalog}) {
     ['succeeded', '成功']
   ]
 
+  const runHistoryStyle = listWidth.width ? {'--run-history-list-width': `${listWidth.width}px`} : undefined
+  const measureRunHistoryList = () => {
+    const layout = layoutRef.current
+    if (!layout) return 0
+    const card = layout.querySelector('.runHistoryListCard')
+    return card ? card.getBoundingClientRect().width : 0
+  }
+
   return (
-    <div className="runHistoryLayout">
+    <div className="runHistoryLayout" ref={layoutRef} style={runHistoryStyle}>
       <section className="card runHistoryListCard">
         <div className="cardHeader">
-          <h3>运行记录</h3>
+          <h3>运行记录{awaitingCount > 0 && <span className="runHistoryAwaitingCount">待审批 {awaitingCount}</span>}</h3>
           <div className="runHistoryHeaderActions">
             <button className="secondary" type="button" onClick={() => { setCleanupOpen(true); setCleanupResult(null); setCleanupDryRun(true) }}>清理</button>
             <button className="secondary" type="button" disabled={loading} onClick={() => loadRuns()}>{loading ? '刷新中...' : '刷新'}</button>
@@ -761,30 +1030,55 @@ export function RunHistoryPanel({catalog}) {
         <div className="runHistoryFilters">
           <input value={searchInput} placeholder="搜索运行 ID、目标、操作机或参数" onChange={event => setSearchInput(event.target.value)} />
           <div className="tagFilters runStatusFilters">
+            {(awaitingCount > 0 || awaitingOnly) && (
+              <button className={`tagChip runAwaitingChip${awaitingOnly ? ' active' : ''}`} onClick={() => changeAwaitingOnly(!awaitingOnly)}>待审批 {awaitingCount}</button>
+            )}
             {statusOptions.map(([value, label]) => (
               <button key={value || 'all'} className={statusFilter === value ? 'tagChip active' : 'tagChip'} onClick={() => changeStatusFilter(value)}>{label}</button>
             ))}
           </div>
         </div>
         <div className="runHistoryList">
-          {runs.map(item => (
-            <div key={item.id} className={selectedRunID === item.id ? 'runHistoryItem active' : 'runHistoryItem'}>
-              <button type="button" className="runHistorySelectButton" onClick={() => selectRun(item.id)}>
-              <div>
-                <strong>{item.target || item.id}</strong>
-                <span>{item.id}</span>
-              </div>
-              <small className={`runStatusText ${item.status || 'unknown'}`}>{runStatusText(item.status)}</small>
-              <em>{formatRunTime(item.started_at)}</em>
-              </button>
-              {item.status === 'running' && (
-                <button type="button" className="secondary danger runCancelButton" disabled={cancellingRunID === item.id} onClick={() => cancelRun(item.id)}>
-                  {cancellingRunID === item.id ? '取消中' : '取消'}
+          {runs.map(item => {
+            const awaiting = runAwaitingApproval(item)
+            const waitLabel = awaiting ? formatApprovalWait(awaiting.since) : ''
+            // 由 CLI 等其它进程启动的运行，Web 端提交审批一定失败，直接标注而不是给一个会报错的按钮。
+            const actionable = !awaiting || item.approval_actionable !== false
+            return (
+              <div key={item.id} className={`runHistoryItem${selectedRunID === item.id ? ' active' : ''}${awaiting ? ' awaiting' : ''}`}>
+                <button type="button" className="runHistorySelectButton" onClick={() => selectRun(item.id, awaiting ? 'logs' : '')}>
+                  <div className="runHistoryItemMain">
+                    <div className="runHistoryItemTitle">
+                      <span className="runHistoryKind">{runKindText(item.kind)}</span>
+                      <strong>{item.target || item.id}</strong>
+                    </div>
+                    <span className="runHistoryItemID">{item.id}</span>
+                    {awaiting && (
+                      <span className="runHistoryAwaitingMessage" title={awaiting.message || ''}>
+                        {awaiting.message || '审批节点没有填写提示，请确认前置改动已经生效。'}
+                      </span>
+                    )}
+                    {awaiting && waitLabel && <span className="runHistoryAwaitingMeta">已等待 {waitLabel}</span>}
+                  </div>
+                  <small className={`runStatusText ${item.status || 'unknown'}${awaiting ? ' awaiting' : ''}`}>{awaiting ? '运行中 · 待审批' : runStatusText(item.status)}</small>
+                  <em>{formatRunTime(item.started_at)}</em>
                 </button>
-              )}
-            </div>
-          ))}
-          {runs.length === 0 && <div className="empty">{searchText || statusFilter ? '没有匹配的运行记录。' : '暂无运行记录。'}</div>}
+                <div className="runHistoryItemActions">
+                  {awaiting && (actionable ? (
+                    <button type="button" className="primary runHistoryAwaitingButton" onClick={() => selectRun(item.id, 'logs')}>去确认</button>
+                  ) : (
+                    <span className="runHistoryAwaitingLocked" title="该运行由其他进程（例如 CLI）启动，审批要在启动它的终端处理；Web 端无法提交">由其他进程启动</span>
+                  ))}
+                  {item.status === 'running' && !awaiting && (
+                    <button type="button" className="secondary danger runCancelButton" disabled={cancellingRunID === item.id} onClick={() => cancelRun(item.id)}>
+                      {cancellingRunID === item.id ? '取消中' : '取消'}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+          {runs.length === 0 && <div className="empty">{awaitingOnly ? '现在没有等待确认的运行。有运行停在审批节点时会出现在这里。' : searchText || statusFilter ? '没有匹配的运行记录。' : '暂无运行记录。'}</div>}
         </div>
         {totalRuns > 0 && (
           <div className="paginationBar runHistoryPagination">
@@ -868,6 +1162,16 @@ export function RunHistoryPanel({catalog}) {
           </div>
         )}
       </section>
+      <ResizeHandle
+        label="调整运行记录列表宽度"
+        min={300}
+        max={680}
+        value={listWidth.width}
+        fallback={400}
+        measure={measureRunHistoryList}
+        onChange={listWidth.setWidth}
+        onReset={listWidth.reset}
+      />
       <section className="card runHistoryDetailCard">
         <div className="cardHeader">
           <h3>记录详情</h3>
@@ -886,6 +1190,39 @@ export function RunHistoryPanel({catalog}) {
             {selectedRunID && <a className="secondary" href={`/api/runs/${encodeURIComponent(selectedRunID)}/support.zip`}>导出支持包</a>}
           </div>
         </div>
+        {pendingApproval && (
+          <div className={`runApprovalCard${approvalActionable ? '' : ' locked'}`} role="alert" aria-label="待审批">
+            <div className="runApprovalCardText">
+              <strong>等待人工审批：{approvalNodeName || pendingApproval.node_id}</strong>
+              <span>{pendingApproval.message || '审批节点没有填写提示，请确认前置改动已经生效后再继续。'}</span>
+              {!approvalActionable && (
+                <span className="runApprovalCardLockedNote">
+                  该运行由其他进程（例如 CLI）启动，审批只能在启动它的终端处理；需要 Web 确认请从这里重新发起运行。
+                </span>
+              )}
+              <span className="runApprovalCardMeta">
+                节点 {pendingApproval.node_id}
+                {pendingApproval.since ? ` · 开始等待 ${formatRunTime(pendingApproval.since)}` : ''}
+                {formatApprovalWait(pendingApproval.since, approvalClock) ? ` · 已等待 ${formatApprovalWait(pendingApproval.since, approvalClock)}` : ''}
+              </span>
+            </div>
+            <div className="runApprovalCardActions">
+              <input
+                aria-label="审批备注"
+                value={approvalNote}
+                disabled={!approvalActionable || Boolean(approvalAction)}
+                placeholder={approvalActionable ? '可选备注，会写入运行记录' : '该运行无法在 Web 端提交审批'}
+                onChange={event => setApprovalNote(event.target.value)}
+              />
+              <button type="button" className="primary" disabled={!approvalActionable || Boolean(approvalAction)} onClick={() => submitRunApproval(pendingApproval.node_id, 'approve')}>
+                {approvalAction === 'approve' ? '确认中…' : '确认继续'}
+              </button>
+              <button type="button" className="secondary danger" disabled={!approvalActionable || Boolean(approvalAction)} onClick={() => submitRunApproval(pendingApproval.node_id, 'reject')}>
+                {approvalAction === 'reject' ? '驳回中…' : '驳回'}
+              </button>
+            </div>
+          </div>
+        )}
         {selectedDetail ? (
           detailView === 'canvas' && selectedDetail.record?.kind === 'workflow' ? (
             <React.Suspense fallback={<div className="empty small">正在加载运行画布...</div>}>
@@ -3861,6 +4198,15 @@ function RunDetail({detail, run}) {
   const runID = record.id || run?.id
   const status = record.status || run?.status
   const items = logs.items || []
+  // 终端仍然是运行记录页的默认视图（原始流、支持 SSE 实时追加）；
+  // 「列表」用的是右栏节点详情同一套 RunLogView：按节点分组、级别过滤、搜索、导出。
+  const [logView, setLogView] = useState('terminal')
+  const runningStepID = (record.steps || []).find(step => step.status === 'running')?.id || ''
+  const stepNames = useMemo(() => {
+    const names = {}
+    items.forEach(item => { if (item?.id) names[item.id] = item.title || item.id })
+    return names
+  }, [items])
   return (
     <div className="runDetail">
       <div className="runSummary">
@@ -3869,66 +4215,34 @@ function RunDetail({detail, run}) {
         {(record.host_name || record.host_id) && <span>操作机：{record.host_name || record.host_id}</span>}
         <span>运行 ID：{runID || '-'}</span>
         {runID && <a href={`/api/runs/${encodeURIComponent(runID)}/support.zip`}>导出支持包</a>}
+        {runID && status && (
+          <div className="segmentedControl" role="group" aria-label="日志视图">
+            <button type="button" className={logView === 'list' ? 'active' : ''} onClick={() => setLogView('list')}>列表</button>
+            <button type="button" className={logView === 'terminal' ? 'active' : ''} onClick={() => setLogView('terminal')}>终端</button>
+          </div>
+        )}
       </div>
       {runID ? (
-        <React.Suspense fallback={<div className="empty small">正在加载实时日志终端...</div>}>
-          <LiveRunTerminal runID={runID} running={status === 'running'} initialItems={items} />
-        </React.Suspense>
+        logView === 'list' && items.length > 0 ? (
+          <React.Suspense fallback={<div className="empty small">正在加载日志列表...</div>}>
+            <RunLogView items={items} nodeNames={stepNames} runningOwnerID={runningStepID} runID={runID} scopeToggle={false} />
+          </React.Suspense>
+        ) : (
+          <React.Suspense fallback={<div className="empty small">正在加载实时日志终端...</div>}>
+            <LiveRunTerminal runID={runID} running={status === 'running'} initialItems={items} />
+          </React.Suspense>
+        )
       ) : (
         <>
           <LogBlock title="标准输出" value={logs.stdout} />
           <LogBlock title="错误输出" value={logs.stderr} />
         </>
       )}
-      {items.length > 0 && (
-        <details className="runStepLogsDetails">
-          <summary>按节点查看日志（{items.length}）</summary>
-          <StepLogs items={items} />
-        </details>
-      )}
       <details>
         <summary>查看完整运行记录</summary>
         <pre>{JSON.stringify(detail, null, 2)}</pre>
       </details>
     </div>
-  )
-}
-
-function StepLogs({items}) {
-  return (
-    <section className="stepLogs">
-      <h4>节点日志</h4>
-      {(items || []).map(item => (
-        <StepLogItem key={item.id} item={item} />
-      ))}
-    </section>
-  )
-}
-
-function StepLogItem({item}) {
-  const hasStdout = Boolean(String(item.stdout || '').trim())
-  const hasStderr = Boolean(String(item.stderr || '').trim())
-  const children = item.children || []
-  const summary = [
-    item.status || '-',
-    item.type || '',
-    item.tool || '',
-    item.host_name ? `操作机 ${item.host_name}` : ''
-  ].filter(Boolean).join(' · ')
-  return (
-    <details className="stepLogItem">
-      <summary>
-        <strong>{item.title || item.id}</strong>
-        <span>{summary || item.id}</span>
-      </summary>
-      {hasStdout ? <LogBlock title="标准输出" value={item.stdout} /> : <div className="empty small">无标准输出。</div>}
-      {hasStderr ? <LogBlock title="错误输出" value={item.stderr} /> : null}
-      {children.length > 0 && (
-        <div className="stepLogChildren">
-          {children.map(child => <StepLogItem key={child.id} item={child} />)}
-        </div>
-      )}
-    </details>
   )
 }
 

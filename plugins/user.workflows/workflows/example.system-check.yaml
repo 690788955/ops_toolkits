@@ -3,7 +3,10 @@ name: 示例·系统资源检查
 description: 最简单的单节点示例：调用系统资源检查工具，输出系统版本、CPU、内存与磁盘信息
 version: 1.0.0
 category: example
-tags: [示例, 系统, 只读]
+tags:
+  - 示例
+  - 系统
+  - 只读
 parameters:
   - name: format
     type: string
@@ -13,11 +16,80 @@ parameters:
     options:
       - text
       - json
+    sensitive: false
+config_files: []
+stages:
+  - id: main
+    name: 原有流程
+    execution_mode: serial
+  - id: stage-2
+    name: 新阶段 2
+    execution_mode: serial
 nodes:
   - id: system_info
-    name: 检查系统资源
     type: tool
+    name: 检查系统资源
+    stage_id: main
+    order: 10
     tool: plugin.system-check.info
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    upload:
+      target_dir: ""
+      config_exports: []
+    extract_config:
+      file_name: ""
+      target_path: ""
+      label: ""
+      replace: false
+    depends_on: []
     params:
-      format: "{{ .format }}"
+      format: '{{ .format }}'
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
+  - id: approval_2
+    type: approval
+    name: approval_2
+    stage_id: stage-2
+    order: 10
+    tool: ""
+    condition:
+      input: ""
+      cases: []
+      default_case: ""
+    loop:
+      tool: ""
+      params: {}
+      max_iterations: 0
+      target: ""
+    upload:
+      target_dir: ""
+      config_exports: []
+    extract_config:
+      file_name: ""
+      target_path: ""
+      label: ""
+      replace: false
+    approval:
+      message: 请修改主机清单！！！！
+      timeout: 30m
+    depends_on: []
+    params: {}
+    optional: false
+    timeout: ""
+    confirm: false
+    on_failure: stop
 edges: []
+steps: []
+confirm:
+  required: false
+  message: ""

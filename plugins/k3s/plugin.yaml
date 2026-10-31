@@ -1,0 +1,572 @@
+id: k3s
+name: k3s 维护工具
+version: 1.0.0
+description: k3s 集群日常维护工具集，覆盖巡检、诊断、日志、服务控制、kubectl 与 etcd 快照，并集成 Helm 仓库、查询、安装升级、卸载和回滚
+author: ops-team
+
+contributes:
+  categories:
+    - id: k3s
+      name: k3s 运维
+      description: k3s 集群状态巡检、问题诊断与服务维护
+    - id: helm
+      name: Helm
+      description: Helm 仓库、发布查询、安装升级、卸载与回滚
+
+  tools:
+    - id: k3s.status
+      name: 集群巡检
+      category: k3s
+      description: 只读巡检 k3s 节点、Pod 与服务状态，输出集群健康摘要，可直接串入工作流做健康检查
+      tags: [k3s, inspect, readonly, health]
+      command: scripts/status.sh
+      args:
+        - "{{ .kubeconfig }}"
+      workdir: .
+      timeout: 2m
+      help:
+        usage: opsctl run tool k3s.status [--set kubeconfig=/etc/rancher/k3s/k3s.yaml]
+        examples:
+          - opsctl run tool k3s.status --no-prompt
+          - opsctl run tool k3s.status --set kubeconfig=/root/k3s.yaml --no-prompt
+      parameters:
+        - name: kubeconfig
+          type: string
+          description: 指定 kubeconfig 路径；留空时优先使用已有 KUBECONFIG，其次使用 /etc/rancher/k3s/k3s.yaml
+          required: false
+          default: ""
+      outputs:
+        - name: version
+          description: Kubernetes 版本（来自 k3s --version）
+          type: string
+          required: false
+          json_path: version
+        - name: nodes_total
+          description: 节点总数
+          type: number
+          required: true
+          json_path: nodes_total
+        - name: nodes_ready
+          description: Ready 节点数
+          type: number
+          required: true
+          json_path: nodes_ready
+        - name: pods_unhealthy
+          description: 非 Running/Completed 状态的 Pod 数量
+          type: number
+          required: true
+          json_path: pods_unhealthy
+        - name: cluster_ok
+          description: 集群是否健康（全部节点 Ready、无异常 Pod、k3s 服务 active）
+          type: bool
+          required: true
+          json_path: cluster_ok
+      confirm:
+        required: false
+
+    - id: k3s.diagnose
+      name: 诊断报告
+      category: k3s
+      description: 收集节点、Pod、事件、服务日志、资源与 etcd 快照信息，生成一份完整的诊断报告文件
+      tags: [k3s, diagnose, report, readonly]
+      command: scripts/diagnose.sh
+      args:
+        - "{{ .report_dir }}"
+        - "{{ .kubeconfig }}"
+      workdir: .
+      timeout: 5m
+      help:
+        usage: opsctl run tool k3s.diagnose [--set report_dir=/var/log/opsctl/k3s]
+        examples:
+          - opsctl run tool k3s.diagnose --no-prompt
+          - opsctl run tool k3s.diagnose --set report_dir=/root/k3s-reports --no-prompt
+      parameters:
+        - name: report_dir
+          type: string
+          description: 报告输出目录；留空时使用 /var/log/opsctl/k3s，不可写时回退到 TMPDIR 临时目录
+          required: false
+          default: ""
+        - name: kubeconfig
+          type: string
+          description: 指定 kubeconfig 路径；留空时自动探测
+          required: false
+          default: ""
+      outputs:
+        - name: report_path
+          description: 生成的诊断报告文件路径，可在后续节点用 {{ .steps.<id>.outputs.report_path }} 引用
+          type: string
+          required: true
+          json_path: report_path
+      confirm:
+        required: false
+
+    - id: k3s.logs
+      name: 服务日志
+      category: k3s
+      description: 通过 journalctl 查看 k3s 或 k3s-agent 服务日志，支持指定行数和时间范围
+      tags: [k3s, log, journalctl, readonly]
+      command: scripts/logs.sh
+      args:
+        - "{{ .service }}"
+        - "{{ .lines }}"
+        - "{{ .since }}"
+      workdir: .
+      timeout: 2m
+      help:
+        usage: opsctl run tool k3s.logs --set service=k3s --set lines=200 --set since=1h
+        examples:
+          - opsctl run tool k3s.logs --no-prompt
+          - opsctl run tool k3s.logs --set service=k3s-agent --set lines=500 --set since=30m --no-prompt
+      parameters:
+        - name: service
+          type: string
+          description: 服务名称；auto 自动选择当前节点上运行的 k3s 或 k3s-agent
+          required: false
+          default: auto
+          options:
+            - auto
+            - k3s
+            - k3s-agent
+        - name: lines
+          type: string
+          description: 输出的最后日志行数
+          required: false
+          default: "200"
+        - name: since
+          type: string
+          description: 起始时间，支持 30m/2h/1d 这类相对时间，也支持 journalctl 原生格式（如 "2026-10-30 09:00:00"）
+          required: false
+          default: 1h
+      confirm:
+        required: false
+
+    - id: k3s.service
+      name: 服务控制
+      category: k3s
+      description: 启动、停止、重启或查看 k3s / k3s-agent systemd 服务状态
+      tags: [k3s, service, systemctl, restart]
+      command: scripts/service.sh
+      args:
+        - "{{ .action }}"
+        - "{{ .service }}"
+      workdir: .
+      timeout: 5m
+      help:
+        usage: opsctl run tool k3s.service --set action=restart --set service=auto
+        examples:
+          - opsctl run tool k3s.service --set action=status --no-prompt
+          - opsctl run tool k3s.service --set action=restart --set service=k3s --no-prompt
+      parameters:
+        - name: action
+          type: string
+          description: 要执行的服务操作；status 仅查看状态，restart/stop/start 会影响集群 API 可用性
+          required: true
+          default: status
+          options:
+            - status
+            - restart
+            - start
+            - stop
+        - name: service
+          type: string
+          description: 目标服务；auto 自动选择 k3s（server）或 k3s-agent
+          required: false
+          default: auto
+          options:
+            - auto
+            - k3s
+            - k3s-agent
+      confirm:
+        required: true
+        message: 确认对 k3s 服务执行启动/停止/重启操作？请核对目标节点与变更窗口，操作期间集群 API 可能短暂不可用。
+
+    - id: k3s.kubectl
+      name: 执行 kubectl 命令
+      category: k3s
+      description: 从预设动作中选择一项 kubectl 操作，按命名空间、资源名称、副本数等入参拼装命令，避免自由填写整条命令
+      tags: [k3s, kubectl, cluster]
+      command: scripts/kubectl.sh
+      args:
+        - "{{ .action }}"
+        - "{{ .namespace }}"
+        - "{{ .resource }}"
+        - "{{ .replicas }}"
+        - "{{ .lines }}"
+      workdir: .
+      timeout: 15m
+      help:
+        usage: opsctl run tool k3s.kubectl --set action=get_pods --set namespace=prod
+        examples:
+          - opsctl run tool k3s.kubectl --set action=get_nodes --no-prompt
+          - opsctl run tool k3s.kubectl --set action=get_pods --set namespace=prod --no-prompt
+          - opsctl run tool k3s.kubectl --set action=rollout_restart --set namespace=prod --set resource=myapp --no-prompt
+          - opsctl run tool k3s.kubectl --set action=scale_deployment --set namespace=prod --set resource=myapp --set replicas=3 --no-prompt
+          - opsctl run tool k3s.kubectl --set action=logs_pod --set namespace=prod --set resource=myapp-6d9f7c8b5-xxxx --set lines=300 --no-prompt
+      parameters:
+        - name: action
+          type: string
+          description: kubectl 动作；rollout/scale/delete/cordon/drain 会改变集群状态
+          required: true
+          default: get_nodes
+          options:
+            - get_nodes
+            - get_pods
+            - get_pods_all
+            - get_deployments
+            - get_services
+            - get_events
+            - describe_node
+            - describe_pod
+            - describe_deployment
+            - logs_pod
+            - rollout_restart
+            - rollout_status
+            - scale_deployment
+            - delete_pod
+            - cordon_node
+            - uncordon_node
+            - drain_node
+            - top_nodes
+            - top_pods
+        - name: namespace
+          type: string
+          description: 命名空间，对命名空间类动作生效
+          required: false
+          default: default
+        - name: resource
+          type: string
+          description: 资源名称；节点类动作填节点名，其余填 Pod 或 Deployment 名
+          required: false
+          default: ""
+        - name: replicas
+          type: string
+          description: 目标副本数，仅 scale_deployment 使用
+          required: false
+          default: "1"
+        - name: lines
+          type: string
+          description: 日志末尾行数，仅 logs_pod 使用
+          required: false
+          default: "200"
+      outputs:
+        - name: action
+          description: 实际执行的动作
+          type: string
+          required: true
+          json_path: action
+      confirm:
+        required: true
+        message: 确认在当前 k3s 集群执行该 kubectl 操作？请核对动作、命名空间与资源名称，rollout/scale/delete/cordon/drain 会改变集群状态且不一定可回退。
+
+    - id: k3s.etcd_snapshot
+      name: etcd 快照
+      category: k3s
+      description: 对 k3s 内置 etcd 做快照保存、列表查看或按保留数量清理旧快照
+      tags: [k3s, etcd, snapshot, backup]
+      command: scripts/etcd-snapshot.sh
+      args:
+        - "{{ .action }}"
+        - "{{ .name }}"
+        - "{{ .keep }}"
+      workdir: .
+      timeout: 10m
+      help:
+        usage: opsctl run tool k3s.etcd_snapshot --set action=save --set name=manual-before-upgrade
+        examples:
+          - opsctl run tool k3s.etcd_snapshot --set action=list --no-prompt
+          - opsctl run tool k3s.etcd_snapshot --set action=save --set name=before-upgrade --no-prompt
+          - opsctl run tool k3s.etcd_snapshot --set action=prune --set keep=5 --no-prompt
+      parameters:
+        - name: action
+          type: string
+          description: 快照操作；list 只读，save 写入磁盘，prune 会删除超出保留数量的旧快照
+          required: true
+          default: list
+          options:
+            - list
+            - save
+            - prune
+        - name: name
+          type: string
+          description: save 时的快照名称，留空由 k3s 自动命名
+          required: false
+          default: ""
+        - name: keep
+          type: string
+          description: prune 时保留的快照数量
+          required: false
+          default: "5"
+      confirm:
+        required: true
+        message: 确认执行 etcd 快照操作？save 会占用磁盘空间，prune 会删除旧快照，请先确认备份保留策略与变更窗口。
+
+    - id: k3s.helm_repo
+      name: Helm 仓库管理
+      category: helm
+      description: 添加、更新或查看 Helm chart 仓库
+      tags: [helm, repo, chart]
+      command: scripts/helm-repo.sh
+      args:
+        - "{{ .action }}"
+        - "{{ .name }}"
+        - "{{ .url }}"
+      workdir: .
+      timeout: 5m
+      help:
+        usage: opsctl run tool k3s.helm_repo --set action=add --set name=bitnami --set url=https://charts.bitnami.com/bitnami
+        examples:
+          - opsctl run tool k3s.helm_repo --set action=list --no-prompt
+          - opsctl run tool k3s.helm_repo --set action=update --no-prompt
+      parameters:
+        - name: action
+          type: string
+          description: 仓库操作
+          required: true
+          default: list
+          options:
+            - list
+            - add
+            - update
+        - name: name
+          type: string
+          description: 仓库名称，action=add 时必填
+          required: false
+          default: ""
+        - name: url
+          type: string
+          description: 仓库地址，action=add 时必填
+          required: false
+          default: ""
+      confirm:
+        required: false
+
+    - id: k3s.helm_query
+      name: Helm 发布查询
+      category: helm
+      description: 查看 Helm 发布列表、发布详情或历史版本，用于发布前后核对
+      tags: [helm, release, readonly]
+      command: scripts/helm-query.sh
+      args:
+        - "{{ .action }}"
+        - "{{ .release }}"
+        - "{{ .namespace }}"
+        - "{{ .all_namespaces }}"
+      workdir: .
+      timeout: 5m
+      help:
+        usage: opsctl run tool k3s.helm_query --set action=list --set all_namespaces=yes
+        examples:
+          - opsctl run tool k3s.helm_query --set action=list --set namespace=prod --no-prompt
+          - opsctl run tool k3s.helm_query --set action=history --set release=myapp --set namespace=prod --no-prompt
+      parameters:
+        - name: action
+          type: string
+          description: 查询类型；status/history 需要指定 release
+          required: true
+          default: list
+          options:
+            - list
+            - status
+            - history
+        - name: release
+          type: string
+          description: Helm release 名称，status/history 必填
+          required: false
+          default: ""
+        - name: namespace
+          type: string
+          description: 命名空间；留空使用 Helm 默认命名空间
+          required: false
+          default: ""
+        - name: all_namespaces
+          type: string
+          description: list 时是否查看所有命名空间
+          required: false
+          default: "no"
+          options:
+            - "yes"
+            - "no"
+      confirm:
+        required: false
+
+    - id: k3s.helm_deploy
+      name: Helm 安装升级
+      category: helm
+      description: 使用 helm upgrade --install 安装或升级发布，支持命名空间自动创建、values 文件、--set 参数、等待与原子回滚
+      tags: [helm, install, upgrade, release]
+      command: scripts/helm-deploy.sh
+      args:
+        - "{{ .release }}"
+        - "{{ .chart }}"
+        - "{{ .namespace }}"
+        - "{{ .version }}"
+        - "{{ .values_file }}"
+        - "{{ .set_values }}"
+        - "{{ .create_namespace }}"
+        - "{{ .atomic }}"
+        - "{{ .wait }}"
+        - "{{ .dry_run }}"
+        - "{{ .timeout }}"
+      workdir: .
+      timeout: 20m
+      help:
+        usage: opsctl run tool k3s.helm_deploy --set release=myapp --set chart=bitnami/nginx --set namespace=prod
+        examples:
+          - opsctl run tool k3s.helm_deploy --set release=myapp --set chart=bitnami/nginx --set namespace=prod --set version=15.4.2 --no-prompt
+          - opsctl run tool k3s.helm_deploy --set release=myapp --set chart=./charts/myapp.tgz --set values_file=/root/values.yaml --set dry_run=yes --no-prompt
+      parameters:
+        - name: release
+          type: string
+          description: Helm release 名称
+          required: true
+        - name: chart
+          type: string
+          description: chart 引用，可为 repo/chart 名称、本地 tgz 路径、https 地址或 oci:// 地址
+          required: true
+        - name: namespace
+          type: string
+          description: 目标命名空间
+          required: false
+          default: default
+        - name: version
+          type: string
+          description: chart 版本；留空使用仓库中的最新版本
+          required: false
+          default: ""
+        - name: values_file
+          type: string
+          description: values 文件绝对路径（位于目标节点上）；留空不使用
+          required: false
+          default: ""
+        - name: set_values
+          type: string
+          description: helm --set 表达式，如 image.tag=1.2.3；可能包含密码等敏感值
+          required: false
+          default: ""
+          sensitive: true
+        - name: create_namespace
+          type: string
+          description: 命名空间不存在时是否自动创建
+          required: false
+          default: "yes"
+          options:
+            - "yes"
+            - "no"
+        - name: atomic
+          type: string
+          description: 失败时是否自动回滚到上一版本（--atomic）
+          required: false
+          default: "yes"
+          options:
+            - "yes"
+            - "no"
+        - name: wait
+          type: string
+          description: 是否等待工作负载就绪（--wait）
+          required: false
+          default: "yes"
+          options:
+            - "yes"
+            - "no"
+        - name: dry_run
+          type: string
+          description: 是否只渲染不提交（--dry-run）
+          required: false
+          default: "no"
+          options:
+            - "yes"
+            - "no"
+        - name: timeout
+          type: string
+          description: helm 等待超时时间
+          required: false
+          default: 10m
+      confirm:
+        required: true
+        message: 确认安装或升级 Helm 发布？请核对 release、chart、命名空间、values 与变更窗口，变更会重建相关工作负载。
+
+    - id: k3s.helm_uninstall
+      name: Helm 卸载
+      category: helm
+      description: 卸载 Helm 发布，可选择保留历史版本用于后续审计或回滚
+      tags: [helm, uninstall, release]
+      command: scripts/helm-uninstall.sh
+      args:
+        - "{{ .release }}"
+        - "{{ .namespace }}"
+        - "{{ .keep_history }}"
+      workdir: .
+      timeout: 10m
+      help:
+        usage: opsctl run tool k3s.helm_uninstall --set release=myapp --set namespace=prod
+        examples:
+          - opsctl run tool k3s.helm_uninstall --set release=myapp --set namespace=prod --set keep_history=yes --no-prompt
+      parameters:
+        - name: release
+          type: string
+          description: 要卸载的 Helm release 名称
+          required: true
+        - name: namespace
+          type: string
+          description: release 所在命名空间
+          required: false
+          default: default
+        - name: keep_history
+          type: string
+          description: 是否保留发布历史（--keep-history），保留后仍可通过 helm history 查看
+          required: false
+          default: "no"
+          options:
+            - "yes"
+            - "no"
+      confirm:
+        required: true
+        message: 确认卸载 Helm 发布？该操作会删除发布关联的集群资源，请确认业务已下线或已做好备份与回滚准备。
+
+    - id: k3s.helm_rollback
+      name: Helm 回滚
+      category: helm
+      description: 把 Helm 发布回滚到指定版本（留空回滚到上一版本）
+      tags: [helm, rollback, release]
+      command: scripts/helm-rollback.sh
+      args:
+        - "{{ .release }}"
+        - "{{ .revision }}"
+        - "{{ .namespace }}"
+        - "{{ .wait }}"
+      workdir: .
+      timeout: 15m
+      help:
+        usage: opsctl run tool k3s.helm_rollback --set release=myapp --set namespace=prod
+        examples:
+          - opsctl run tool k3s.helm_rollback --set release=myapp --set namespace=prod --no-prompt
+          - opsctl run tool k3s.helm_rollback --set release=myapp --set revision=3 --set namespace=prod --no-prompt
+      parameters:
+        - name: release
+          type: string
+          description: 要回滚的 Helm release 名称
+          required: true
+        - name: revision
+          type: string
+          description: 目标 revision，0 表示回滚到上一版本
+          required: false
+          default: "0"
+        - name: namespace
+          type: string
+          description: release 所在命名空间
+          required: false
+          default: default
+        - name: wait
+          type: string
+          description: 回滚后是否等待工作负载就绪（--wait）
+          required: false
+          default: "yes"
+          options:
+            - "yes"
+            - "no"
+      confirm:
+        required: true
+        message: 确认回滚 Helm 发布？回滚会按目标版本重建工作负载，请确认已核对当前版本与回滚影响。
+
+  workflows:
+    - path: workflows/k3s-inspect.yaml

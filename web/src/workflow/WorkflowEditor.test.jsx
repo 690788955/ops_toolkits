@@ -61,6 +61,7 @@ afterEach(() => {
     host.remove()
   }
   mounted = []
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   window.localStorage?.clear()
 })
@@ -591,13 +592,40 @@ describe('WorkflowEditor 节点日志联动', () => {
     expect(second).toBeTruthy()
     await act(async () => { second.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})) })
 
-    expect(host.querySelector('.workflowRunDockNodes button.active')?.textContent).toContain('第二步')
-    expect(host.querySelector('.workflowRunDockDetail').textContent).toContain('second-output')
-    expect(host.querySelector('.workflowRunDockDetail').textContent).not.toContain('first-output')
+    // 单击节点只在右栏定位日志，不打断画布布局；日志仍包含完整运行记录。
+    const dock = host.querySelector('.workflowWorkspaceBody .workflowRunDock')
+    expect(dock).toBeTruthy()
+    expect(dock.textContent).toContain('second-output')
+    expect(dock.textContent).toContain('first-output')
+    expect(dock.querySelector('.runLogOwner.focus')?.textContent).toContain('第二步')
+    expect(dock.querySelector('.workflowRunFocusChip')?.textContent).toContain('聚焦：第二步')
     expect(host.querySelector('.react-flow__node[data-id="second"]').className).toContain('logFocused')
     expect(host.querySelector('.react-flow__node[data-id="first"]').className).not.toContain('logFocused')
+    // 聚焦只影响日志定位，不会把节点配置弹窗拉起来。
     expect(host.querySelector('[role="dialog"][aria-label="节点配置"]')).toBeNull()
 
+    // 需要更多空间时显式放大；放大后仍展示同一份日志。
+    await clickButtonByAriaLabel(host, '放大运行日志')
+    const logWindow = host.querySelector('.workflowLogWindow')
+    expect(logWindow).toBeTruthy()
+    expect(logWindow.getAttribute('aria-label')).toContain('运行日志')
+    expect(logWindow.textContent).toContain('second-output')
+    expect(logWindow.querySelector('.runLogOwner.focus')?.textContent).toContain('第二步')
+
+    // 点窗口外（或 Esc）还原右栏并保留聚焦。
+    await act(async () => {
+      host.querySelector('.workflowLogWindowBackdrop').dispatchEvent(new MouseEvent('mousedown', {bubbles: true}))
+    })
+    expect(host.querySelector('.workflowLogWindow')).toBeNull()
+    expect(host.querySelector('.workflowWorkspaceBody .workflowRunDock')).toBeTruthy()
+    expect(host.querySelector('.workflowRunFocusChip')?.textContent).toContain('聚焦：第二步')
+
+    // 运行模式下画布是只读的：双击不会打开节点配置。
+    await act(async () => { second.dispatchEvent(new MouseEvent('dblclick', {bubbles: true, cancelable: true})) })
+    expect(host.querySelector('[role="dialog"][aria-label="节点配置"]')).toBeNull()
+
+    // 点「编辑模式」解锁后，双击才回到配置弹窗。
+    await clickButtonByAriaLabel(host, '编辑模式')
     await act(async () => { second.dispatchEvent(new MouseEvent('dblclick', {bubbles: true, cancelable: true})) })
     expect(host.querySelector('[role="dialog"][aria-label="节点配置"]')).toBeTruthy()
   })
@@ -760,10 +788,10 @@ describe('WorkflowEditor 恢复运行隔离', () => {
 
     await clickButtonByAriaLabel(host, '运行工作流')
     await clickButtonByText(host.querySelector('[aria-label="运行准备"]'), '开始运行')
-    await clickButtonByText(host.querySelector('.workflowRunDock'), '恢复与通知')
-    await clickButtonByText(host.querySelector('.workflowRecoveryDrawer'), '重试通知')
+    await clickButtonByText(host.querySelector('.workflowRunDock'), '恢复')
+    await clickButtonByText(host.querySelector('.nodeRunRecovery'), '重试通知')
 
-    expect(host.querySelector('.workflowRecoveryDrawer').textContent).toContain('已发送')
+    expect(host.querySelector('.nodeRunRecovery').textContent).toContain('已发送')
     expect(request.mock.calls.filter(([path]) => path.includes('/run?'))).toHaveLength(1)
     expect(request.mock.calls.some(([path]) => path === '/api/runs/run-notify/notifications/0/retry')).toBe(true)
   })
@@ -781,7 +809,7 @@ describe('WorkflowEditor 恢复运行隔离', () => {
     await clickButtonByAriaLabel(host, '运行工作流')
     await clickButtonByText(host.querySelector('[aria-label="运行准备"]'), '开始运行')
 
-    expect(host.querySelector('.workflowRunDock').textContent).toContain('恢复与通知')
+    expect(host.querySelector('.workflowRunDock').textContent).toContain('恢复')
     expect(host.querySelector('.react-flow__node[data-id="first"]')).toBeTruthy()
     expect(host.querySelector('.nodeRerun')).toBeNull()
   })
@@ -1157,7 +1185,8 @@ describe('WorkflowEditor 节点选择可用性', () => {
     expect(Array.from(panel.querySelectorAll('.nodePickerCategory.cat-flow .nodePickerItem b')).map(item => item.textContent)).toEqual([
       '条件分支',
       '循环',
-      '等待 / 轮询'
+      '等待 / 轮询',
+      '人工审批'
     ])
   })
 
@@ -1299,5 +1328,627 @@ describe('WorkflowEditor 独立草稿窗口', () => {
     expect(host.querySelector('.workflowDraftWindowSaved')).toBeNull()
     // 处理过的标记要清掉，否则每次打开主窗口都会再提示一次。
     expect(readDraftWindowSaved()).toBeNull()
+  })
+})
+
+describe('WorkflowEditor 人工审批节点与审批条', () => {
+  const workflow = {
+    id: 'approval-flow',
+    name: '审批流程',
+    parameters: [],
+    stages: [{id: 'change', name: '变更'}],
+    nodes: [
+      {id: 'prepare', name: '准备', tool: 'demo.hello', stage_id: 'change', order: 10},
+      {id: 'gate', name: '人工确认', type: 'approval', stage_id: 'change', order: 20, approval: {message: '确认配置已改好后继续', timeout: '30m'}},
+      {id: 'deploy', name: '部署', tool: 'demo.hello', stage_id: 'change', order: 30}
+    ],
+    edges: [{from: 'prepare', to: 'gate'}, {from: 'gate', to: 'deploy'}]
+  }
+
+  const okBody = body => ({ok: true, status: 200, json: async () => body, text: async () => ''})
+
+  function detailFor(approvalStatus, runStatus) {
+    const stepStatus = approvalStatus === 'waiting' ? 'waiting' : approvalStatus === 'approved' ? 'succeeded' : 'failed'
+    return {
+      record: {
+        id: 'run-approval',
+        kind: 'workflow',
+        target: 'approval-flow',
+        status: runStatus,
+        approvals: [{node_id: 'gate', message: '确认配置已改好后继续', status: approvalStatus, since: '2026-01-02T03:04:05Z'}],
+        steps: [
+          {id: 'prepare', type: 'tool', status: 'succeeded'},
+          {id: 'gate', type: 'approval', status: stepStatus}
+        ],
+        snapshot: {workflow: {nodes: workflow.nodes}}
+      },
+      logs: {items: []}
+    }
+  }
+
+  // 审批只要没有通过，运行记录就一直是 running；用可变状态模拟审批后的下一次轮询。
+  function installApprovalFetch() {
+    const state = {approval: 'waiting', run: 'running'}
+    const request = vi.fn(async (path, options) => {
+      // 运行提交返回顶层 {id,status}；审批动作按契约返回 {id,status,data: runDetail}。
+      if (path.includes('/run?')) return okBody({id: 'run-approval', status: 'running'})
+      if (path === '/api/runs/run-approval/approvals/gate/approve') {
+        state.approval = 'approved'
+        state.run = 'succeeded'
+        return okBody({id: 'run-approval', status: state.run, data: detailFor(state.approval, state.run)})
+      }
+      if (path === '/api/runs/run-approval/approvals/gate/reject') {
+        state.approval = 'rejected'
+        state.run = 'failed'
+        return okBody({id: 'run-approval', status: state.run, data: detailFor(state.approval, state.run)})
+      }
+      if (path === '/api/runs/run-approval') return okBody({data: detailFor(state.approval, state.run)})
+      return okBody({data: {runs: []}})
+    })
+    vi.stubGlobal('fetch', request)
+    return request
+  }
+
+  async function startApprovalRun(host) {
+    await clickButtonByAriaLabel(host, '运行工作流')
+    await clickButtonByText(host.querySelector('[aria-label="运行准备"]'), '开始运行')
+  }
+
+  it('从节点选择面板添加人工审批节点，并自动带上空审批配置', async () => {
+    const host = await mountEditor()
+    await clickAddNodeButton(host)
+    const item = host.querySelectorAll('.nodePickerCategory.cat-flow .nodePickerItem')[3]
+    expect(item.textContent).toContain('人工审批')
+    await act(async () => { item.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})) })
+
+    const node = host.querySelector('.react-flow__node[data-id="approval_1"]')
+    expect(node).toBeTruthy()
+    expect(node.textContent).toContain('人工审批')
+    expect(node.textContent).toContain('未填写审批提示')
+  })
+
+  it('运行中等待审批时展示审批条，确认后继续并把备注写进请求', async () => {
+    const host = await mountEditorWithHosts({hosts: [], workflow})
+    const request = installApprovalFetch()
+    await startApprovalRun(host)
+
+    const bar = host.querySelector('.workflowRunApprovalBar')
+    expect(bar).toBeTruthy()
+    expect(bar.getAttribute('role')).toBe('alert')
+    expect(bar.textContent).toContain('等待人工审批：人工确认')
+    expect(bar.textContent).toContain('确认配置已改好后继续')
+    expect(bar.textContent).toContain('节点 gate')
+    expect(bar.textContent).toContain('运行会一直停在 running')
+    // 画布上的审批节点要能看出是卡在人身上，而不是泛泛的等待中。
+    expect(host.querySelector('.react-flow__node[data-id="gate"] .runStatusBadge').textContent).toBe('等待审批')
+
+    await setInputValue(bar.querySelector('input[aria-label="审批备注"]'), '配置已改好')
+    await clickButtonByText(bar, '确认继续')
+
+    const approveCall = request.mock.calls.find(([path]) => path === '/api/runs/run-approval/approvals/gate/approve')
+    expect(approveCall).toBeTruthy()
+    expect(approveCall[1].method).toBe('POST')
+    expect(JSON.parse(approveCall[1].body)).toEqual({note: '配置已改好'})
+    // 确认成功后立刻刷新运行详情，审批条随 waiting 消失。
+    expect(request.mock.calls.filter(([path]) => path === '/api/runs/run-approval').length).toBeGreaterThan(1)
+    expect(host.querySelector('.workflowRunApprovalBar')).toBeNull()
+  })
+
+  it('驳回需要二次确认，确认后调用驳回接口并按失败结束', async () => {
+    const host = await mountEditorWithHosts({hosts: [], workflow})
+    const request = installApprovalFetch()
+    await startApprovalRun(host)
+
+    const confirm = vi.fn(() => false)
+    vi.stubGlobal('confirm', confirm)
+    await clickButtonByText(host.querySelector('.workflowRunApprovalBar'), '驳回')
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(request.mock.calls.some(([path]) => path.includes('/reject'))).toBe(false)
+    expect(host.querySelector('.workflowRunApprovalBar')).toBeTruthy()
+
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    await clickButtonByText(host.querySelector('.workflowRunApprovalBar'), '驳回')
+
+    const rejectCall = request.mock.calls.find(([path]) => path === '/api/runs/run-approval/approvals/gate/reject')
+    expect(rejectCall).toBeTruthy()
+    expect(JSON.parse(rejectCall[1].body)).toEqual({})
+    expect(host.querySelector('.workflowRunApprovalBar')).toBeNull()
+    expect(host.querySelector('.workflowRunDock').textContent).toContain('失败')
+  })
+})
+
+describe('WorkflowEditor 编辑/运行模式与运行记录左栏', () => {
+  const originalConsoleError = console.error
+  const capturedConsoleError = []
+  // 回归网：把字符串当 onClick 传（例如把支持包 URL 直接塞进 onClick）会在这里立刻失败，
+// 否则 React 只是静默忽略，按钮看着正常但点了没反应。
+  beforeEach(() => {
+    capturedConsoleError.length = 0
+    console.error = (...args) => { capturedConsoleError.push(args.map(String).join(' ')) }
+  })
+  afterEach(() => {
+    console.error = originalConsoleError
+    const invalidListeners = capturedConsoleError.filter(line => line.includes('listener to be a function'))
+    if (invalidListeners.length > 0) {
+      throw new Error(`React 收到非函数事件处理器：\n${invalidListeners.join('\n')}`)
+    }
+  })
+  const workflow = {
+    id: 'mode-flow',
+    name: '模式流程',
+    category: 'docker',
+    parameters: [],
+    nodes: [
+      {id: 'first', name: '第一步', tool: 'demo.hello'},
+      {id: 'second', name: '第二步', tool: 'demo.hello'}
+    ],
+    edges: [{from: 'first', to: 'second'}]
+  }
+  const historyDetail = {
+    record: {
+      id: 'hist-1',
+      kind: 'workflow',
+      target: workflow.id,
+      status: 'succeeded',
+      started_at: '2026-10-30T12:00:00Z',
+      ended_at: '2026-10-30T12:00:02Z',
+      snapshot: {workflow: {id: workflow.id, name: '模式流程', nodes: [{id: 'snap-node', name: '快照节点', tool: 'demo.hello'}], edges: []}},
+      steps: [{id: 'snap-node', type: 'tool', tool: 'demo.hello', status: 'succeeded', started_at: '2026-10-30T12:00:00Z', ended_at: '2026-10-30T12:00:02Z'}]
+    },
+    logs: {items: [{id: 'snap-node', status: 'succeeded', stdout: 'snapshot-output'}]}
+  }
+
+  function response(body, status = 200) {
+    return {ok: status < 400, status, json: async () => body, text: async () => ''}
+  }
+
+  async function mountWithRequest(request, extraProps = {}) {
+    vi.stubGlobal('fetch', request)
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    mounted.push({host, root})
+    await act(async () => {
+      root.render(
+        <WorkflowEditor
+          catalog={{...catalog, tools: [{id: 'demo.hello', name: '问候', category: 'docker'}], workflows: [workflow]}}
+          hosts={[]}
+          setResult={() => {}}
+          refreshCatalog={async () => {}}
+          {...extraProps}
+        />
+      )
+    })
+    const popover = await openWorkflowNamePopover(host)
+    await clickWorkflowListItem(popover, workflow.id)
+    await act(async () => {})
+    return host
+  }
+
+  it('运行期间画布锁进运行模式，结束后自动回到编辑模式', async () => {
+    const request = vi.fn(async path => {
+      if (path === `/api/workflows/${workflow.id}`) return response({data: {config: workflow}})
+      if (path.includes('/run?')) return response({id: 'run-mode', target: workflow.id, status: 'running'})
+      if (path.startsWith('/api/runs/run-mode')) {
+        return response({data: {
+          record: {id: 'run-mode', target: workflow.id, status: 'running', steps: [{id: 'first', type: 'tool', status: 'running'}]},
+          logs: {items: [{id: 'first', status: 'running', stdout: 'first-output'}]}
+        }})
+      }
+      return response({data: {runs: [], total: 0}})
+    })
+    const host = await mountWithRequest(request)
+    const editButton = () => host.querySelector('.workflowCanvasModeControl button[aria-label="编辑模式"]')
+    const runButton = () => host.querySelector('.workflowCanvasModeControl button[aria-label="运行模式"]')
+    expect(editButton().className).toContain('active')
+
+    await clickButtonByAriaLabel(host, '运行工作流')
+    await clickButtonByText(host.querySelector('[aria-label="运行准备"]'), '开始运行')
+
+    expect(editButton().disabled).toBe(true)
+    expect(runButton().className).toContain('active')
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('运行中')
+    expect(host.querySelector('.workflowTopBar button[aria-label="运行工作流"]')).toBeNull()
+  })
+
+  it('左栏运行记录可以收起，给画布让出宽度', async () => {
+    const request = vi.fn(async path => {
+      if (path.startsWith('/api/runs?status=pending')) return response({data: {runs: []}})
+      if (path.startsWith('/api/runs/?') || path === '/api/runs/') return response({data: {runs: [], total: 0}})
+      if (path === `/api/workflows/${workflow.id}`) return response({data: {config: workflow}})
+      return response({data: {}})
+    })
+    const host = await mountWithRequest(request)
+    expect(host.querySelector('.workflowRunRail')).toBeTruthy()
+
+    await clickButtonByAriaLabel(host, '隐藏运行记录')
+    expect(host.querySelector('.workflowRunRail')).toBeNull()
+
+    await clickButtonByAriaLabel(host, '显示运行记录')
+    expect(host.querySelector('.workflowRunRail')).toBeTruthy()
+  })
+
+  it('拖动分隔条改左栏宽度，双击恢复默认', async () => {
+    const request = vi.fn(async path => {
+      if (path.startsWith('/api/runs?status=pending')) return response({data: {runs: []}})
+      if (path.startsWith('/api/runs/?') || path === '/api/runs/') return response({data: {runs: [], total: 0}})
+      if (path === `/api/workflows/${workflow.id}`) return response({data: {config: workflow}})
+      return response({data: {}})
+    })
+    const host = await mountWithRequest(request)
+    const body = host.querySelector('.workflowWorkspaceBody')
+    const handle = body.querySelector('.resizeHandle')
+    expect(handle.getAttribute('aria-label')).toBe('调整运行记录栏宽度')
+    expect(body.style.getPropertyValue('--workflow-rail-width')).toBe('')
+
+    // 没拖过时样式里的默认宽度生效；拖动后写进 CSS 变量，画布让出对应宽度。
+    await act(async () => {
+      handle.dispatchEvent(new MouseEvent('pointerdown', {bubbles: true, cancelable: true, clientX: 100}))
+      handle.dispatchEvent(new MouseEvent('pointermove', {bubbles: true, cancelable: true, clientX: 160}))
+      handle.dispatchEvent(new MouseEvent('pointerup', {bubbles: true, cancelable: true, clientX: 160}))
+    })
+    expect(host.querySelector('.workflowWorkspaceBody').style.getPropertyValue('--workflow-rail-width')).toBe('308px')
+
+    await act(async () => {
+      host.querySelector('.workflowWorkspaceBody .resizeHandle')
+        .dispatchEvent(new MouseEvent('dblclick', {bubbles: true, cancelable: true}))
+    })
+    expect(host.querySelector('.workflowWorkspaceBody').style.getPropertyValue('--workflow-rail-width')).toBe('')
+  })
+
+  it('深链 openRunID 直接打开对应运行记录并回写链接', async () => {
+    const opened = []
+    const request = vi.fn(async path => {
+      if (path.startsWith('/api/runs?status=pending')) return response({data: {runs: []}})
+      if (path.startsWith('/api/runs/?') || path === '/api/runs/') {
+        return response({data: {runs: [{id: 'hist-1', kind: 'workflow', target: workflow.id, status: 'succeeded'}], total: 1}})
+      }
+      if (path === '/api/runs/hist-1') return response({data: historyDetail})
+      if (path === `/api/workflows/${workflow.id}`) return response({data: {config: workflow}})
+      return response({data: {}})
+    })
+    const host = await mountWithRequest(request, {openRunID: 'hist-1', onOpenRun: runID => opened.push(runID)})
+
+    await act(async () => {})
+    expect(host.querySelector('.react-flow__node[data-id="snap-node"]')).toBeTruthy()
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('历史快照')
+    expect(opened).toContain('hist-1')
+
+    const railItem = host.querySelector('.workflowRunRailItem')
+    await act(async () => {
+      railItem.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+    })
+    expect(host.querySelector('.react-flow__node[data-id="snap-node"]')).toBeTruthy()
+  })
+
+  it('深链指定的记录不会被默认的最近一次运行覆盖', async () => {
+    const request = vi.fn(async path => {
+      if (path === `/api/workflows/${workflow.id}`) return response({data: {config: workflow}})
+      if (path === '/api/runs/hist-1') return response({data: historyDetail})
+      if (path.startsWith('/api/runs/?')) return response({data: {runs: [{id: 'hist-newest', target: workflow.id, status: 'succeeded'}], total: 1}})
+      return response({data: {runs: [], total: 0}})
+    })
+    const host = await mountWithRequest(request, {openRunID: 'hist-1'})
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('hist-1')
+    expect(request.mock.calls.some(([path]) => path === '/api/runs/hist-newest')).toBe(false)
+    expect(request.mock.calls.some(([path]) => path.includes('limit=1') && !path.includes('limit=20'))).toBe(false)
+  })
+
+  it('直接打开历史快照时展示其名称、阶段和空依赖，不展示空白草稿的配置告警', async () => {
+    const snapshotDetail = {
+      ...historyDetail,
+      record: {...historyDetail.record, snapshot: {workflow: {
+        id: workflow.id, name: '历史部署流程',
+        stages: [{id: 'history-stage', name: '历史阶段', execution_mode: 'serial'}],
+        nodes: [{id: 'snap-node', name: '快照节点', tool: 'demo.hello', stage_id: 'history-stage', order: 10}],
+        edges: []
+      }}}
+    }
+    const request = vi.fn(async path => {
+      if (path === '/api/runs/hist-1') return response({data: snapshotDetail})
+      return response({data: {runs: [], total: 0}})
+    })
+    vi.stubGlobal('fetch', request)
+    const host = await mountEditorWithCatalog({...catalog, workflows: [workflow]}, {openRunID: 'hist-1'})
+    expect(host.querySelector('.workflowNameTrigger').textContent).toContain('历史部署流程')
+    expect(host.querySelector('.workflowSaveState').textContent).toBe('运行快照')
+    expect(host.querySelector('.workflowStageColumn').textContent).toContain('历史阶段')
+    expect(host.querySelectorAll('.react-flow__edge')).toHaveLength(0)
+    expect(host.querySelector('.workflowRunRailHeader').textContent).toContain(workflow.id)
+    expect(request.mock.calls.some(([path]) => path.startsWith('/api/workflows/'))).toBe(false)
+  })
+
+  it('深链打开等待审批的实时运行后仍可确认并轮询到终态', async () => {
+    vi.useFakeTimers()
+    let approved = false
+    const liveDetail = () => ({
+      record: {
+        id: 'live-approval', kind: 'workflow', target: workflow.id, status: approved ? 'succeeded' : 'running',
+        snapshot: {workflow: {...workflow, edges: [], nodes: [{id: 'gate', name: '配置确认', type: 'approval', approval: {message: '改好配置后继续'}}]}},
+        steps: [{id: 'gate', type: 'approval', status: approved ? 'succeeded' : 'waiting'}],
+        approvals: [{node_id: 'gate', status: approved ? 'approved' : 'waiting', message: '改好配置后继续'}]
+      }, logs: {items: []}
+    })
+    const request = vi.fn(async path => {
+      if (path === '/api/runs/live-approval/approvals/gate/approve') {
+        approved = true
+        return response({data: liveDetail()})
+      }
+      if (path === '/api/runs/live-approval') return response({data: liveDetail()})
+      return response({data: {runs: [], total: 0}})
+    })
+    vi.stubGlobal('fetch', request)
+    const host = await mountEditorWithCatalog({...catalog, workflows: [workflow]}, {openRunID: 'live-approval'})
+    expect(host.querySelector('.workflowRunApprovalBar').textContent).toContain('改好配置后继续')
+    expect(host.querySelector('.workflowRunBarHint').textContent).toContain('运行中')
+    expect(host.querySelector('[aria-label="取消当前工作流运行"]')).toBeTruthy()
+    await clickButtonByText(host.querySelector('.workflowRunApprovalBar'), '确认继续')
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+    expect(host.querySelector('.workflowRunApprovalBar')).toBeNull()
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('成功')
+    expect(host.querySelector('[aria-label="取消当前工作流运行"]')).toBeNull()
+    expect(request.mock.calls.filter(([path]) => path === '/api/runs/live-approval').length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('切换工作流不重放旧深链，重新打开同一工作流会读取最新记录', async () => {
+    const other = {...workflow, id: 'other-flow', name: '另一流程'}
+    let latestRunID = 'other-run-1'
+    const request = vi.fn(async path => {
+      if (path === `/api/workflows/${workflow.id}`) return response({data: {config: workflow}})
+      if (path === `/api/workflows/${other.id}`) return response({data: {config: other}})
+      if (path === '/api/runs/hist-1') return response({data: historyDetail})
+      if (path.startsWith('/api/runs/other-run-')) {
+        return response({data: {...historyDetail, record: {...historyDetail.record, id: path.split('/').pop(), target: other.id}}})
+      }
+      if (path.startsWith('/api/runs/?')) {
+        const target = new URL(path, 'http://localhost').searchParams.get('target')
+        return response({data: {runs: [{id: target === other.id ? latestRunID : 'hist-1', target, status: 'succeeded'}], total: 1}})
+      }
+      return response({data: {runs: [], total: 0}})
+    })
+    const host = await mountWithRequest(request, {
+      openRunID: 'hist-1',
+      catalog: {...catalog, tools: [{id: 'demo.hello', name: '问候'}], workflows: [workflow, other]}
+    })
+    const previousLoads = request.mock.calls.filter(([path]) => path === '/api/runs/hist-1').length
+    await clickWorkflowListItem(await openWorkflowNamePopover(host), other.id)
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('other-run-1')
+    expect(request.mock.calls.filter(([path]) => path === '/api/runs/hist-1')).toHaveLength(previousLoads)
+
+    latestRunID = 'other-run-2'
+    await clickWorkflowListItem(await openWorkflowNamePopover(host), other.id)
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('other-run-2')
+  })
+
+  it('快速选择两条历史记录后，迟到详情不会覆盖最后一次选择', async () => {
+    let resolveA
+    let resolveB
+    const pendingA = new Promise(resolve => { resolveA = resolve })
+    const pendingB = new Promise(resolve => { resolveB = resolve })
+    const request = vi.fn(async path => {
+      if (path === `/api/workflows/${workflow.id}`) return response({data: {config: workflow}})
+      if (path === '/api/runs/hist-A') return pendingA
+      if (path === '/api/runs/hist-B') return pendingB
+      if (path === '/api/runs/hist-1') return response({data: historyDetail})
+      if (path.startsWith('/api/runs/?')) {
+        return response({data: {runs: ['hist-1', 'hist-A', 'hist-B'].map(id => ({id, target: workflow.id, status: 'succeeded'})), total: 3}})
+      }
+      return response({data: {runs: [], total: 0}})
+    })
+    const host = await mountWithRequest(request)
+    await act(async () => { host.querySelector('.workflowRunRailItem[title^="hist-A "]').click() })
+    await act(async () => { host.querySelector('.workflowRunRailItem[title^="hist-B "]').click() })
+    await act(async () => { resolveB(response({data: {...historyDetail, record: {...historyDetail.record, id: 'hist-B'}}})) })
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('hist-B')
+    await act(async () => { resolveA(response({data: {...historyDetail, record: {...historyDetail.record, id: 'hist-A'}}})) })
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('hist-B')
+    expect(host.querySelector('.workflowRunRailItem.active').title).toContain('hist-B')
+  })
+
+  it('执行期间选择历史记录不会中断轮询或丢失取消入口', async () => {
+    vi.useFakeTimers()
+    let started = false
+    let cancelled = false
+    const liveDetail = () => ({
+      record: {id: 'live-run', target: workflow.id, status: cancelled ? 'cancelled' : 'running', steps: [{id: 'first', type: 'tool', status: cancelled ? 'cancelled' : 'running'}]},
+      logs: {items: [{id: 'first', stdout: 'live output'}]}
+    })
+    const request = vi.fn(async path => {
+      if (path === `/api/workflows/${workflow.id}`) return response({data: {config: workflow}})
+      if (path.includes('/run?')) {
+        started = true
+        return response({id: 'live-run', target: workflow.id, status: 'running'})
+      }
+      if (path === '/api/runs/live-run/cancel') {
+        cancelled = true
+        return response({status: 'running'})
+      }
+      if (path === '/api/runs/live-run') return response({data: liveDetail()})
+      if (path.startsWith('/api/runs/?')) return response({data: {runs: started ? [{id: 'hist-1', target: workflow.id, status: 'succeeded'}] : [], total: started ? 1 : 0}})
+      return response({data: {runs: [], total: 0}})
+    })
+    const host = await mountWithRequest(request)
+    await clickButtonByAriaLabel(host, '运行工作流')
+    await clickButtonByText(host.querySelector('[aria-label="运行准备"]'), '开始运行')
+    const oldRun = host.querySelector('.workflowRunRailItem')
+    expect(oldRun.disabled).toBe(true)
+    await act(async () => { oldRun.click() })
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('live-run')
+    expect(host.querySelector('[aria-label="取消当前工作流运行"]')).toBeTruthy()
+    expect(request.mock.calls.some(([path]) => path === '/api/runs/hist-1')).toBe(false)
+    const beforePoll = request.mock.calls.filter(([path]) => path === '/api/runs/live-run').length
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+    expect(request.mock.calls.filter(([path]) => path === '/api/runs/live-run').length).toBeGreaterThan(beforePoll)
+    await clickButtonByAriaLabel(host, '取消当前工作流运行')
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('已取消')
+    expect(host.querySelector('[aria-label="运行工作流"]')).toBeTruthy()
+  })
+
+  it('待处理运行的恢复内容在右栏查看，不再弹浮层抽屉', async () => {
+    const pendingDetail = {
+      record: {
+        id: 'hist-pending',
+        kind: 'workflow',
+        target: workflow.id,
+        status: 'pending',
+        pending: {status: 'pending', reason: '配置已改但检查失败', step_id: 'first'},
+        steps: [{id: 'first', type: 'tool', tool: 'demo.hello', status: 'failed', error: 'boom'}],
+        backups: [{node_id: 'first', target_path: '/etc/app.conf', backup_path: '/backup/app.conf', sha256: 'sha', status: 'updated'}]
+      },
+      logs: {items: [{id: 'first', status: 'failed', stdout: 'first-output'}]}
+    }
+    const request = vi.fn(async path => {
+      if (path.startsWith('/api/runs?status=pending')) return response({data: {runs: []}})
+      if (path.startsWith('/api/runs/?') || path === '/api/runs/') return response({data: {runs: [], total: 0}})
+      if (path === '/api/runs/hist-pending/recovery/check') return response({data: {
+        ...pendingDetail,
+        record: {...pendingDetail.record, status: 'succeeded', pending: null, attempts: [{action: 'check', status: 'succeeded'}]}
+      }})
+      if (path === '/api/runs/hist-pending') return response({data: pendingDetail})
+      if (path === `/api/workflows/${workflow.id}`) return response({data: {config: workflow}})
+      return response({data: {}})
+    })
+    const host = await mountWithRequest(request, {openRunID: 'hist-pending'})
+    await act(async () => {})
+
+    const recoveryToggle = Array.from(host.querySelectorAll('.workflowRunDockActions button')).find(button => button.textContent === '恢复')
+    expect(recoveryToggle).toBeTruthy()
+    await act(async () => { recoveryToggle.dispatchEvent(new MouseEvent('click', {bubbles: true})) })
+
+    // 内容直接进右栏：不打开抽屉浮层，也不需要用户先关掉别的东西。
+    expect(host.querySelector('[role="dialog"][aria-label="待处理恢复"]')).toBeNull()
+    expect(host.querySelector('.nodeRunRecovery').textContent).toContain('重试检查')
+    expect(host.querySelector('.nodeRunRecovery').textContent).toContain('回滚配置')
+    await clickButtonByText(host.querySelector('.nodeRunRecovery'), '重试检查')
+    expect(host.querySelector('.nodeRunRecovery').textContent).toContain('检查通过')
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('成功')
+    expect(host.querySelector('.workflowRunDockTitle').textContent).toContain('成功')
+  })
+
+  it('历史运行的恢复响应不会覆盖后来选择的另一条记录', async () => {
+    let resolveRecovery
+    const recoveryResponse = new Promise(resolve => { resolveRecovery = resolve })
+    const pendingDetail = {
+      ...historyDetail,
+      record: {...historyDetail.record, id: 'hist-recovery', status: 'pending', pending: {status: 'pending', reason: '检查失败', step_id: 'snap-node'}}
+    }
+    const otherDetail = {
+      ...historyDetail,
+      record: {...historyDetail.record, id: 'hist-other'},
+      logs: {items: [{id: 'snap-node', stdout: 'other record output'}]}
+    }
+    const request = vi.fn(async path => {
+      if (path === `/api/workflows/${workflow.id}`) return response({data: {config: workflow}})
+      if (path === '/api/runs/hist-recovery/recovery/check') return recoveryResponse
+      if (path === '/api/runs/hist-recovery') return response({data: pendingDetail})
+      if (path === '/api/runs/hist-other') return response({data: otherDetail})
+      if (path.startsWith('/api/runs/?')) return response({data: {runs: [{id: 'hist-other', target: workflow.id, status: 'succeeded'}], total: 1}})
+      return response({data: {runs: [], total: 0}})
+    })
+    const host = await mountWithRequest(request, {openRunID: 'hist-recovery'})
+    await clickButtonByText(host.querySelector('.workflowRunDockActions'), '恢复')
+    await clickButtonByText(host.querySelector('.nodeRunRecovery'), '重试检查')
+    await act(async () => { host.querySelector('.workflowRunRailItem').click() })
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('hist-other')
+    await act(async () => {
+      resolveRecovery(response({data: {...pendingDetail, record: {...pendingDetail.record, status: 'succeeded', pending: null}}}))
+    })
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('hist-other')
+    expect(host.querySelector('.runLogBox').textContent).toContain('other record output')
+  })
+
+  it('打开工作流默认停在最近一次运行的只读视图，点编辑模式才回到草稿', async () => {
+    const request = vi.fn(async path => {
+      if (path.startsWith('/api/runs?status=pending')) return response({data: {runs: []}})
+      if (path.startsWith('/api/runs/?') || path === '/api/runs/') {
+        return response({data: {runs: [{id: 'hist-1', kind: 'workflow', target: workflow.id, status: 'succeeded', started_at: '2026-10-30T12:00:00Z', ended_at: '2026-10-30T12:00:02Z'}], total: 1}})
+      }
+      if (path === '/api/runs/hist-1') return response({data: historyDetail})
+      if (path === `/api/workflows/${workflow.id}`) return response({data: {config: workflow}})
+      return response({data: {}})
+    })
+    const host = await mountWithRequest(request)
+    await act(async () => {})
+    const workflowLoads = () => request.mock.calls.filter(([path]) => path === `/api/workflows/${workflow.id}`).length
+    expect(workflowLoads()).toBe(1)
+
+    // 默认进来是运行模式：画布直接摆的是最近一次运行的快照，草稿节点不在上面。
+    expect(host.querySelector('.workflowRunRailItem.active')).toBeTruthy()
+    expect(host.querySelector('.react-flow__node[data-id="snap-node"]')).toBeTruthy()
+    expect(host.querySelector('.react-flow__node[data-id="first"]')).toBeNull()
+    expect(host.querySelector('.workflowRunBar').textContent).toContain('历史快照')
+    expect(host.querySelector('.workflowCanvasModeControl button[aria-label="运行模式"]').className).toContain('active')
+    // 历史画布来自快照，不需要再拉一次当前工作流配置。
+    expect(workflowLoads()).toBe(1)
+
+    await act(async () => {
+      host.querySelector('.react-flow__node[data-id="snap-node"]').dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+    })
+    expect(host.querySelector('.workflowWorkspaceBody .runLogBox').textContent).toContain('snapshot-output')
+    await clickButtonByAriaLabel(host, '放大运行日志')
+    expect(host.querySelector('.workflowLogWindow .runLogBox').textContent).toContain('snapshot-output')
+    await act(async () => {
+      host.querySelector('.workflowLogWindowBackdrop').dispatchEvent(new MouseEvent('mousedown', {bubbles: true}))
+    })
+    await clickButtonByAriaLabel(host, '编辑模式')
+    expect(host.querySelector('.react-flow__node[data-id="first"]')).toBeTruthy()
+    expect(host.querySelector('.react-flow__node[data-id="snap-node"]')).toBeNull()
+    expect(host.querySelector('.workflowCanvasModeControl button[aria-label="编辑模式"]').className).toContain('active')
+  })
+
+  it('工作流没有运行记录时直接进编辑模式，画布不显示执行状态', async () => {
+    const request = vi.fn(async path => {
+      if (path.startsWith('/api/runs?status=pending')) return response({data: {runs: []}})
+      if (path.startsWith('/api/runs/?') || path === '/api/runs/') return response({data: {runs: [], total: 0}})
+      if (path === `/api/workflows/${workflow.id}`) return response({data: {config: workflow}})
+      return response({data: {}})
+    })
+    const host = await mountWithRequest(request)
+    await act(async () => {})
+
+    expect(host.querySelector('.workflowCanvasModeControl button[aria-label="编辑模式"]').className).toContain('active')
+    expect(host.querySelector('.react-flow__node[data-id="first"]')).toBeTruthy()
+    expect(host.querySelector('.workflowRunBar')).toBeNull()
+  })
+
+  it('切到编辑模式后画布节点不再带任何执行状态', async () => {
+    // 这条运行记录没有快照，所以画布节点就是草稿节点本身，可以直接对比同一个节点在两种模式下的样子。
+    const detail = {
+      record: {
+        id: 'hist-inline',
+        kind: 'workflow',
+        target: workflow.id,
+        status: 'succeeded',
+        steps: [
+          {id: 'first', type: 'tool', status: 'succeeded'},
+          {id: 'second', type: 'tool', status: 'failed', error: 'boom'}
+        ]
+      },
+      logs: {items: [{id: 'first', status: 'succeeded', stdout: 'first-output'}]}
+    }
+    const request = vi.fn(async path => {
+      if (path.startsWith('/api/runs?status=pending')) return response({data: {runs: []}})
+      if (path.startsWith('/api/runs/?') || path === '/api/runs/') {
+        return response({data: {runs: [{id: 'hist-inline', kind: 'workflow', target: workflow.id, status: 'succeeded'}], total: 1}})
+      }
+      if (path === '/api/runs/hist-inline') return response({data: detail})
+      if (path === `/api/workflows/${workflow.id}`) return response({data: {config: workflow}})
+      return response({data: {}})
+    })
+    const host = await mountWithRequest(request, {openRunID: 'hist-inline'})
+    await act(async () => {})
+
+    const nodeWithStatus = () => host.querySelector('.react-flow__node[data-id="second"]')
+    const innerNode = () => nodeWithStatus().querySelector('.toolNode')
+    expect(host.querySelector('.workflowCanvasModeControl button[aria-label="运行模式"]').className).toContain('active')
+    expect(nodeWithStatus().querySelector('.runStatusBadge').textContent).toBe('失败')
+    expect(innerNode().className).toContain('runFailed')
+
+    await clickButtonByAriaLabel(host, '编辑模式')
+    // 同一个节点还在画布上，但执行状态一律不显示：没有徽标、没有运行态的节点样式。
+    expect(nodeWithStatus()).toBeTruthy()
+    expect(nodeWithStatus().querySelector('.runStatusBadge')).toBeNull()
+    expect(innerNode().className).not.toContain('runFailed')
   })
 })

@@ -31,6 +31,15 @@ export function retryRunNotification(runID, index) {
   return postJSON(`/api/runs/${encodeURIComponent(runID)}/notifications/${encodeURIComponent(index)}/retry`, {})
 }
 
+// 审批动作只带备注和审批人：节点 ID 已经在路径里，body 两个字段都可省略。
+export function approveRunNode(runID, nodeID, payload = {}) {
+  return postJSON(`/api/runs/${encodeURIComponent(runID)}/approvals/${encodeURIComponent(nodeID)}/approve`, payload || {})
+}
+
+export function rejectRunNode(runID, nodeID, payload = {}) {
+  return postJSON(`/api/runs/${encodeURIComponent(runID)}/approvals/${encodeURIComponent(nodeID)}/reject`, payload || {})
+}
+
 export function fetchUIPreferences() {
   return fetchJSON('/api/ui/preferences')
 }

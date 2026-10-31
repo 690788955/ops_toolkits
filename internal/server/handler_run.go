@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +39,11 @@ func runsHandler(state *serverState) http.HandlerFunc {
 				handleRunUploadNode(w, req, state, reg, strings.Trim(runID, "/"), strings.Trim(nodeID, "/"), action)
 				return
 			}
+			escapedID := strings.TrimPrefix(req.URL.EscapedPath(), "/api/runs/")
+			if runID, nodeID, action, ok := parseRunApprovalPath(escapedID); ok {
+				handleRunApproval(w, req, state, reg, runID, nodeID, action)
+				return
+			}
 			if runID, action, ok := parseRunRecoveryPath(id); ok {
 				handleRunRecovery(w, req, state, reg, strings.Trim(runID, "/"), action)
 				return
@@ -62,9 +68,25 @@ func runsHandler(state *serverState) http.HandlerFunc {
 			query := req.URL.Query()
 			status := strings.ToLower(strings.TrimSpace(query.Get("status")))
 			keyword := strings.ToLower(strings.TrimSpace(query.Get("q")))
+			// kind/target 是精确过滤：工作流编辑器左栏只要“这个工作流的运行记录”，
+			// 用 q 模糊搜会把参数或审批提示里恰好提到该 ID 的运行也混进来。
+			kind := strings.ToLower(strings.TrimSpace(query.Get("kind")))
+			target := strings.TrimSpace(query.Get("target"))
+			// 审批等待中的运行本身仍是 running，单靠 status 分不出来，
+			// 所以给列表单独的 awaiting 过滤，顶栏与列表页只需一次请求就能拿到待确认数量。
+			awaiting := queryFlag(query.Get("awaiting")) || queryFlag(query.Get("awaiting_approval"))
 			filtered := make([]runbundle.Summary, 0, len(items))
 			for _, item := range items {
 				if status != "" && item.Status != status {
+					continue
+				}
+				if kind != "" && strings.ToLower(item.Kind) != kind {
+					continue
+				}
+				if target != "" && item.Target != target {
+					continue
+				}
+				if awaiting && !item.AwaitingApproval {
 					continue
 				}
 				if keyword != "" && !runSummaryMatches(item, keyword) {
@@ -153,6 +175,82 @@ func parseRunRecoveryPath(path string) (string, string, bool) {
 	default:
 		return "", "", false
 	}
+}
+
+// parseRunApprovalPath 解析 POST /api/runs/{run}/approvals/{node}/{approve|reject}。
+func parseRunApprovalPath(path string) (string, string, string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 4 || parts[1] != "approvals" {
+		return "", "", "", false
+	}
+	// Split the escaped path before decoding IDs that may contain a slash.
+	runID, runErr := url.PathUnescape(parts[0])
+	nodeID, nodeErr := url.PathUnescape(parts[2])
+	if runErr != nil || nodeErr != nil || runID == "" || nodeID == "" {
+		return "", "", "", false
+	}
+	switch parts[3] {
+	case "approve", "reject":
+		return runID, nodeID, parts[3], true
+	default:
+		return "", "", "", false
+	}
+}
+
+type runApprovalRequest struct {
+	Note     string `json:"note"`
+	Reviewer string `json:"reviewer"`
+}
+
+// handleRunApproval 把人工决定投递给正在阻塞的审批节点。
+// 这里不领取运行锁：运行本身还活着，领取锁会把审批动作误当成“恢复动作”而互相阻塞。
+func handleRunApproval(w http.ResponseWriter, req *http.Request, state *serverState, reg *registry.Registry, runID, nodeID, action string) {
+	if strings.TrimSpace(runID) == "" || strings.TrimSpace(nodeID) == "" {
+		writeJSON(w, http.StatusNotFound, response{Error: "not found"})
+		return
+	}
+	if !state.hasActiveRun(runID) {
+		writeJSON(w, http.StatusConflict, response{Error: "运行任务不在本进程执行（可能已结束或服务已重启），无法提交审批"})
+		return
+	}
+	detail, err := loadRunDetail(state, reg, runID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, response{Error: err.Error()})
+		return
+	}
+	record := detail.Record
+	if !hasWaitingApproval(record, nodeID) {
+		writeJSON(w, http.StatusBadRequest, response{Status: record.Status, Error: fmt.Sprintf("运行 %s 的节点 %s 当前不在等待人工审批", runID, nodeID)})
+		return
+	}
+	var body runApprovalRequest
+	if req.Body != nil {
+		_ = json.NewDecoder(req.Body).Decode(&body)
+	}
+	// 内容长度只做展示用，限制一下避免把整段日志塞进运行记录。
+	note := strings.TrimSpace(body.Note)
+	if len([]rune(note)) > 500 {
+		note = string([]rune(note)[:500])
+	}
+	reviewer := strings.TrimSpace(body.Reviewer)
+	var actionErr error
+	if action == "approve" {
+		actionErr = runner.ApproveWorkflowNode(runID, nodeID, note, reviewer)
+	} else {
+		actionErr = runner.RejectWorkflowNode(runID, nodeID, note, reviewer)
+	}
+	writeReconciledRun(w, reg, runID, record, actionErr)
+}
+
+func hasWaitingApproval(record runner.RunRecord, nodeID string) bool {
+	for index := len(record.Approvals) - 1; index >= 0; index-- {
+		item := record.Approvals[index]
+		if item.NodeID != nodeID {
+			continue
+		}
+		return item.Status == runner.ApprovalStatusWaiting
+	}
+	return false
 }
 
 func parseRunNotificationRetryPath(path string) (string, int, bool) {

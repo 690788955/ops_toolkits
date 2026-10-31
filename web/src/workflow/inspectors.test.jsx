@@ -4,7 +4,7 @@ import React, {act, useState} from 'react'
 import {createRoot} from 'react-dom/client'
 import {expect, it} from 'vitest'
 import {NodeConfigEditor} from './inspectors.jsx'
-import {serializeNotifyConfig, serializeScriptConfig} from './model.js'
+import {serializeApprovalConfig, serializeNotifyConfig, serializeScriptConfig} from './model.js'
 
 it('Shell 环境变量可以添加空行、输入大小写名称并删除', async () => {
   let latest
@@ -36,6 +36,47 @@ it('Shell 环境变量可以添加空行、输入大小写名称并删除', asyn
     await act(async () => { host.querySelector('.httpHeaderRow button').click() })
     expect(host.querySelector('.httpHeaderRow')).toBeNull()
     expect(serializeScriptConfig(latest).env).toBeUndefined()
+  } finally {
+    await act(async () => { root.unmount() })
+    host.remove()
+  }
+})
+
+it('人工审批节点可以填提示与超时，并说明这是停机点', async () => {
+  let latest
+  function Harness() {
+    const [node, setNode] = useState({id: 'gate', type: 'controlNode', data: {controlType: 'approval', approval: {message: '', timeout: ''}}})
+    latest = node.data.approval
+    return <NodeConfigEditor node={node} tools={[]} nodes={[]} hosts={[]} sources={[]} onApprovalChange={approval => setNode(current => ({...current, data: {...current.data, approval}}))} />
+  }
+  const host = document.createElement('div')
+  document.body.appendChild(host)
+  const root = createRoot(host)
+  const setValue = (element, value) => {
+    const prototype = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(element, value)
+    element.dispatchEvent(new Event('input', {bubbles: true}))
+  }
+  try {
+    await act(async () => { root.render(<Harness />) })
+
+    const message = host.querySelector('textarea')
+    expect(message.placeholder).toContain('{{ .参数 }}')
+    const timeout = Array.from(host.querySelectorAll('input')).find(input => input.placeholder === '可留空=一直等待，例如 30m、2h')
+    expect(timeout).toBeTruthy()
+    expect(host.textContent).toContain('这是停机点')
+    expect(host.textContent).toContain('确认与驳回的入口在运行日志面板的审批条上')
+    // 空配置不写任何字段，避免把空字符串当成 0 时长写进 YAML。
+    expect(serializeApprovalConfig(latest)).toEqual({})
+
+    const messageSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
+    await act(async () => {
+      messageSetter.call(message, '确认配置已改好后继续')
+      message.dispatchEvent(new Event('input', {bubbles: true}))
+    })
+    await act(async () => { setValue(timeout, '1h30m') })
+
+    expect(serializeApprovalConfig(latest)).toEqual({message: '确认配置已改好后继续', timeout: '1h30m'})
   } finally {
     await act(async () => { root.unmount() })
     host.remove()

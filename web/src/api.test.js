@@ -1,5 +1,5 @@
 import {afterEach, describe, expect, it, vi} from 'vitest'
-import {bindWorkflowConfigPath, bootstrapAuthTokenFromURL, createMarketSource, deleteMarketSource, deleteNexusPlugin, downloadUserWorkflowExport, downloadWorkflowExport, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusPlugins, importWorkflows, nexusDownloadURL, postJSON, postMarketInstall, postNexusPluginZip, postPluginZip, postRunUploadNode, postRunUploadNodeChunked, rebuildNexusIndex, testMarketSource, updateMarketSource, uploadWorkflowConfigFile} from './api.js'
+import {approveRunNode, bindWorkflowConfigPath, bootstrapAuthTokenFromURL, createMarketSource, deleteMarketSource, deleteNexusPlugin, downloadUserWorkflowExport, downloadWorkflowExport, fetchJSON, fetchMarket, fetchMarketSources, fetchNexusPlugins, importWorkflows, nexusDownloadURL, postJSON, postMarketInstall, postNexusPluginZip, postPluginZip, postRunUploadNode, postRunUploadNodeChunked, rebuildNexusIndex, rejectRunNode, testMarketSource, updateMarketSource, uploadWorkflowConfigFile} from './api.js'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -283,5 +283,33 @@ describe('api helpers', () => {
     expect(fetch.mock.calls[0][0]).toBe('/api/nexus/rebuild?source=nexus')
     expect(fetch.mock.calls[0][1].method).toBe('POST')
     expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({})
+  })
+
+  it('posts approval decisions to the run node endpoints', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ok: true, json: async () => ({id: 'run-1', status: 'running', data: {record: {id: 'run-1'}}})})))
+
+    await expect(approveRunNode('run-1', 'gate', {note: '配置已改好'})).resolves.toMatchObject({id: 'run-1'})
+    await expect(rejectRunNode('run-1', 'gate', {})).resolves.toMatchObject({id: 'run-1'})
+    await approveRunNode('run 2', 'gate/1')
+
+    expect(fetch.mock.calls.map(call => call[0])).toEqual([
+      '/api/runs/run-1/approvals/gate/approve',
+      '/api/runs/run-1/approvals/gate/reject',
+      '/api/runs/run%202/approvals/gate%2F1/approve'
+    ])
+    expect(fetch.mock.calls.every(call => call[1].method === 'POST')).toBe(true)
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({note: '配置已改好'})
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual({})
+    expect(JSON.parse(fetch.mock.calls[2][1].body)).toEqual({})
+  })
+
+  it('surfaces backend approval errors with status and body', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ok: false, status: 400, statusText: 'Bad Request', json: async () => ({error: '该节点当前不在等待审批状态'})})))
+
+    await expect(approveRunNode('run-1', 'gate', {})).rejects.toMatchObject({
+      message: '该节点当前不在等待审批状态',
+      status: 400,
+      body: {error: '该节点当前不在等待审批状态'}
+    })
   })
 })

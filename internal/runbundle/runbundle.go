@@ -30,6 +30,21 @@ type Summary struct {
 	EndedAt   time.Time         `json:"ended_at"`
 	Params    map[string]string `json:"params,omitempty"`
 	Error     string            `json:"error,omitempty"`
+
+	// AwaitingApproval 让运行列表不必再读详情就能标出“卡在人工审批”的运行，
+	// 顶栏与列表页因此可以在任何分类下提示用户回到运行记录去确认。
+	AwaitingApproval bool             `json:"awaiting_approval,omitempty"`
+	Approval         *SummaryApproval `json:"approval,omitempty"`
+	// ApprovalActionable 由 server 侧补：审批闸门只存在于执行这条运行的进程里，
+	// CLI 启动的运行虽然也停在审批节点，但从 Web 端提交动作一定失败，需要提前说清楚。
+	ApprovalActionable *bool `json:"approval_actionable,omitempty"`
+}
+
+// SummaryApproval 是审批节点的最小展示信息：谁在等、等什么、从什么时候开始等。
+type SummaryApproval struct {
+	NodeID  string    `json:"node_id"`
+	Message string    `json:"message,omitempty"`
+	Since   time.Time `json:"since"`
 }
 
 type CleanupOptions struct {
@@ -73,7 +88,7 @@ func List(reg *registry.Registry) ([]Summary, error) {
 		if err != nil {
 			continue
 		}
-		out = append(out, summaryFromRecord(record))
+		out = append(out, Summarize(record))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].StartedAt.After(out[j].StartedAt)
@@ -268,8 +283,10 @@ func RunDir(reg *registry.Registry, id string) (string, error) {
 	return filepath.Join(runsDir(reg), id), nil
 }
 
-func summaryFromRecord(record runner.RunRecord) Summary {
-	return Summary{
+// Summarize 把运行记录压成列表项；审批状态一并带上，
+// 运行列表与顶栏提示不必再逐条读取详情。
+func Summarize(record runner.RunRecord) Summary {
+	summary := Summary{
 		ID:        record.ID,
 		Kind:      record.Kind,
 		Target:    record.Target,
@@ -282,6 +299,11 @@ func summaryFromRecord(record runner.RunRecord) Summary {
 		Params:    redactFlatParams(record.Params, recordSensitivePaths(record)...),
 		Error:     record.Error,
 	}
+	if approval, ok := runner.WaitingApproval(record); ok {
+		summary.AwaitingApproval = true
+		summary.Approval = &SummaryApproval{NodeID: approval.NodeID, Message: approval.Message, Since: approval.Since}
+	}
+	return summary
 }
 
 func addSummary(zw *zip.Writer, reg *registry.Registry, record runner.RunRecord) error {
@@ -292,7 +314,7 @@ func addSummary(zw *zip.Writer, reg *registry.Registry, record runner.RunRecord)
 			"version": reg.Root.App.Version,
 		},
 		"base_dir":       relativePath(reg.BaseDir, reg.BaseDir),
-		"run":            summaryFromRecord(record),
+		"run":            Summarize(record),
 		"doctor_summary": summarizeDoctor(doctorReport),
 		"warnings":       reg.Warnings,
 	}

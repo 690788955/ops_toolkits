@@ -95,6 +95,11 @@ func printWorkflowHelp(out io.Writer, wf *registry.Workflow) {
 			printUploadNodeHelp(out, node)
 			continue
 		}
+		if nodeType == config.WorkflowNodeTypeApproval {
+			fmt.Fprintf(out, "  %s\t编排节点/人工审批\t提示=%s\t等待上限=%s\t（需要在平台运行日志里确认）\n",
+				node.ID, fallbackText(node.Approval.Message, "未填写"), fallbackText(node.Approval.Timeout, "不限"))
+			continue
+		}
 		fmt.Fprintf(out, "  %s\t工具节点\t工具=%s", node.ID, node.Tool)
 		if node.Name != "" {
 			fmt.Fprintf(out, "\t%s", node.Name)

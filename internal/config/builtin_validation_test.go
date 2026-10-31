@@ -41,6 +41,28 @@ func TestValidateChecksumConfigPreservesTemplateCase(t *testing.T) {
 	}
 }
 
+func TestValidateApprovalConfigNormalizesAndRejectsBadTimeout(t *testing.T) {
+	for _, timeout := range []string{"0s", "-1m", "later"} {
+		t.Run(timeout, func(t *testing.T) {
+			if _, err := ValidateApprovalConfig("gate", WorkflowApproval{Message: "确认", Timeout: timeout}); err == nil {
+				t.Fatal("无效等待时长不应被接受")
+			}
+		})
+	}
+	got, err := ValidateApprovalConfig("gate", WorkflowApproval{Message: "  改好配置后继续  ", Timeout: " 30m "})
+	if err != nil || got.Message != "改好配置后继续" || got.Timeout != "30m" {
+		t.Fatalf("有效审批配置未归一化: %+v, %v", got, err)
+	}
+	// 留空表示一直等待，不能按“0 秒超时”理解。
+	if got, err := ValidateApprovalConfig("gate", WorkflowApproval{Message: "确认"}); err != nil || got.Timeout != "" {
+		t.Fatalf("空超时被拒绝: %+v, %v", got, err)
+	}
+	long := strings.Repeat("审", approvalMessageMaxRunes+1)
+	if _, err := ValidateApprovalConfig("gate", WorkflowApproval{Message: long}); err == nil {
+		t.Fatal("超长提示应被拒绝")
+	}
+}
+
 func TestValidateWaitConfigRejectsInvalidLimits(t *testing.T) {
 	for name, wait := range map[string]WorkflowWait{
 		"zero_interval":     {PollURL: "https://example.invalid", Interval: "0s"},

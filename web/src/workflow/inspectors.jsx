@@ -7,6 +7,7 @@ import {
   archiveFormats,
   checksumAlgorithms,
   defaultArchiveConfig as modelDefaultArchiveConfig,
+  defaultApprovalConfig as modelDefaultApprovalConfig,
   defaultChecksumConfig as modelDefaultChecksumConfig,
   defaultExtractConfig as modelDefaultExtractConfig,
   defaultCondition,
@@ -21,6 +22,7 @@ import {
   httpBodyTypes,
   httpMethods,
   normalizeArchiveConfig,
+  normalizeApprovalConfig,
   normalizeChecksumConfig,
   normalizeExtractConfig,
   normalizeHttpBodyType,
@@ -88,7 +90,7 @@ function StageAssignmentEditor({node, stages = [], nodes = [], disabled = false,
   )
 }
 
-function NodeConfigEditor({node, tool, loopTool, tools, nodes, stages = [], hosts = [], sources, paramsText, setParamsText, onNameChange, onConditionChange, onLoopChange, onUploadChange, onExtractConfigChange, onHttpChange, onScriptChange, onChecksumChange, onArchiveChange, onWaitChange, onNotifyChange, onParamChange, onLoopParamChange, onApplyParams, onHostChange, onStageChange, onStageMove, stageDisabled = false}) {
+function NodeConfigEditor({node, tool, loopTool, tools, nodes, stages = [], hosts = [], sources, paramsText, setParamsText, onNameChange, onConditionChange, onLoopChange, onUploadChange, onExtractConfigChange, onHttpChange, onScriptChange, onChecksumChange, onArchiveChange, onWaitChange, onNotifyChange, onApprovalChange, onParamChange, onLoopParamChange, onApplyParams, onHostChange, onStageChange, onStageMove, stageDisabled = false}) {
   if (!node) return null
   return (
     <div className="form nodeConfigEditor">
@@ -103,7 +105,7 @@ function NodeConfigEditor({node, tool, loopTool, tools, nodes, stages = [], host
       {node.type === 'conditionNode' ? (
         <ConditionEditor node={node} sources={sources} onNameChange={onNameChange} onChange={onConditionChange} />
       ) : node.type === 'controlNode' ? (
-        <ControlNodeInspector node={node} tools={tools} nodes={nodes} hosts={hosts} loopTool={loopTool} sources={sources} onNameChange={onNameChange} onLoopChange={onLoopChange} onUploadChange={onUploadChange} onExtractConfigChange={onExtractConfigChange} onHttpChange={onHttpChange} onScriptChange={onScriptChange} onChecksumChange={onChecksumChange} onArchiveChange={onArchiveChange} onWaitChange={onWaitChange} onNotifyChange={onNotifyChange} onLoopParamChange={onLoopParamChange} onHostChange={onHostChange} />
+        <ControlNodeInspector node={node} tools={tools} nodes={nodes} hosts={hosts} loopTool={loopTool} sources={sources} onNameChange={onNameChange} onLoopChange={onLoopChange} onUploadChange={onUploadChange} onExtractConfigChange={onExtractConfigChange} onHttpChange={onHttpChange} onScriptChange={onScriptChange} onChecksumChange={onChecksumChange} onArchiveChange={onArchiveChange} onWaitChange={onWaitChange} onNotifyChange={onNotifyChange} onApprovalChange={onApprovalChange} onLoopParamChange={onLoopParamChange} onHostChange={onHostChange} />
       ) : (
         <ToolNodeConfigEditor
           node={node}
@@ -266,7 +268,7 @@ function ConditionEditor({node, sources, onNameChange, onChange}) {
   )
 }
 
-function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onNameChange, onLoopChange, onUploadChange, onExtractConfigChange, onHttpChange, onScriptChange, onChecksumChange, onArchiveChange, onWaitChange, onNotifyChange, onLoopParamChange, onHostChange}) {
+function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onNameChange, onLoopChange, onUploadChange, onExtractConfigChange, onHttpChange, onScriptChange, onChecksumChange, onArchiveChange, onWaitChange, onNotifyChange, onApprovalChange, onLoopParamChange, onHostChange}) {
   const isLoop = node.data.controlType === 'loop'
   const loop = normalizeLoopConfig(node.data.loop || modelDefaultLoop())
   const isUpload = node.data.controlType === 'upload'
@@ -277,6 +279,7 @@ function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onN
   const isArchive = node.data.controlType === 'archive'
   const isWait = node.data.controlType === 'wait'
   const isNotify = node.data.controlType === 'notify'
+  const isApproval = node.data.controlType === 'approval'
   const category = controlNodeCategory(node.data.controlType)
   const upload = normalizeUploadConfig(node.data.upload || modelDefaultUpload())
   const extract = normalizeExtractConfig(node.data.extract_config || modelDefaultExtractConfig())
@@ -286,6 +289,7 @@ function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onN
   const archive = normalizeArchiveConfig(node.data.archive || modelDefaultArchiveConfig())
   const wait = normalizeWaitConfig(node.data.wait || modelDefaultWaitConfig())
   const notify = normalizeNotifyConfig(node.data.notify || modelDefaultNotifyConfig())
+  const approval = normalizeApprovalConfig(node.data.approval || modelDefaultApprovalConfig())
   function updateLoop(patch) {
     onLoopChange(normalizeLoopConfig({...loop, ...patch}))
   }
@@ -309,6 +313,9 @@ function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onN
   }
   function updateNotify(patch) {
     onNotifyChange(normalizeNotifyConfig({...notify, ...patch}))
+  }
+  function updateApproval(patch) {
+    onApprovalChange(normalizeApprovalConfig({...approval, ...patch}))
   }
   function changeLoopTool(toolID) {
     const tool = (tools || []).find(item => item.id === toolID)
@@ -388,6 +395,8 @@ function ControlNodeInspector({node, tools, nodes, hosts, loopTool, sources, onN
         <WaitEditor wait={wait} onChange={updateWait} />
       ) : isNotify ? (
         <NotifyEditor notify={notify} onChange={updateNotify} />
+      ) : isApproval ? (
+        <ApprovalEditor approval={approval} onChange={updateApproval} />
       ) : (
         <div className="empty small">{controlNodeHelp(node.data.controlType)}。该节点不需要配置工具或参数，运行时自身记录为成功。</div>
       )}
@@ -635,6 +644,28 @@ function WaitEditor({wait, onChange}) {
           <div className="empty small">固定等待期间可以随时取消运行；最长 3600 秒。</div>
         </>
       )}
+    </>
+  )
+}
+
+function ApprovalEditor({approval, onChange}) {
+  return (
+    <>
+      <label>
+        <span>审批提示</span>
+        <textarea
+          className="smallTextarea"
+          value={approval.message}
+          placeholder="可留空，例如：确认配置文件已改好后继续；支持 {{ .参数 }} 运行期模板"
+          onChange={event => onChange({message: event.target.value})}
+        />
+      </label>
+      <div className="empty small">这是停机点：运行到这里会中断流水线，运行状态保持 running，直到有人在运行日志里点确认才继续；提示文案支持 {`{{ .参数 }}`} 与上游步骤输出。</div>
+      <label>
+        <span>等待超时</span>
+        <input value={approval.timeout} placeholder="可留空=一直等待，例如 30m、2h" onChange={event => onChange({timeout: event.target.value})} />
+      </label>
+      <div className="empty small">确认与驳回的入口在运行日志面板的审批条上，节点配置里没有动作按钮；超时未处理会按失败结束本次运行。</div>
     </>
   )
 }

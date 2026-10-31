@@ -75,6 +75,7 @@ type RunRecord struct {
 	Params        map[string]string      `json:"params"`
 	Config        map[string]interface{} `json:"config,omitempty"`
 	Steps         []StepRecord           `json:"steps,omitempty"`
+	Approvals     []ApprovalRecord       `json:"approvals,omitempty"`
 	Error         string                 `json:"error,omitempty"`
 	Snapshot      *RunSnapshot           `json:"snapshot,omitempty"`
 	Pending       *PendingState          `json:"pending,omitempty"`
@@ -822,6 +823,40 @@ func (r *Runner) dispatchWorkflowNode(ctx context.Context, wf *config.WorkflowCo
 		exec.activate(node.ID, "", false)
 		return nil
 	}
+	if nodeType == config.WorkflowNodeTypeApproval {
+		message := strings.TrimSpace(renderTemplate(node.Approval.Message, contextSnapshot))
+		// 模板可以按参数决定等多久；渲染后仍然非法时直接失败，避免静默变成“无限等待”。
+		timeout := time.Duration(0)
+		if timeoutText := strings.TrimSpace(renderTemplate(node.Approval.Timeout, contextSnapshot)); timeoutText != "" {
+			parsed, parseErr := time.ParseDuration(timeoutText)
+			if parseErr != nil || parsed <= 0 {
+				failed := StepRecord{ID: node.ID, Type: nodeType, Status: "failed", StartedAt: time.Now(), EndedAt: time.Now(), Error: fmt.Sprintf("审批节点 %s 的等待超时 %q 无效", node.ID, timeoutText)}
+				exec.appendStep(failed)
+				return errors.New(failed.Error)
+			}
+			timeout = parsed
+		}
+		// 先把 waiting 状态写进运行记录再阻塞：前端轮询和事件流才能立刻展示审批条。
+		stepRecord := StepRecord{ID: node.ID, Type: nodeType, Status: "waiting", StartedAt: time.Now()}
+		stepRunDir := filepath.Join(exec.runDir, node.ID)
+		stepIndex := exec.appendStep(stepRecord)
+		approval, approvalErr := exec.runApprovalNode(ctx, node, message, timeout, stepRunDir, out)
+		stepRecord.EndedAt = time.Now()
+		if approvalErr != nil {
+			approvalErr = workflowNodeError(ctx, node.ID, approvalErr)
+			markStepFailure(&stepRecord, approvalErr)
+			exec.updateStep(stepIndex, stepRecord)
+			return exec.recoveryFailure(node, approvalErr)
+		}
+		exec.writeContext(func(workflowContext map[string]string) {
+			addStepContext(workflowContext, node.ID, nil, stepRunDir, nil)
+			addApprovalContext(workflowContext, node.ID, approval)
+		})
+		stepRecord.Status = "succeeded"
+		exec.updateStep(stepIndex, stepRecord)
+		exec.activate(node.ID, "", false)
+		return nil
+	}
 	if nodeType == config.WorkflowNodeTypeLoop {
 		loopHostID := loopNodeHostID(node, exec.nodeByID)
 		host, hostErr := r.remoteHost(loopHostID)
@@ -1325,6 +1360,11 @@ func (r *Runner) rebuildWorkflowContextFromSteps(context map[string]string, step
 		case config.WorkflowNodeTypeWait:
 			addStepContext(context, step.ID, nil, filepath.Join(runDir, step.ID), nil)
 			addWaitContext(context, step.ID, filepath.Join(runDir, step.ID))
+			activatePlainBranches(step.ID, edgesByFrom, active)
+		case config.WorkflowNodeTypeApproval:
+			// 审批结论直接来自节点目录，重跑时不必重新向人工要一次。
+			addStepContext(context, step.ID, nil, filepath.Join(runDir, step.ID), nil)
+			addApprovalContext(context, step.ID, readApprovalMeta(filepath.Join(runDir, step.ID)))
 			activatePlainBranches(step.ID, edgesByFrom, active)
 		default:
 			outputs := r.outputsForWorkflowStep(node)
@@ -2293,12 +2333,11 @@ func (r *Runner) executeTool(ctx context.Context, tool *registry.Tool, values ma
 		if absPath, err := filepath.Abs(globalEnvPath); err == nil {
 			localEnv = append(localEnv, "OPS_GLOBAL_ENV_FILE="+absPath)
 		}
-		cmd := buildCommand(execCtx, entry, *tool.Config, params, paramFile, workdir, localEnv)
-		configureCommandCancellation(cmd)
-		if !usesWSLBash(entry) {
-			cmd.Dir = workdir
-			cmd.Env = append(os.Environ(), localEnv...)
+		cmd, buildErr := buildCommand(execCtx, entry, *tool.Config, params, paramFile, workdir, localEnv)
+		if buildErr != nil {
+			return fmt.Errorf("执行工具 %s 失败: %w", tool.Config.ID, buildErr)
 		}
+		configureCommandCancellation(cmd)
 		cmd.Stdout = stdoutWriter
 		cmd.Stderr = stderrWriter
 		if err := cmd.Run(); err != nil {
@@ -2321,16 +2360,27 @@ func resolveEntry(toolDir, entry string) string {
 	return filepath.Join(toolDir, filepath.FromSlash(entry))
 }
 
-func buildCommand(ctx context.Context, entry string, tool config.ToolConfig, params map[string]string, paramFile, workdir string, extraEnv []string) *exec.Cmd {
+func buildCommand(ctx context.Context, entry string, tool config.ToolConfig, params map[string]string, paramFile, workdir string, extraEnv []string) (*exec.Cmd, error) {
 	args := commandArgs(tool, params, paramFile)
+	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" && strings.EqualFold(filepath.Ext(entry), ".sh") {
-		bash, wsl := bashRuntime()
-		if wsl {
-			return exec.CommandContext(ctx, bash, "-lc", wslBashScript(entry, workdir, extraEnv, args))
+		shell := detectBashRuntime()
+		if shell.err != nil {
+			return nil, shell.err
 		}
-		return exec.CommandContext(ctx, bash, append([]string{filepath.ToSlash(entry)}, args...)...)
+		if shell.wsl {
+			script := wslBashScript(entry, workdir, extraEnv, args)
+			return exec.CommandContext(ctx, shell.exe, append(append([]string{}, shell.prefix...), "-lc", script)...), nil
+		}
+		cmd = exec.CommandContext(ctx, shell.exe, append([]string{filepath.ToSlash(entry)}, commandArgsForBash(args)...)...)
+		// Only Bash scripts need converted paths; native executables need Windows paths.
+		extraEnv = normalizeEnvForBash(extraEnv)
+	} else {
+		cmd = exec.CommandContext(ctx, entry, args...)
 	}
-	return exec.CommandContext(ctx, entry, args...)
+	cmd.Dir = workdir
+	cmd.Env = append(os.Environ(), extraEnv...)
+	return cmd, nil
 }
 
 func configureCommandCancellation(cmd *exec.Cmd) {
@@ -2406,20 +2456,244 @@ func isShellEnvName(value string) bool {
 }
 
 func isWSLBash() bool {
-	_, wsl := bashRuntime()
-	return wsl
+	return detectBashRuntime().wsl
 }
 
-// bashRuntime 返回执行 .sh 的 bash 路径及是否为 WSL。
-// Windows PATH 中 System32 可能排在 Git 之前，直接 LookPath 会命中 WSL 启动器，
-// 因此按 PATH 顺序优先选择非 WSL 的 bash。
-func bashRuntime() (string, bool) {
-	if runtime.GOOS != "windows" {
-		return "bash", false
+// DetectBash 把“本机用哪个 bash 跑 .sh”暴露给 doctor 与排障入口，
+// 找不到时返回带安装建议的错误，而不是让 exec 报一句 executable file not found。
+func DetectBash() (string, bool, error) {
+	shell := detectBashRuntime()
+	if shell.err != nil {
+		return "", false, shell.err
 	}
-	return findBash(os.Getenv("PATH"), isWSLBashPath)
+	return shell.exe, shell.wsl, nil
 }
 
+// bashRuntimeInfo 描述本机执行 .sh 的方式：普通 bash，或需要经 wsl.exe 进入发行版的 bash。
+type bashRuntimeInfo struct {
+	exe    string
+	wsl    bool
+	prefix []string
+	err    error
+}
+
+var (
+	bashRuntimeMu    sync.Mutex
+	bashRuntimeValue *bashRuntimeInfo
+)
+
+// detectBashRuntime 只探测一次：装完 Git/WSL 重启进程即可生效，避免每条命令都扫盘与读注册表。
+func detectBashRuntime() bashRuntimeInfo {
+	bashRuntimeMu.Lock()
+	defer bashRuntimeMu.Unlock()
+	if bashRuntimeValue == nil {
+		value := resolveBashRuntime()
+		bashRuntimeValue = &value
+	}
+	return *bashRuntimeValue
+}
+
+func resolveBashRuntime() bashRuntimeInfo {
+	if runtime.GOOS != "windows" {
+		return bashRuntimeInfo{exe: "bash"}
+	}
+	var wslBash *bashRuntimeInfo
+	for _, candidate := range bashCandidates() {
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if isWSLBashPath(candidate) {
+			if wslBash == nil {
+				wslBash = &bashRuntimeInfo{exe: candidate, wsl: true}
+			}
+			continue
+		}
+		return bashRuntimeInfo{exe: candidate}
+	}
+	if wslBash != nil {
+		return *wslBash
+	}
+	if launcher := wslLauncherPath(); launcher != "" {
+		return bashRuntimeInfo{exe: launcher, wsl: true, prefix: []string{"bash"}}
+	}
+	return bashRuntimeInfo{err: fmt.Errorf("未找到 bash：Shell 脚本和插件工具需要 bash 才能在本机执行。请安装 Git for Windows（自带 Git Bash）或在 WSL 中安装一个发行版（wsl --install）后重启 opsctl；已检查 PATH、Git 安装目录、msys2/cygwin 常见目录与 WSL")}
+}
+
+// bashCandidates 按“用户主动安装的位置优先”列出候选 bash.exe：
+// PATH → Git（PATH 上的 git、注册表 InstallPath、常见安装根、本程序所在盘）→ msys2/cygwin。
+func bashCandidates() []string {
+	seen := map[string]bool{}
+	out := []string{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		clean := filepath.Clean(path)
+		key := strings.ToLower(clean)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, clean)
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if strings.TrimSpace(dir) != "" {
+			add(filepath.Join(dir, "bash.exe"))
+		}
+	}
+	for _, path := range gitBashCandidates(gitInstallDirs()) {
+		add(path)
+	}
+	systemDrive := os.Getenv("SystemDrive")
+	if strings.TrimSpace(systemDrive) == "" {
+		systemDrive = "C:"
+	}
+	for _, path := range []string{
+		filepath.Join(systemDrive+string(os.PathSeparator), "msys64", "usr", "bin", "bash.exe"),
+		filepath.Join(systemDrive+string(os.PathSeparator), "msys32", "usr", "bin", "bash.exe"),
+		filepath.Join(systemDrive+string(os.PathSeparator), "cygwin64", "bin", "bash.exe"),
+		filepath.Join(systemDrive+string(os.PathSeparator), "cygwin", "bin", "bash.exe"),
+	} {
+		add(path)
+	}
+	return out
+}
+
+// gitInstallDirs 收集可能装有 Git for Windows 的根目录；gitBashCandidates 再拼出 bash.exe。
+func gitInstallDirs() []string {
+	dirs := []string{}
+	if gitExe, err := exec.LookPath("git"); err == nil {
+		dir := filepath.Dir(gitExe)
+		// Git\cmd\git.exe 与 Git\mingw64\bin\git.exe 都通过上一层回到 Git 根目录。
+		dirs = append(dirs, dir, filepath.Dir(dir))
+	}
+	dirs = append(dirs, registryGitInstallDirs()...)
+	for _, base := range []string{
+		os.Getenv("ProgramFiles"),
+		os.Getenv("ProgramW6432"),
+		os.Getenv("ProgramFiles(x86)"),
+		os.Getenv("LocalAppData"),
+	} {
+		if strings.TrimSpace(base) == "" {
+			continue
+		}
+		dirs = append(dirs, filepath.Join(base, "Git"), filepath.Join(base, "Programs", "Git"))
+	}
+	// 便携版常把 Git 装在 opsctl 所在盘，而不是系统盘的 Program Files。
+	if exe, err := os.Executable(); err == nil {
+		if volume := filepath.VolumeName(exe); volume != "" {
+			dirs = append(dirs, filepath.Join(volume+string(os.PathSeparator), "Program Files", "Git"))
+		}
+	}
+	if profile := os.Getenv("USERPROFILE"); strings.TrimSpace(profile) != "" {
+		dirs = append(dirs, filepath.Join(profile, "scoop", "apps", "git", "current"))
+	}
+	return dirs
+}
+
+func gitBashCandidates(dirs []string) []string {
+	out := []string{}
+	for _, dir := range dirs {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		out = append(out,
+			filepath.Join(dir, "bin", "bash.exe"),
+			filepath.Join(dir, "usr", "bin", "bash.exe"),
+			filepath.Join(dir, "bash.exe"),
+		)
+	}
+	return out
+}
+
+// wslLauncherPath 只在确实登记了发行版时才返回 wsl.exe：
+// 未安装发行版的 wsl.exe 会把「请先运行 wsl --install」当成命令输出，直接用它只会得到更费解的报错。
+func wslLauncherPath() string {
+	root := os.Getenv("SystemRoot")
+	if strings.TrimSpace(root) == "" {
+		root = `C:\Windows`
+	}
+	launcher := filepath.Join(root, "System32", "wsl.exe")
+	if info, err := os.Stat(launcher); err != nil || info.IsDir() {
+		return ""
+	}
+	if !wslDistroAvailable(launcher) {
+		return ""
+	}
+	return launcher
+}
+
+// wsl -l -q 的输出是 UTF-16LE，这里只判断是否至少登记了一个发行版。
+func wslDistroAvailable(launcher string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, launcher, "-l", "-q").Output()
+	if err != nil {
+		return false
+	}
+	text := strings.ReplaceAll(string(out), "\x00", "")
+	return strings.TrimSpace(text) != ""
+}
+
+// bashPathFor 把本机路径换成当前 bash 能识别的写法：WSL 要 /mnt/c/...，Git Bash 要 C:/...。
+func bashPathFor(path string) string {
+	if runtime.GOOS != "windows" || strings.TrimSpace(path) == "" {
+		return path
+	}
+	if isWSLBash() {
+		return windowsPathToWSLOrSlash(path)
+	}
+	return filepath.ToSlash(path)
+}
+
+// commandArgsForBash 只改写“看起来是 Windows 绝对路径”的参数，其余原样传给脚本。
+func commandArgsForBash(args []string) []string {
+	if runtime.GOOS != "windows" || len(args) == 0 {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		if looksLikeWindowsAbsPath(arg) {
+			out = append(out, bashPathFor(arg))
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out
+}
+
+// normalizeEnvForBash 只改写值是 Windows 绝对路径的环境变量，普通字符串保持原样，
+// 避免把 JSON、正则之类带反斜杠的值改坏。
+func normalizeEnvForBash(env []string) []string {
+	if runtime.GOOS != "windows" || len(env) == 0 {
+		return env
+	}
+	out := make([]string, 0, len(env))
+	for _, item := range env {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok || !looksLikeWindowsAbsPath(value) {
+			out = append(out, item)
+			continue
+		}
+		out = append(out, key+"="+bashPathFor(value))
+	}
+	return out
+}
+
+func looksLikeWindowsAbsPath(value string) bool {
+	if len(value) < 3 || value[1] != ':' {
+		return false
+	}
+	if value[2] != '\\' && value[2] != '/' {
+		return false
+	}
+	symbol := value[0]
+	return symbol >= 'a' && symbol <= 'z' || symbol >= 'A' && symbol <= 'Z'
+}
+
+// findBash 在给定 PATH 中优先选择非 WSL 的 bash，保留给单元测试与显式 PATH 探测使用。
 func findBash(pathValue string, isWSL func(string) bool) (string, bool) {
 	fallback := ""
 	for _, dir := range filepath.SplitList(pathValue) {

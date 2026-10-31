@@ -26,7 +26,7 @@ export const nodeCategories = [
   {
     id: 'flow',
     label: '流程控制',
-    hint: '分支 / 循环 / 等待',
+    hint: '分支 / 循环 / 等待 / 审批',
     accent: '#4f46e5',
     surface: '#eef1ff',
     shape: 'decision',
@@ -195,6 +195,18 @@ export const controlNodeCatalog = [
     description: '把上游结果推送到 Webhook、企业微信或邮件',
     help: '标题与正文支持运行期模板；发送失败会让节点失败，适合放在流程末尾',
     aliases: ['notify', 'webhook', 'wecom', 'wechat', 'email', 'smtp', 'mail', 'alert', '通知', '告警', '邮件', '企业微信', '推送']
+  },
+  {
+    type: 'approval',
+    category: 'flow',
+    status: 'ready',
+    shape: 'gateway',
+    symbol: '✓',
+    title: '人工审批',
+    secondary: 'Manual Approval',
+    description: '执行到这里暂停流水线，等待人工点击确认后才继续',
+    help: '停机点：审批前可以先改配置文件或调整前置服务，确认后继续执行下游；驳回会让运行失败',
+    aliases: ['approval', 'approve', 'reject', 'confirm', 'manual', 'gate', '审批', '确认', '人工', '暂停', '卡点', '驳回']
   }
 ]
 

@@ -605,6 +605,14 @@ input:not([type="checkbox"]):not([type="radio"]):disabled { color: var(--color-m
 .primary:disabled, .secondary:disabled { cursor: not-allowed; opacity: .45; }
 .buttonRow { display: flex; flex-wrap: wrap; gap: 10px; }
 .buttonRow button, .buttonRow a { flex: 1; min-width: 88px; text-align: center; text-decoration: none; }
+/* 参数较多时执行按钮会掉到可视区外，这里让它在卡片内吸底，保证始终可见。 */
+.runCard .buttonRow {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  padding: 10px 0;
+  background: var(--color-surface);
+}
 .compactButtonRow button, .compactButtonRow a { flex: 0 1 auto; }
 .empty { color: var(--color-muted); padding: 18px; line-height: 1.4; }
 .empty.small { padding: 12px; }
@@ -730,10 +738,13 @@ input:not([type="checkbox"]):not([type="radio"]):disabled { color: var(--color-m
   white-space: nowrap;
 }
 .runSummary a:hover { text-decoration: underline; }
+/* 运行记录页：左「运行记录」列表 + 右「记录详情/运行日志」。中间那一列就是拖动条，
+   列宽由 --run-history-list-width 决定（用户拖过才写，没拖过保持原来的 340~440 自适应）。 */
 .runHistoryLayout {
+  --pane-gap: 20px;
   display: grid;
-  grid-template-columns: minmax(340px, 440px) minmax(0, 1fr);
-  gap: 20px;
+  grid-template-columns: var(--run-history-list-width, minmax(340px, 440px)) var(--pane-gap) minmax(0, 1fr);
+  gap: 0;
 }
 .runHistoryListCard, .runHistoryDetailCard { min-width: 0; }
 .runHistoryHeaderActions { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -2468,6 +2479,7 @@ pre {
 .canvasCard .react-flow__edges { z-index: 1; }
 /* portal 是 viewport 下的普通子节点，会按内容收缩；固定到画布尺寸，子元素的百分比/弹性宽度才有正确参照。 */
 .react-flow__viewport-portal { position: absolute; top: 0; left: 0; z-index: 0; pointer-events: none; }
+.canvasCard .react-flow__nodes { z-index: 1; }
 .react-flow__node {
   z-index: 5;
   color: var(--color-black);
@@ -4711,6 +4723,7 @@ fieldset legend {
   .app { padding: 18px; gap: 20px; }
   .content { padding: 16px 0 48px; }
   .grid, .runHistoryLayout { grid-template-columns: 1fr; }
+  .runHistoryLayout > .resizeHandle { display: none; }
   .topbar { align-items: flex-start; flex-direction: column; gap: 14px; }
   .pluginInstalledHeader { grid-template-columns: 1fr; }
   .pluginInstalledHeaderActions { justify-content: flex-start; }
@@ -5159,8 +5172,10 @@ fieldset legend {
 
 .workflowWorkspace {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
   min-width: 0;
+  container-type: inline-size;
 }
 
 .workflowTopBar {
@@ -5586,11 +5601,23 @@ fieldset legend {
 
 .workflowRunDockHeader {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 10px 14px;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 14px;
 }
+.workflowRunDockHeading, .workflowRunDockTitle, .workflowRunDockWindowActions { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.workflowRunDockHeading { justify-content: space-between; }
+.workflowRunDockTitle strong { font-size: 14px; white-space: nowrap; }
+.workflowRunDockTitle .workflowRunStatusChip { font-size: 11px; white-space: nowrap; }
+.workflowRunDockWindowActions { flex: 0 0 auto; }
+.workflowRunDockMeta { display: grid; gap: 4px; min-width: 0; color: var(--color-muted); font-size: 12px; }
+.workflowRunDockMeta code, .workflowRunDockMeta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workflowRunDockMeta code { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; }
+.workflowRunFocusRow { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; border-bottom: 1px solid var(--color-border); padding: 8px 14px; background: var(--color-panel); }
+.workflowRunFocusRow .workflowRunFocusChip { flex: 1; min-width: 0; overflow: hidden; border: 0; padding: 0; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.workflowRunFocusRow button { flex: 0 0 auto; }
 
 .workflowRunDock.open .workflowRunDockHeader { border-bottom: 1px solid var(--color-border); }
 
@@ -5618,7 +5645,8 @@ fieldset legend {
   font-size: 11px;
 }
 
-.workflowRunDockActions { display: flex; flex: 0 0 auto; gap: 8px; }
+.workflowRunDockActions { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 6px; }
+.workflowRunDockActions button { padding: 5px 10px; font-size: 12px; }
 
 .workflowRunDockBody {
   display: grid;
@@ -5656,6 +5684,412 @@ fieldset legend {
 .workflowRunNodeName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 800; }
 .workflowRunDockNodes small { color: var(--color-muted); font-size: 11px; font-weight: 800; white-space: nowrap; }
 .workflowRunDockDetail { min-width: 0; overflow: auto; padding: 12px 16px 16px; }
+
+/* 工作流工作台：左栏“运行记录” + 画布 + 右栏“运行详情”，三栏等高，画布独占剩余宽度。
+   两侧栏宽度由用户拖动分隔条自定义（--workflow-rail-width / --workflow-run-panel-width）。 */
+.workflowWorkspaceBody {
+  --pane-gap: 14px;
+  display: flex;
+  align-items: stretch;
+  gap: var(--pane-gap);
+  min-width: 0;
+}
+
+.workflowWorkspaceBody > .workflowCanvasArea { flex: 1 1 auto; min-width: 0; }
+
+.workflowRunRail {
+  display: flex;
+  flex: 0 0 auto;
+  flex-basis: var(--workflow-rail-width, 248px);
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  height: clamp(620px, 68vh, 760px);
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 16px;
+  padding: 12px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-standard);
+}
+
+.workflowRunRailHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.workflowRunRailHeader > div { flex: 1 1 auto; min-width: 0; }
+.workflowRunRailHeader strong { color: var(--color-black); font-size: 13px; font-weight: 900; }
+.workflowRunRailHeader span {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.workflowRunRailList { display: flex; flex: 1 1 auto; flex-direction: column; gap: 6px; min-height: 0; overflow: auto; }
+.workflowRunRailItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  padding: 7px 9px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.workflowRunRailItem:hover { border-color: var(--color-border); background: var(--color-panel); }
+.workflowRunRailItem.active { border-color: var(--color-black); background: var(--color-surface); box-shadow: inset 3px 0 0 var(--color-black); }
+.workflowRunRailItemMain { display: flex; flex: 1 1 auto; flex-direction: column; gap: 2px; min-width: 0; }
+.workflowRunRailItemMain strong {
+  overflow: hidden;
+  color: var(--color-black);
+  font-size: 12px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workflowRunRailItemMain small { color: var(--color-muted); font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.workflowRunRailItem em { flex: 0 0 auto; font-style: normal; }
+.workflowRunRailFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid var(--color-border);
+  padding-top: 8px;
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+.workflowRunRailMessage { padding: 4px 2px; color: var(--color-muted); font-size: 11px; font-weight: 700; line-height: 1.45; }
+
+.workflowRunBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  padding: 8px 12px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-standard);
+}
+.workflowRunBarMain {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-width: 0;
+  color: var(--color-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+.workflowRunBarMain code {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 2px 6px;
+  background: var(--color-panel);
+  font-size: 11px;
+}
+.workflowRunBarHint { color: var(--color-muted); font-size: 12px; font-weight: 700; }
+.workflowRunBarActions { display: flex; flex: 0 0 auto; gap: 8px; }
+.workflowCanvasModeControl button { white-space: nowrap; }
+
+/* 右栏运行详情：概览看结论，日志看输出并聚焦到正在执行的节点。 */
+.workflowRunPanelHost:not(.workflowLogWindowBackdrop) {
+  display: flex;
+  flex: 0 0 auto;
+  flex-basis: var(--workflow-run-panel-width, clamp(340px, 34%, 440px));
+  flex-direction: column;
+  min-width: 0;
+  height: clamp(620px, 68vh, 760px);
+}
+.workflowRunPanelContainer, .workflowRunPanelContainer > .workflowRunDock {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.runRecordCanvasBody > .workflowRunDock .workflowRunDockNodes,
+.workflowWorkspaceBody > .workflowRunDock .workflowRunDockNodes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 170px;
+  overflow: auto;
+  border-bottom: 1px solid var(--color-border);
+  padding: 8px 10px;
+}
+.runRecordCanvasBody > .workflowRunDock .workflowRunDockDetail,
+.workflowWorkspaceBody > .workflowRunDock .workflowRunDockDetail { flex: 1 1 auto; min-height: 0; }
+
+/* 右栏就是运行日志页：折叠区在上面，日志吃掉剩下的全部高度。 */
+.workflowRunDock .workflowRunPanelSection {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 38%;
+  overflow: auto;
+  border-bottom: 1px solid var(--color-border);
+  padding: 12px 14px;
+  background: var(--color-panel);
+}
+.workflowRunDock .workflowRunPanelLogs { display: flex; flex: 1 1 auto; min-height: 0; }
+.workflowRunDock .workflowRunPanelLogs > .runLogView { flex: 1 1 auto; min-width: 0; }
+.workflowRunDock .runLogBox { flex: 1 1 auto; max-height: none; min-height: 90px; border-radius: 0; }
+.workflowRunDock .runLogToolbar { padding: 10px 12px 0; }
+.workflowRunDock .runLogView { gap: 6px; }
+.workflowRunDock .logFilterTags { margin: 0; }
+.workflowRunDockActions button.secondary.active {
+  border-color: var(--color-black);
+  background: var(--color-black);
+  color: var(--color-surface);
+}
+.workflowRunFocusChip {
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-pill);
+  padding: 2px 8px;
+  color: var(--color-text);
+}
+.runLogLine.running { background: rgba(255,255,255,.05); }
+.runLogOwner.running { background: rgba(255,255,255,.16); }
+
+/* 点节点看日志的放大窗口：又宽又高，整段输出一次看全，不用在窄栏里滚。 */
+.workflowLogWindowBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3vh 3vw;
+  background: rgba(15,17,21,.42);
+}
+.workflowLogWindow {
+  display: flex;
+  flex-direction: column;
+  width: min(1180px, 94vw);
+  height: min(88vh, 900px);
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 18px;
+  background: var(--color-surface);
+  box-shadow: 0 24px 60px rgba(15,17,21,.28);
+}
+.workflowLogWindowBar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--color-border);
+  padding: 10px 14px;
+}
+.workflowLogWindowTitle { color: var(--color-black); font-size: 14px; font-weight: 900; }
+.workflowLogWindowHint { flex: 1 1 auto; color: var(--color-muted); font-size: 12px; font-weight: 700; }
+.workflowLogWindow > .workflowRunDock {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.workflowLogWindow .workflowRunPanelSection { max-height: 40%; }
+
+/* 运行记录页的画布：与工作流工作台同一套只读画布 + 右栏详情，这里没有左栏运行记录。 */
+.runRecordCanvasBody { --pane-gap: 12px; display: flex; align-items: stretch; gap: var(--pane-gap); min-width: 0; }
+.runRecordCanvasBody > .runRecordCanvasViewport { flex: 1 1 auto; min-width: 0; }
+
+/* 分栏拖动条：透明地盖在两栏之间的间隙上（负外边距抵消容器 gap），
+   平时看不见，悬停/聚焦/拖动时才浮出一条竖线，避免抢走日志和画布的视觉重量。 */
+.resizeHandle {
+  position: relative;
+  z-index: 6;
+  display: flex;
+  flex: 0 0 var(--pane-gap, 14px);
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+.resizeHandleGrip {
+  display: block;
+  width: 3px;
+  height: 72px;
+  max-height: 60%;
+  border-radius: var(--radius-pill);
+  background: var(--color-border);
+  opacity: .45;
+  transition: opacity .14s ease, background .14s ease;
+}
+.resizeHandle:hover .resizeHandleGrip,
+.resizeHandle:focus-visible .resizeHandleGrip,
+.resizeHandle[data-dragging="true"] .resizeHandleGrip { opacity: 1; }
+.resizeHandle[data-dragging="true"] .resizeHandleGrip { background: var(--color-black); }
+.resizeHandle:focus-visible { outline: 2px solid var(--color-black); outline-offset: -2px; border-radius: var(--radius-control); }
+.workflowWorkspaceBody > .resizeHandle,
+.runRecordCanvasBody > .resizeHandle { margin: 0 calc(var(--pane-gap, 14px) * -1); }
+
+.runLogView { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.runLogToolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.runLogToolbar > input { flex: 1 1 200px; min-width: 0; padding: 8px 10px; font-size: 12px; }
+.runLogToolbar .terminalToggle { display: inline-flex; flex: 0 0 auto; white-space: nowrap; }
+.runLogToolbar .terminalToggle input { flex: none; width: 14px; height: 14px; }
+.runLogToolbar > button { flex: 0 0 auto; }
+.runLogToolbar .runLogCount { margin-left: auto; }
+.runLogCount { color: var(--color-muted); font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
+/* 搜索命中跳转：只在搜索时出现，替用户数清楚“第几处 / 共几处”。 */
+.runLogHitNav { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; }
+.runLogHitPosition {
+  min-width: 54px;
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+/* 日志容器外面套一层定位层：滚动区里面放绝对定位按钮会跟着滚，放在外面才固定住。 */
+.runLogBoxWrap { position: relative; display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.runLogBoxWrap > .runLogBox { flex: 1 1 auto; min-height: 0; }
+.runLogJumpLatest {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  z-index: 2;
+  border: 1px solid rgba(255,255,255,.22);
+  border-radius: var(--radius-pill);
+  padding: 5px 12px;
+  background: rgba(24,27,34,.92);
+  color: #e6e8ee;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0,0,0,.28);
+}
+.runLogJumpLatest:hover { background: #232833; }
+.runLogBox {
+  max-height: 460px;
+  overflow: auto;
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #0f1115;
+  color: #e6e8ee;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+/* 自动换行关掉：长行横向滚动，保留原始缩进对齐，适合看表格类输出。 */
+.runLogBox[data-wrap="off"] { white-space: pre; word-break: normal; overflow-x: auto; }
+.runLogLine.stderr { color: #ff9d9d; }
+.runLogLine.level-fatal,
+.runLogLine.level-error { color: #ff9d9d; }
+.runLogLine.level-warning,
+.runLogLine.level-changed { color: #ffd08a; }
+.runLogLine.level-success,
+.runLogLine.level-ok { color: #8ce99a; }
+.runLogLine.level-header { color: #9dc1ff; font-weight: 700; }
+.runLogLine.focus { background: rgba(255,255,255,.08); }
+.runLogLine.current { background: rgba(255,213,74,.16); box-shadow: inset 2px 0 0 #ffd54a; }
+/* 命中关键字就地高亮，滚动时一眼能看到命中的是哪个词。 */
+.runLogHit { border-radius: 3px; padding: 0 1px; background: #ffd54a; color: #16181d; }
+.runLogOwner {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 4px;
+  border-radius: 6px;
+  padding: 2px 6px;
+  background: rgba(255,255,255,.1);
+  color: #c7ccd8;
+  font-weight: 800;
+}
+.runLogOwnerName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runLogOwnerMeta { flex: 0 0 auto; margin-left: auto; color: #9aa3b2; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.runLogOwner.focus { background: #2d6cdf; color: #fff; }
+.runLogOwner.focus .runLogOwnerMeta { color: rgba(255,255,255,.82); }
+.runLogTruncated { margin-top: 8px; color: #ffd08a; font-size: 11px; font-weight: 700; }
+
+.nodeRunOverview { display: flex; flex-direction: column; gap: 12px; }
+.nodeRunFacts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.nodeRunFacts div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.nodeRunFacts dt { color: var(--color-muted); font-size: 11px; font-weight: 800; }
+.nodeRunFacts dd { margin: 0; font-size: 12px; font-weight: 800; word-break: break-all; }
+.nodeRunError,
+.nodeRunNotice { display: flex; flex-direction: column; gap: 4px; border-radius: 10px; padding: 8px 10px; font-size: 12px; }
+.nodeRunError { border: 1px solid var(--color-danger-border); background: var(--color-danger-bg); color: var(--color-danger); }
+.nodeRunNotice { border: 1px solid var(--color-border); background: var(--color-panel); color: var(--color-muted); }
+.nodeRunParams { display: flex; flex-direction: column; gap: 6px; }
+.nodeRunParams strong { color: var(--color-black); font-size: 12px; font-weight: 900; }
+.nodeRunParams ul { display: flex; flex-direction: column; gap: 4px; max-height: 240px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.nodeRunParams li { display: flex; gap: 8px; font-size: 12px; }
+.nodeRunParams code { border-radius: 5px; padding: 1px 5px; background: var(--color-panel); font-size: 11px; }
+.nodeRunParams span { min-width: 0; word-break: break-all; }
+.nodeRunActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+
+/* 窄屏优先保住画布宽度：先收窄两侧栏，再让侧栏退场（记录栏也可以从顶栏手动收起）。
+   用户拖过宽度就以拖出来的为准，这里的默认值只在没拖过时兜底。 */
+@media (max-width: 1500px) {
+  .workflowRunRail { flex-basis: var(--workflow-rail-width, 208px); }
+}
+
+@media (max-width: 1180px) {
+  .workflowRunRail { flex-basis: var(--workflow-rail-width, 180px); }
+  .runRecordCanvasBody { flex-wrap: wrap; }
+  .runRecordCanvasBody > .resizeHandle { display: none; }
+  .runRecordCanvasBody > .workflowRunPanelHost:not(.workflowLogWindowBackdrop) { flex: 1 1 100%; height: 560px; }
+}
+
+@container (max-width: 1040px) {
+  .workflowWorkspaceBody { flex-wrap: wrap; }
+  .workflowWorkspaceBody > .resizeHandle { display: none; }
+  .workflowWorkspaceBody > .workflowCanvasArea { flex: 1 1 360px; }
+  .workflowWorkspaceBody > .workflowRunPanelHost:not(.workflowLogWindowBackdrop) { flex: 1 1 100%; height: 560px; }
+}
+
+@container (max-width: 640px) {
+  .workflowWorkspaceBody { flex-direction: column; }
+  .workflowWorkspaceBody > .workflowRunRail { flex: none; width: 100%; height: 200px; }
+  .workflowWorkspaceBody > .workflowCanvasArea { flex: none; width: 100%; }
+  .workflowWorkspaceBody > .workflowRunPanelHost:not(.workflowLogWindowBackdrop) { flex: none; width: 100%; height: 560px; }
+  .workflowRunBar { align-items: stretch; flex-direction: column; }
+  .workflowRunBarMain code { max-width: 100%; }
+  .workflowRunApprovalActions { width: 100%; }
+  .workflowRunApprovalActions input { flex: 1 1 100%; min-width: 0; }
+}
+
+/* 审批条：停机时唯一可操作的地方，用警告色贴着运行日志头部，保证不用展开也能看到。 */
+.workflowRunApprovalBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--color-warning-border);
+  padding: 10px 14px;
+  background: var(--color-warning-bg);
+}
+
+.workflowRunApprovalText { display: grid; gap: 2px; min-width: 0; }
+.workflowRunApprovalText strong { color: var(--color-warning-text); font-size: 13px; font-weight: 900; }
+.workflowRunApprovalText span { color: var(--color-muted); font-size: 12px; font-weight: 700; line-height: 1.45; word-break: break-word; }
+.workflowRunApprovalMeta { font-variant-numeric: tabular-nums; }
+.workflowRunApprovalActions { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 8px; }
+.workflowRunApprovalActions input { min-width: 220px; }
 
 .workflowRunStatusChip {
   border: 1px solid var(--color-border);
@@ -6744,4 +7178,193 @@ fieldset legend {
   .sshFormGrid { grid-template-columns: minmax(0, 1fr); }
   .sshHostCard { grid-template-columns: minmax(0, 1fr); }
   .sshHostActions { justify-content: flex-start; }
+}
+
+/* ===== 人工审批：全局面包屑横幅 + 运行记录页待审批区块 =====
+   待审批用警告色（橙），和「失败」的红色刻意分开：它不是错误，是等人拍板。 */
+
+/* 横幅挂在 topbar 与 tabs 之间，任何 tab 都能看到，所以不能依赖某个面板的样式。 */
+.runAwaitingBanner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 18px;
+  margin: 0 0 20px;
+  border: 1px solid var(--color-warning-border);
+  border-left: 4px solid #d99200;
+  border-radius: var(--radius-control);
+  padding: 12px 16px;
+  background: var(--color-warning-bg);
+  box-shadow: var(--shadow-whisper);
+}
+.runAwaitingBannerText { display: grid; gap: 3px; min-width: 0; }
+.runAwaitingBannerText > strong {
+  color: var(--color-warning-text);
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+.runAwaitingBannerItem {
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.runAwaitingBannerMore { color: var(--color-muted); font-size: 12px; font-weight: 700; }
+.runAwaitingBannerButton { flex: 0 0 auto; }
+
+/* 运行记录 tab 上的计数：沿用 tabCount 的形状，用警告色把它和普通数量区分开。 */
+.tabCount.tabCountAwaiting { color: #7a4700; background: #ffe6bd; font-weight: 900; }
+.tab.active .tabCount.tabCountAwaiting { color: #7a4700; background: #ffdca8; }
+
+/* 列表头与筛选 chip */
+.cardHeader h3 .runHistoryAwaitingCount {
+  display: inline-grid;
+  margin-left: 8px;
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-pill);
+  padding: 2px 9px;
+  color: var(--color-warning-text);
+  background: var(--color-warning-bg);
+  font-size: 11px;
+  font-weight: 900;
+  vertical-align: middle;
+}
+.tagChip.runAwaitingChip {
+  border-color: var(--color-warning-border);
+  color: var(--color-warning-text);
+  background: var(--color-warning-bg);
+  font-weight: 900;
+}
+.tagChip.runAwaitingChip.active {
+  border-color: #d99200;
+  color: #7a4700;
+  background: #ffe6bd;
+  box-shadow: inset 0 0 0 1px #ffd6a6;
+}
+
+/* 列表项改版：awaiting 的整行用警告色左框 + 底色，扫一眼就能定位。 */
+.runHistoryItem.awaiting {
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+  box-shadow: inset 3px 0 0 #d99200;
+}
+.runHistoryItem.awaiting:hover,
+.runHistoryItem.awaiting.active { border-color: #d99200; }
+.runHistoryItem .runHistoryItemMain { display: grid; gap: 4px; min-width: 0; }
+.runHistoryItem .runHistoryItemTitle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.runHistoryItem .runHistoryItemTitle strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-black);
+  font-size: 14px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.runHistoryItem .runHistoryKind {
+  flex: 0 0 auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  padding: 1px 8px;
+  color: var(--color-muted);
+  background: var(--color-surface);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.5;
+}
+.runHistoryItem .runHistoryItemID {
+  overflow: hidden;
+  color: var(--color-muted);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.runHistoryItem .runHistoryAwaitingMessage {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #7a4700;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.runHistoryItem .runHistoryAwaitingMeta {
+  color: var(--color-warning-text);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+/* 状态徽标：等待审批时仍然是 running，所以文案是「运行中 · 待审批」，颜色按待审批走。 */
+.runHistoryItem .runStatusText.awaiting,
+.runStatusText.awaiting {
+  border-color: var(--color-warning-border);
+  color: #7a4700;
+  background: #ffe6bd;
+}
+.runHistoryItemActions {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 2;
+  justify-self: end;
+  gap: 8px;
+}
+.runHistoryItemActions button { padding: 6px 12px; font-size: 12px; }
+
+/* 详情审批卡片：日志视图和画布视图上方都要出现，所以挂在视图分支外面。 */
+.runApprovalCard {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 18px;
+  margin: 0 0 14px;
+  border: 1px solid var(--color-warning-border);
+  border-left: 4px solid #d99200;
+  border-radius: var(--radius-control);
+  padding: 12px 14px;
+  background: var(--color-warning-bg);
+}
+.runApprovalCardText { display: grid; min-width: 0; gap: 3px; }
+.runApprovalCardText > strong { color: var(--color-warning-text); font-size: 14px; font-weight: 900; }
+.runApprovalCardText > span { color: var(--color-text); font-size: 12px; font-weight: 700; line-height: 1.45; overflow-wrap: anywhere; }
+.runApprovalCardMeta { color: var(--color-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.runApprovalCardActions { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 8px; }
+.runApprovalCardActions input { min-width: 200px; }
+/* 由 CLI 等其它进程启动的运行：Web 端提交审批必然失败，卡片降级为说明态而不是报错态。 */
+.runApprovalCard.locked { border-left-color: var(--color-muted); background: var(--color-surface); }
+.runApprovalCard.locked .runApprovalCardText > strong { color: var(--color-text); }
+.runApprovalCardLockedNote { color: var(--color-muted) !important; font-weight: 700 !important; }
+.runHistoryAwaitingLocked {
+  align-self: center;
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+/* 窄屏：左右分栏会叠成一列，横幅和审批卡片都必须换行，否则按钮会被挤出可视区。 */
+@media (max-width: 1100px) {
+  .runAwaitingBanner { align-items: flex-start; flex-direction: column; }
+  .runAwaitingBannerButton { align-self: flex-start; }
+  .runApprovalCard { align-items: flex-start; flex-direction: column; }
+  .runApprovalCardActions { align-self: stretch; }
+  .runApprovalCardActions input { flex: 1 1 160px; min-width: 0; }
+  .runHistoryItemActions { justify-self: start; grid-column: 1 / -1; }
 }

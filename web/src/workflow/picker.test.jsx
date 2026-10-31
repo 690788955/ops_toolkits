@@ -175,13 +175,19 @@ describe('NodePickerPanel 节点分类折叠', () => {
     expect(builtinHead.getAttribute('aria-expanded')).toBe('true')
 
     const flowItems = host.querySelectorAll('.nodePickerCategory.cat-flow .nodePickerItem')
-    expect(flowItems).toHaveLength(3)
+    expect(flowItems).toHaveLength(4)
     expect(Array.from(flowItems).map(item => [item.querySelector('b').textContent, item.disabled])).toEqual([
       ['条件分支', false],
       ['循环', false],
-      ['等待 / 轮询', false]
+      ['等待 / 轮询', false],
+      ['人工审批', false]
     ])
     expect(host.querySelector('.nodePickerCategory.cat-flow').textContent).not.toContain('旧流程兼容')
+
+    await act(async () => {
+      flowItems[3].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}))
+    })
+    expect(onAddControl).toHaveBeenCalledWith('approval')
 
     const builtinItems = host.querySelectorAll('.nodePickerCategory.cat-builtin .nodePickerItem')
     expect(builtinItems).toHaveLength(3)

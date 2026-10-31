@@ -640,6 +640,9 @@ func displayStepType(step runner.StepRecord) string {
 	if step.Type == config.WorkflowNodeTypeHTTP {
 		return "内置节点/HTTP 调用"
 	}
+	if step.Type == config.WorkflowNodeTypeApproval {
+		return "编排节点/人工审批"
+	}
 	return "工具节点"
 }
 
